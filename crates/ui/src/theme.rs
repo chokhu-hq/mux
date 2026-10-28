@@ -17,6 +17,8 @@ pub mod radius {
     pub const SM: u8 = 4;
     pub const MD: u8 = 6;
     pub const LG: u8 = 10;
+    // large floating surfaces like the palette, the composer and message bubbles
+    pub const XL: u8 = 14;
     pub const FULL: u8 = u8::MAX;
 }
 
@@ -26,6 +28,14 @@ pub mod text {
     pub const LG: f32 = 15.0;
     pub const TITLE: f32 = 20.0;
     pub const MONO: f32 = 12.5;
+    pub const MONO_SM: f32 = 12.0;
+}
+
+pub mod icon {
+    pub const SM: f32 = 12.0;
+    pub const MD: f32 = 14.0;
+    pub const LG: f32 = 16.0;
+    pub const XL: f32 = 32.0;
 }
 
 pub mod font {
@@ -242,9 +252,8 @@ fn fonts() -> FontDefinitions {
             .insert(name.into(), Arc::new(FontData::from_static(bytes)));
     }
 
-    // phosphor first so icons can sit inline in labels, then egui's bundled fonts for emoji
-    let mut sans_fallback = vec![font::ICON.to_owned()];
-    sans_fallback.extend(defs.families[&FontFamily::Proportional].iter().cloned());
+    // icons are drawn with the icon font directly because inter has its own glyphs at some of phosphor's codepoints
+    let sans_fallback = defs.families[&FontFamily::Proportional].clone();
     let mono_fallback = defs.families[&FontFamily::Monospace].clone();
     for (family, primary, fallback) in [
         (FontFamily::Proportional, "inter", &sans_fallback),

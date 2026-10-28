@@ -12,6 +12,20 @@ pub fn screenshot(ctx: &Context) {
         return;
     };
     let id = Id::unique("mux-capture");
+    // MUX_SCREENSHOT_THEME picks light or dark, MUX_SCREENSHOT_ZOOM shrinks the ui to fit more in
+    if ctx.cumulative_frame_nr() == 0 {
+        match std::env::var("MUX_SCREENSHOT_THEME").as_deref() {
+            Ok("light") => ctx.set_theme(egui::Theme::Light),
+            Ok("dark") => ctx.set_theme(egui::Theme::Dark),
+            _ => {}
+        }
+        if let Some(zoom) = std::env::var("MUX_SCREENSHOT_ZOOM")
+            .ok()
+            .and_then(|z| z.parse().ok())
+        {
+            ctx.set_zoom_factor(zoom);
+        }
+    }
     let requested = ctx.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
     ctx.request_repaint();
     // MUX_SCREENSHOT_DELAY waits longer, for states that take a while to reach

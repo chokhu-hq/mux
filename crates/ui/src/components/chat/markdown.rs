@@ -106,7 +106,7 @@ fn append(job: &mut LayoutJob, buf: &mut String, p: &Palette, bold: bool, code: 
     }
     let format = if code {
         TextFormat {
-            font_id: font::mono(text::MONO - 0.5),
+            font_id: font::mono(text::MONO_SM),
             color: p.text,
             background: p.hover,
             ..Default::default()

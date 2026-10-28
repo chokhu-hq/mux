@@ -1,7 +1,7 @@
 use egui::{Align2, CornerRadius, Response, Sense, Ui, Vec2, WidgetInfo, pos2};
 
 use super::hover_t;
-use crate::theme::{self, control, font, radius, space, text};
+use crate::theme::{self, control, font, icon, radius, space, text};
 
 const MIN_WIDTH: f32 = 180.0;
 
@@ -33,7 +33,7 @@ impl<'a> MenuItem<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui);
         let icon_w = if self.icon.is_some() {
-            15.0 + space::SM
+            icon::MD + space::SM
         } else {
             0.0
         };
@@ -62,7 +62,7 @@ impl<'a> MenuItem<'a> {
             };
             ui.painter().rect_filled(
                 rect,
-                CornerRadius::same(radius::SM),
+                CornerRadius::same(radius::MD),
                 hover.gamma_multiply(t),
             );
             let mut x = rect.left() + space::SM;
@@ -71,10 +71,10 @@ impl<'a> MenuItem<'a> {
                     pos2(x, rect.center().y),
                     Align2::LEFT_CENTER,
                     icon,
-                    font::icon(15.0),
+                    font::icon(icon::MD),
                     if self.danger { fg } else { p.text_muted },
                 );
-                x += 15.0 + space::SM;
+                x += icon::MD + space::SM;
             }
             ui.painter().text(
                 pos2(x, rect.center().y),

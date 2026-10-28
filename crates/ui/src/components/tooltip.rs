@@ -110,7 +110,7 @@ fn show(response: Response, label: String, shortcut: Option<KeyboardShortcut>) -
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(&label)
-                                .font(font::regular(text::SM + 1.0))
+                                .font(font::regular(text::SM))
                                 .color(p.text),
                         );
                         if let Some(shortcut) = &shortcut {

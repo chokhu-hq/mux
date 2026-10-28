@@ -4,12 +4,13 @@ mod markdown;
 
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
 
+pub use cards::thinking;
 pub use composer::{Composer, ComposerAction};
 pub use markdown::markdown;
 
-use crate::components::Icon;
+use crate::components::EmptyState;
 use crate::icons;
-use crate::theme::{self, space};
+use crate::theme::space;
 
 const MAX_WIDTH: f32 = 720.0;
 
@@ -181,16 +182,9 @@ pub fn set_thinking(items: &mut Vec<ChatItem>, thinking: bool) {
 }
 
 fn empty(ui: &mut Ui) {
-    let p = theme::palette(ui);
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.4);
-        Icon::new(icons::CHAT_CIRCLE)
-            .size(28.0)
-            .color(p.text_faint)
-            .show(ui);
-        ui.add_space(space::SM);
-        ui.label(egui::RichText::new("Start a conversation").color(p.text_muted));
-    });
+    EmptyState::new(icons::CHAT_CIRCLE, "Start a conversation")
+        .detail("Ask the agent to plan, change or explain something in this project.")
+        .show(ui);
 }
 
 // placeholder conversation for the gallery and app until agents are wired up

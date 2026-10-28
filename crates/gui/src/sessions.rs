@@ -5,8 +5,13 @@ use eframe::egui::{
     UiBuilder, Vec2, pos2, vec2,
 };
 use mux_core::SessionKind;
-use mux_core::protocol::{ClientMsg, GroupInfo, ServerMsg, SessionInfo};
-use mux_ui::chat::{self, ChatAction, ChatItem, Decision, ToolCall, ToolKind, ToolStatus};
+use mux_core::protocol::{
+    self as wire, AgentItem, ClientMsg, GroupInfo, ItemStatus, ServerMsg, SessionInfo,
+};
+use mux_ui::chat::{
+    self, ChatItem, Decision, DiffKind, DiffLine, FileDiff, PermissionRequest, ToolCall, ToolKind,
+    ToolStatus,
+};
 use mux_ui::motion::{Spring, spring_bool};
 use mux_ui::theme::{self, radius};
 use mux_ui::{GroupHeader, MenuItem, SessionRow, TextInput, TooltipExt, icons};
@@ -16,69 +21,25 @@ use crate::terminal::Terminal;
 const ROW_GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 6.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum View {
-    Chat,
-    Terminal,
-}
-
 // per session state that only this window cares about
+#[derive(Default)]
 pub struct Local {
-    pub view: View,
-    pub chat: Vec<ChatItem>,
     pub draft: String,
-    pub thinking: bool,
     pub terminal: Option<Terminal>,
     pub attaching: bool,
+    // agent sessions: the server's transcript, and the chat items built from it
+    pub opened: bool,
+    pub busy: bool,
+    transcript: Vec<AgentItem>,
+    pub chat: Vec<ChatItem>,
+    // which approval each chat item answers, so a click can be sent back to the right one
+    pub approvals: Vec<Option<u64>>,
 }
 
 impl Local {
-    fn new(chat: Vec<ChatItem>) -> Self {
-        Self {
-            view: View::Chat,
-            chat,
-            draft: String::new(),
-            thinking: false,
-            terminal: None,
-            attaching: false,
-        }
-    }
-
-    // stands in for the agent until the server forwards these, so every chat state can be tried
-    pub fn chat_action(&mut self, action: ChatAction) {
-        match action {
-            ChatAction::Send(text) => {
-                self.chat.push(ChatItem::User(text));
-                self.thinking = true;
-            }
-            ChatAction::Stop => {
-                for item in &mut self.chat {
-                    if let ChatItem::Tool(tool) = item
-                        && tool.status == ToolStatus::Running
-                    {
-                        tool.status = ToolStatus::Failed;
-                    }
-                }
-                self.thinking = false;
-            }
-            ChatAction::Decide(i, decision) => {
-                let Some(ChatItem::Permission(request)) = self.chat.get_mut(i) else {
-                    return;
-                };
-                request.decision = Some(decision);
-                if decision != Decision::Deny {
-                    let command = request.detail.clone().unwrap_or_default();
-                    self.chat.push(ChatItem::Tool(ToolCall {
-                        kind: ToolKind::Run,
-                        target: command,
-                        status: ToolStatus::Running,
-                        output: None,
-                    }));
-                    self.thinking = true;
-                }
-            }
-        }
-        chat::set_thinking(&mut self.chat, self.thinking);
+    // rebuilt only when the transcript changes, not every frame
+    fn rebuild(&mut self) {
+        (self.chat, self.approvals) = chat_items(&self.transcript, self.busy);
     }
 }
 
@@ -113,7 +74,6 @@ pub struct Sessions {
     selected: Option<u64>,
     drag: Option<Drag>,
     loaded: bool,
-    sampled: bool,
     // the group whose name is being edited inline, with the draft name
     renaming: Option<(u64, String)>,
     pub outbox: Vec<ClientMsg>,
@@ -151,14 +111,37 @@ impl Sessions {
                     terminal.feed(&data);
                 }
             }
+            ServerMsg::AgentTranscript { id, items, busy } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.transcript = items;
+                    local.busy = busy;
+                    local.rebuild();
+                }
+            }
+            ServerMsg::AgentItem { id, index, item } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    match local.transcript.get_mut(index) {
+                        Some(slot) => *slot = item,
+                        None => local.transcript.push(item),
+                    }
+                    local.rebuild();
+                }
+            }
+            ServerMsg::AgentBusy { id, busy } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.busy = busy;
+                    local.rebuild();
+                }
+            }
         }
     }
 
-    // after a reconnect the server replays every terminal, so drop the stale local copies
+    // after a reconnect the server replays every terminal and transcript, so drop the stale local copies
     pub fn reset_terminals(&mut self) {
         for local in self.locals.values_mut() {
             local.terminal = None;
             local.attaching = false;
+            local.opened = false;
         }
     }
 
@@ -173,13 +156,29 @@ impl Sessions {
             .iter()
             .flat_map(|g| &g.sessions)
             .find(|s| s.id == id)?;
-        let local = self.locals.entry(id).or_insert_with(|| {
-            // the placeholder conversation goes to the first agent opened, until agents are wired up
-            let sample = info.kind == SessionKind::Agent && !self.sampled;
-            self.sampled |= sample;
-            Local::new(if sample { chat::sample() } else { Vec::new() })
-        });
+        let local = self.locals.entry(id).or_default();
         Some((info, local, &mut self.outbox))
+    }
+
+    // the id and folder of the group holding the selected session
+    pub fn selected_group(&self) -> Option<(u64, Option<String>)> {
+        let (g, _) = self.locate(self.selected?)?;
+        let group = &self.groups[g];
+        Some((group.id, group.path.clone()))
+    }
+
+    pub fn set_group_folder(&mut self, id: u64) {
+        let current = self
+            .groups
+            .iter()
+            .find(|g| g.id == id)
+            .and_then(|g| g.path.clone());
+        if let Some(path) = pick_folder(current.as_deref()) {
+            self.outbox.push(ClientMsg::SetGroupPath {
+                id,
+                path: Some(path),
+            });
+        }
     }
 
     // new sessions land next to whatever is selected, so they stay in the current project
@@ -426,19 +425,7 @@ impl Sessions {
                 Action::StartRename(id, name) => self.renaming = Some((id, name)),
                 Action::Rename(id, name) => self.outbox.push(ClientMsg::RenameGroup { id, name }),
                 Action::EndRename => self.renaming = None,
-                Action::ChangeFolder(id) => {
-                    let current = self
-                        .groups
-                        .iter()
-                        .find(|g| g.id == id)
-                        .and_then(|g| g.path.clone());
-                    if let Some(path) = pick_folder(current.as_deref()) {
-                        self.outbox.push(ClientMsg::SetGroupPath {
-                            id,
-                            path: Some(path),
-                        });
-                    }
-                }
+                Action::ChangeFolder(id) => self.set_group_folder(id),
                 Action::RemoveGroup(id) => self.outbox.push(ClientMsg::DeleteGroup { id }),
                 Action::Select(id) => self.selected = Some(id),
                 Action::Remove(id) => self.remove(id),
@@ -483,4 +470,169 @@ fn pick_folder(start: Option<&str>) -> Option<String> {
         dialog = dialog.set_directory(start);
     }
     Some(dialog.pick_folder()?.to_string_lossy().into_owned())
+}
+
+fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Option<u64>>) {
+    let mut items = Vec::new();
+    let mut approvals = Vec::new();
+    for entry in transcript {
+        let mut approval = None;
+        match entry {
+            AgentItem::User { text } => items.push(ChatItem::User(text.clone())),
+            // a reply that has started but not streamed any words yet shows as thinking instead
+            AgentItem::Assistant { text } if text.trim().is_empty() => continue,
+            AgentItem::Assistant { text } => items.push(ChatItem::Assistant(text.clone())),
+            AgentItem::Command {
+                command,
+                output,
+                status,
+                ..
+            } => items.push(ChatItem::Tool(ToolCall {
+                kind: ToolKind::Run,
+                target: shell_body(command),
+                status: tool_status(*status),
+                output: (!output.is_empty()).then(|| output.clone()),
+            })),
+            AgentItem::FileChange { changes, .. } => {
+                for change in changes {
+                    items.push(ChatItem::Diff(FileDiff {
+                        path: change.path.clone(),
+                        lines: diff_lines(&change.diff),
+                    }));
+                    approvals.push(None);
+                }
+                continue;
+            }
+            AgentItem::Approval {
+                id,
+                title,
+                detail,
+                decision,
+            } => {
+                approval = Some(*id);
+                items.push(ChatItem::Permission(PermissionRequest {
+                    title: title.clone(),
+                    detail: (!detail.is_empty()).then(|| shell_body(detail)),
+                    decision: decision.map(|d| match d {
+                        wire::Decision::Allow => Decision::Allow,
+                        wire::Decision::AlwaysAllow => Decision::AlwaysAllow,
+                        wire::Decision::Deny => Decision::Deny,
+                    }),
+                }));
+            }
+            AgentItem::Error { message } => {
+                items.push(ChatItem::Assistant(format!("**Error:** {message}")))
+            }
+        }
+        approvals.push(approval);
+    }
+    chat::set_thinking(&mut items, busy);
+    approvals.resize(items.len(), None);
+    (items, approvals)
+}
+
+fn tool_status(status: ItemStatus) -> ToolStatus {
+    match status {
+        ItemStatus::Running => ToolStatus::Running,
+        ItemStatus::Done => ToolStatus::Done,
+        ItemStatus::Failed | ItemStatus::Declined => ToolStatus::Failed,
+    }
+}
+
+// codex reports commands as `/usr/bin/bash -lc "..."`, and the quoted part is what people want to read
+fn shell_body(command: &str) -> String {
+    let unwrapped = ["-lc ", "-c "].iter().find_map(|flag| {
+        let (shell, body) = command.split_once(flag)?;
+        let name = shell.trim().rsplit('/').next()?;
+        ["bash", "sh", "zsh", "fish"]
+            .contains(&name)
+            .then_some(body.trim())
+    });
+    let Some(body) = unwrapped else {
+        return command.to_owned();
+    };
+    if let Some(inner) = body.strip_prefix('"').and_then(|b| b.strip_suffix('"')) {
+        inner.replace("\\\"", "\"").replace("\\\\", "\\")
+    } else if let Some(inner) = body.strip_prefix('\'').and_then(|b| b.strip_suffix('\'')) {
+        inner.to_owned()
+    } else {
+        body.to_owned()
+    }
+}
+
+fn diff_lines(diff: &str) -> Vec<DiffLine> {
+    let headers = ["--- ", "+++ ", "@@", "diff ", "index "];
+    let lines = diff
+        .lines()
+        .filter(|l| !headers.iter().any(|h| l.starts_with(h)));
+    // a brand new file can arrive as plain contents rather than a patch
+    let is_patch = diff.lines().any(|l| l.starts_with("@@"));
+    lines
+        .map(|line| {
+            let (kind, text) = match line.chars().next() {
+                _ if !is_patch => (DiffKind::Add, line),
+                Some('+') => (DiffKind::Add, &line[1..]),
+                Some('-') => (DiffKind::Remove, &line[1..]),
+                Some(' ') => (DiffKind::Context, &line[1..]),
+                _ => (DiffKind::Context, line),
+            };
+            DiffLine {
+                kind,
+                text: text.to_owned(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwraps_shell_commands() {
+        assert_eq!(
+            shell_body("/usr/bin/bash -lc \"printf 'hi\\\\n' > hello.txt\""),
+            "printf 'hi\\n' > hello.txt"
+        );
+        assert_eq!(shell_body("/bin/zsh -c 'ls -la'"), "ls -la");
+        assert_eq!(shell_body("cargo test -c foo"), "cargo test -c foo");
+    }
+
+    #[test]
+    fn approvals_line_up_with_chat_items() {
+        let transcript = vec![
+            AgentItem::User { text: "hi".into() },
+            AgentItem::FileChange {
+                changes: vec![
+                    wire::FileChange {
+                        path: "a".into(),
+                        diff: "@@ -1 +1 @@\n-old\n+new".into(),
+                    },
+                    wire::FileChange {
+                        path: "b".into(),
+                        diff: "fresh file".into(),
+                    },
+                ],
+                status: ItemStatus::Done,
+            },
+            AgentItem::Approval {
+                id: 9,
+                title: "Run?".into(),
+                detail: String::new(),
+                decision: None,
+            },
+        ];
+        let (items, approvals) = chat_items(&transcript, true);
+        assert_eq!(items.len(), 5, "user, two diffs, approval, thinking");
+        assert_eq!(approvals, vec![None, None, None, Some(9), None]);
+        let ChatItem::Diff(first) = &items[1] else {
+            panic!()
+        };
+        assert_eq!(first.lines.len(), 2);
+        assert_eq!(first.lines[0].kind, DiffKind::Remove);
+        let ChatItem::Diff(second) = &items[2] else {
+            panic!()
+        };
+        assert_eq!(second.lines[0].kind, DiffKind::Add);
+    }
 }

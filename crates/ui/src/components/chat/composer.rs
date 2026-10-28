@@ -6,7 +6,7 @@ use egui::{
 use crate::components::{IconButton, TooltipExt, hover_t, press_t};
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
-use crate::theme::{self, font, radius, space, text};
+use crate::theme::{self, font, icon, radius, space, text};
 
 pub enum ComposerAction {
     Send(String),
@@ -56,7 +56,7 @@ impl<'a> Composer<'a> {
                 p.border_strong
                     .lerp_to_gamma(p.accent.gamma_multiply(0.7), focus),
             ))
-            .corner_radius(radius::LG + 4)
+            .corner_radius(radius::XL)
             .inner_margin(Margin {
                 left: 12,
                 right: 8,
@@ -144,9 +144,9 @@ fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response 
     ui.painter()
         .circle_filled(rect.center(), rect.width() / 2.0, fill);
     let glyph = if stop {
-        font::icon_fill(11.0)
+        font::icon_fill(icon::SM)
     } else {
-        font::icon(14.0)
+        font::icon(icon::MD)
     };
     ui.painter()
         .text(rect.center(), Align2::CENTER_CENTER, icon, glyph, fg);

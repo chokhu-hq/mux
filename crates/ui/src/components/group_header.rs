@@ -8,7 +8,7 @@ use egui::{
 use super::hover_t;
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
-use crate::theme::{self, control, font, radius, space, text};
+use crate::theme::{self, control, font, icon, radius, space, text};
 
 pub struct GroupHeader<'a> {
     label: &'a str,
@@ -66,7 +66,7 @@ impl<'a> GroupHeader<'a> {
 
             let caret = ui.painter().layout_no_wrap(
                 icons::CARET_RIGHT.to_string(),
-                font::icon(12.0),
+                font::icon(icon::SM),
                 p.text_faint,
             );
             let center = pos2(rect.left() + space::SM + 6.0, rect.center().y);

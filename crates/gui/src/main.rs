@@ -5,14 +5,14 @@ use mux_ui::shortcut;
 use mux_ui::theme::{self, font, space, text};
 use mux_ui::window::{self, TITLEBAR_HEIGHT, WindowFrame};
 use mux_ui::{
-    Badge, Button, Command, CommandPalette, Icon, IconButton, SIDEBAR_SHORTCUT, Sidebar,
-    TooltipExt, icons,
+    Badge, Command, CommandPalette, EmptyState, IconButton, SIDEBAR_SHORTCUT, Sidebar, TooltipExt,
+    icons,
 };
 
 use link::Link;
-use mux_ui::Segmented;
-use mux_ui::chat::ChatView;
-use sessions::{Sessions, View};
+use mux_core::protocol as wire;
+use mux_ui::chat::{ChatAction, ChatView, Decision};
+use sessions::Sessions;
 
 mod connection;
 mod link;
@@ -67,7 +67,8 @@ struct App {
     palette: CommandPalette,
     sidebar: Sidebar,
     sessions: Sessions,
-    focused: Option<(u64, View)>,
+    // the terminal that last took focus, so switching sessions focuses the new one
+    focused: Option<u64>,
     link: Link,
 }
 
@@ -170,6 +171,7 @@ impl App {
 
     fn main_contents(&mut self, ui: &mut egui::Ui, run: &mut Option<&'static str>) {
         let p = theme::palette(ui);
+        let group = self.sessions.selected_group();
         if !self.link.is_up() {
             self.link_view(ui);
             return;
@@ -178,23 +180,13 @@ impl App {
             return;
         }
         let Some((session, local, outbox)) = self.sessions.selected() else {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.35);
-                Icon::new(icons::TERMINAL_WINDOW)
-                    .size(32.0)
-                    .color(p.text_faint)
-                    .show(ui);
-                ui.add_space(space::SM);
-                ui.label(egui::RichText::new("No session selected").color(p.text_muted));
-                ui.add_space(space::MD);
-                if Button::new("New agent session")
-                    .primary()
-                    .show(ui)
-                    .clicked()
-                {
-                    *run = Some("new-agent");
-                }
-            });
+            if EmptyState::new(icons::TERMINAL_WINDOW, "No session selected")
+                .detail("Pick a session from the sidebar, or start a new one.")
+                .action("New agent session")
+                .show(ui)
+            {
+                *run = Some("new-agent");
+            }
             return;
         };
 
@@ -213,17 +205,9 @@ impl App {
         Badge::kind(session.kind).show(&mut bar);
         let mut restart = false;
         bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if session.kind == SessionKind::Agent {
-                Segmented::new(
-                    &mut local.view,
-                    &[(View::Chat, "Chat"), (View::Terminal, "Terminal")],
-                )
-                .show(ui);
-            }
+            // an agent that finished its turn is just waiting for the next message, not ended
             let ended = matches!(session.status, SessionStatus::Done | SessionStatus::Failed);
-            let showing_terminal =
-                session.kind != SessionKind::Agent || local.view == View::Terminal;
-            if ended && showing_terminal {
+            if ended && session.kind != SessionKind::Agent {
                 restart = IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
                     .show(ui)
                     .tip("Restart")
@@ -245,16 +229,48 @@ impl App {
         if restart {
             outbox.push(ClientMsg::Restart { id });
         }
-        if session.kind == SessionKind::Agent && local.view == View::Chat {
+        if session.kind == SessionKind::Agent {
+            if let Some((group, None)) = group {
+                let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), rect.max);
+                let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
+                // agents are sandboxed to their folder, so they never run without one
+                let choose = EmptyState::new(icons::FOLDER_OPEN, "Choose a project folder")
+                    .detail("Agents can only read and change files inside their group's folder. Pick the project this agent should work on.")
+                    .action("Choose folder…")
+                    .show(&mut body_ui);
+                if choose {
+                    self.sessions.set_group_folder(group);
+                }
+                return;
+            }
+            if !local.opened {
+                outbox.push(ClientMsg::AgentOpen { id });
+                local.opened = true;
+            }
             let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), rect.max);
             let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
-            if let Some(action) = ChatView::new(&local.chat, &mut local.draft)
-                .running(local.thinking)
-                .show(&mut body_ui)
-            {
-                local.chat_action(action);
+            let action = ChatView::new(&local.chat, &mut local.draft)
+                .running(local.busy)
+                .show(&mut body_ui);
+            match action {
+                Some(ChatAction::Send(text)) => outbox.push(ClientMsg::AgentSend { id, text }),
+                Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
+                Some(ChatAction::Decide(index, decision)) => {
+                    if let Some(Some(approval)) = local.approvals.get(index) {
+                        outbox.push(ClientMsg::AgentDecide {
+                            id,
+                            approval: *approval,
+                            decision: match decision {
+                                Decision::Allow => wire::Decision::Allow,
+                                Decision::AlwaysAllow => wire::Decision::AlwaysAllow,
+                                Decision::Deny => wire::Decision::Deny,
+                            },
+                        });
+                    }
+                }
+                None => {}
             }
-            self.focused = Some((id, View::Chat));
+            self.focused = None;
             return;
         }
         // attaching starts the process on the server if it has not run yet, then streams it here
@@ -272,14 +288,13 @@ impl App {
         let response = terminal.show(&mut body_ui, id, outbox);
         // focus the terminal when switching to it, and take focus back once the palette closes
         let idle = ui.ctx().memory(|m| m.focused().is_none()) && !self.palette.is_open();
-        if self.focused != Some((id, View::Terminal)) || idle {
+        if self.focused != Some(id) || idle {
             response.request_focus();
-            self.focused = Some((id, View::Terminal));
+            self.focused = Some(id);
         }
     }
 
     fn link_view(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui);
         let now = ui.input(|i| i.time);
         let (title, detail, action) = match &self.link {
             Link::Connecting { since, .. } => {
@@ -308,37 +323,14 @@ impl App {
             Link::Stopping(_) => ("Restarting the Mux server…".to_owned(), None, None),
         };
 
-        let mut clicked = false;
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.35);
-            Icon::new(icons::CLOUD)
-                .size(32.0)
-                .color(p.text_faint)
-                .show(ui);
-            ui.add_space(space::SM);
-            ui.label(
-                egui::RichText::new(title)
-                    .font(font::medium(text::MD))
-                    .color(p.text),
-            );
-            if let Some(detail) = detail {
-                ui.add_space(space::XS);
-                // laid out up front at a readable width, then centred as one block
-                let mut job = egui::text::LayoutJob::simple(
-                    detail,
-                    font::regular(text::MD),
-                    p.text_muted,
-                    420.0,
-                );
-                job.halign = egui::Align::Center;
-                let galley = ui.painter().layout_job(job);
-                ui.add(egui::Label::new(galley));
-            }
-            if let Some(action) = action {
-                ui.add_space(space::MD);
-                clicked = Button::new(action).primary().show(ui).clicked();
-            }
-        });
+        let mut state = EmptyState::new(icons::CLOUD, &title);
+        if let Some(detail) = detail {
+            state = state.detail(detail);
+        }
+        if let Some(action) = action {
+            state = state.action(action);
+        }
+        let clicked = state.show(ui);
         if clicked {
             match self.link {
                 Link::Outdated { .. } => self.link.restart_server(),

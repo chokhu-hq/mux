@@ -6,7 +6,7 @@ use egui::{
 use super::Kbd;
 use crate::motion::{Spring, spring_bool};
 use crate::shortcut;
-use crate::theme::{self, font, radius, space, text};
+use crate::theme::{self, font, icon, radius, space, text};
 
 pub const SHORTCUT: KeyboardShortcut = shortcut::app(Key::K);
 const WIDTH: f32 = 560.0;
@@ -136,7 +136,7 @@ impl CommandPalette {
                 let frame = Frame::new()
                     .fill(p.elevated)
                     .stroke(Stroke::new(1.0, p.border_strong))
-                    .corner_radius(CornerRadius::same(radius::LG + 2))
+                    .corner_radius(CornerRadius::same(radius::XL))
                     .shadow(ui.visuals().popup_shadow)
                     .inner_margin(Margin::same(space::XS as i8))
                     .show(&mut panel_ui, |ui| {
@@ -187,7 +187,7 @@ impl CommandPalette {
                             );
                             ui.painter().rect_filled(
                                 rect,
-                                CornerRadius::same(radius::MD),
+                                CornerRadius::same(radius::LG),
                                 p.accent.gamma_multiply(0.16 * sel),
                             );
                             let mut text_x = rect.left() + 10.0;
@@ -196,7 +196,7 @@ impl CommandPalette {
                                     pos2(text_x, rect.center().y),
                                     Align2::LEFT_CENTER,
                                     icon,
-                                    font::icon(16.0),
+                                    font::icon(icon::LG),
                                     p.text_muted,
                                 );
                                 text_x += 26.0;

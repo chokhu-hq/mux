@@ -228,12 +228,10 @@ impl eframe::App for Gallery {
                                         });
                                         ui.add_space(space::SM);
                                     }
-                                    ui.label(format!(
-                                        "{} Icons also work inline in labels {} {}",
-                                        icons::LIGHTNING,
-                                        icons::GIT_BRANCH,
-                                        icons::CHECK_CIRCLE
-                                    ));
+                                    ui.horizontal(|ui| {
+                                        Icon::new(icons::GIT_BRANCH).show(ui);
+                                        ui.label("Pair an Icon with a label, icons don't mix into plain text");
+                                    });
                                 });
 
                                 section(ui, "Buttons", |ui| {
@@ -360,6 +358,11 @@ impl eframe::App for Gallery {
                                         &[(0, "Chat"), (1, "Terminal"), (2, "Changes")],
                                     )
                                     .show(ui);
+                                });
+
+                                section(ui, "Thinking", |ui| {
+                                    ui.set_max_width(320.0);
+                                    chat::thinking(ui);
                                 });
 
                                 section(ui, "Chat", |ui| {

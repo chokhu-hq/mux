@@ -1,16 +1,17 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use egui::epaint::TextShape;
+use egui::text::LayoutJob;
 use egui::{
     Align2, Color32, CornerRadius, CursorIcon, Frame, Label, Margin, Pos2, Rect, RichText,
-    ScrollArea, Sense, Stroke, Ui, pos2, vec2,
+    ScrollArea, Sense, Stroke, TextFormat, Ui, pos2, vec2,
 };
 
 use super::{Decision, DiffKind, FileDiff, PermissionRequest, ToolCall, ToolKind, ToolStatus};
 use crate::components::{Button, Size, hover_t};
 use crate::icons;
 use crate::motion::{self, Spring, spring_bool};
-use crate::theme::{self, font, radius, space, text};
+use crate::theme::{self, font, icon, radius, space, text};
 
 const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
@@ -26,7 +27,7 @@ pub fn user_message(ui: &mut Ui, message: &str) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         Frame::new()
             .fill(p.active)
-            .corner_radius(radius::LG + 4)
+            .corner_radius(radius::XL)
             .inner_margin(Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_width(width);
@@ -59,28 +60,53 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
         } else {
             0.0
         };
+        // the row sits flush with the card's edges, so its hover follows the card's corners
+        let bottom = if open { 0 } else { radius::LG };
         ui.painter().rect_filled(
             rect,
-            CornerRadius::same(radius::MD),
+            CornerRadius {
+                nw: radius::LG,
+                ne: radius::LG,
+                sw: bottom,
+                se: bottom,
+            },
             p.hover.gamma_multiply(t),
         );
 
         let y = rect.center().y;
         let mut x = rect.left() + space::MD;
         match tool.status {
-            ToolStatus::Running => spinner(ui, pos2(x + 7.0, y), 14.0, p.text_muted),
-            ToolStatus::Done => glyph(ui, pos2(x + 7.0, y), icons::CHECK, 14.0, p.success),
-            ToolStatus::Failed => glyph(ui, pos2(x + 7.0, y), icons::X, 14.0, p.danger),
+            ToolStatus::Running => spinner(ui, pos2(x + icon::MD / 2.0, y), icon::MD, p.text_muted),
+            ToolStatus::Done => glyph(
+                ui,
+                pos2(x + icon::MD / 2.0, y),
+                icons::CHECK,
+                icon::MD,
+                p.success,
+            ),
+            ToolStatus::Failed => glyph(
+                ui,
+                pos2(x + icon::MD / 2.0, y),
+                icons::X,
+                icon::MD,
+                p.danger,
+            ),
         }
-        x += 14.0 + space::SM;
+        x += icon::MD + space::SM;
         let (verb, icon) = match tool.kind {
             ToolKind::Read => ("Read", icons::FILE),
             ToolKind::Edit => ("Edit", icons::PENCIL_SIMPLE),
             ToolKind::Run => ("Run", icons::TERMINAL),
             ToolKind::Search => ("Search", icons::MAGNIFYING_GLASS),
         };
-        glyph(ui, pos2(x + 7.0, y), icon, 14.0, p.text_faint);
-        x += 14.0 + space::SM;
+        glyph(
+            ui,
+            pos2(x + icon::MD / 2.0, y),
+            icon,
+            icon::MD,
+            p.text_faint,
+        );
+        x += icon::MD + space::SM;
         let verb = ui.painter().text(
             pos2(x, y),
             Align2::LEFT_CENTER,
@@ -92,7 +118,7 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
         let caret_space = if expandable { 28.0 } else { space::MD };
         let target = ui.painter().layout_no_wrap(
             tool.target.clone(),
-            font::mono(text::MONO - 0.5),
+            font::mono(text::MONO_SM),
             p.text_muted,
         );
         let clip = Rect::from_min_max(
@@ -127,7 +153,7 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
                         ui.set_width(ui.available_width());
                         ui.label(
                             RichText::new(output)
-                                .font(font::mono(text::MONO - 0.5))
+                                .font(font::mono(text::MONO_SM))
                                 .color(p.text_muted),
                         );
                     });
@@ -155,12 +181,18 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
         let y = rect.center().y;
         let x = rect.left() + space::MD;
-        glyph(ui, pos2(x + 7.0, y), icons::GIT_DIFF, 14.0, p.text_faint);
+        glyph(
+            ui,
+            pos2(x + icon::MD / 2.0, y),
+            icons::GIT_DIFF,
+            icon::MD,
+            p.text_faint,
+        );
         let path = ui.painter().text(
-            pos2(x + 14.0 + space::SM, y),
+            pos2(x + icon::MD + space::SM, y),
             Align2::LEFT_CENTER,
             &diff.path,
-            font::mono(text::MONO - 0.5),
+            font::mono(text::MONO_SM),
             p.text,
         );
         let plus = ui.painter().text(
@@ -187,7 +219,7 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) {
             diff.lines.len().min(DIFF_PREVIEW)
         };
         let row_h = 18.0;
-        let mono = font::mono(text::MONO - 0.5);
+        let mono = font::mono(text::MONO_SM);
         ui.add_space(space::XS);
         for line in &diff.lines[..shown] {
             let (rect, _) =
@@ -270,10 +302,12 @@ pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> 
         .inner_margin(Margin::same(space::MD as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // the title row holds no controls, so it shouldn't reserve a control's height
+            ui.spacing_mut().interact_size.y = 0.0;
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(icons::WARNING.to_string())
-                        .font(font::icon(15.0))
+                        .font(font::icon(icon::MD))
                         .color(p.warning),
                 );
                 ui.label(RichText::new(&request.title).font(font::medium(text::MD)));
@@ -289,7 +323,7 @@ pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> 
                         ui.set_width(ui.available_width());
                         ui.label(
                             RichText::new(detail)
-                                .font(font::mono(text::MONO - 0.5))
+                                .font(font::mono(text::MONO_SM))
                                 .color(p.text),
                         );
                     });
@@ -333,7 +367,7 @@ pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> 
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(icon.to_string())
-                                .font(font::icon(13.0))
+                                .font(font::icon(icon::SM))
                                 .color(color),
                         );
                         ui.label(
@@ -348,31 +382,56 @@ pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> 
     decision
 }
 
+const SHIMMER_SECONDS: f32 = 1.6;
+
+// a soft light sweeps across the label while a dot breathes beside it, the way ai apps show work in progress
 pub fn thinking(ui: &mut Ui) {
     let p = theme::palette(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let time = ui.input(|i| i.time) as f32;
     let still = motion::reduced(ui.ctx());
-    for i in 0..3 {
-        // each dot breathes slightly after the one before it
-        let wave = if still {
-            1.0
-        } else {
-            0.5 + 0.5 * (time * 4.0 - i as f32 * 0.7).sin()
-        };
-        ui.painter().circle_filled(
-            pos2(rect.left() + 4.0 + i as f32 * 9.0, rect.center().y),
-            2.5,
-            p.text_muted.gamma_multiply(0.35 + 0.65 * wave),
+
+    let breath = if still {
+        1.0
+    } else {
+        0.5 + 0.5 * (time * TAU / SHIMMER_SECONDS).sin()
+    };
+    let dot = pos2(rect.left() + 5.0, rect.center().y);
+    ui.painter().circle_filled(
+        dot,
+        4.0 + 3.5 * breath,
+        p.accent.gamma_multiply(0.28 * breath),
+    );
+    ui.painter()
+        .circle_filled(dot, 3.5, p.accent.gamma_multiply(0.6 + 0.4 * breath));
+
+    let label = "Thinking";
+    let count = label.chars().count() as f32;
+    // the band starts off the left edge and leaves past the right one, so the sweep never pops in
+    let band = if still {
+        f32::NAN
+    } else {
+        (time / SHIMMER_SECONDS).fract() * 1.6 - 0.3
+    };
+    let mut job = LayoutJob::default();
+    for (i, ch) in label.chars().enumerate() {
+        let at = (i as f32 + 0.5) / count;
+        let glow = (1.0 - (at - band).abs() / 0.35).clamp(0.0, 1.0);
+        let glow = glow * glow * (3.0 - 2.0 * glow);
+        job.append(
+            &ch.to_string(),
+            0.0,
+            TextFormat {
+                font_id: font::regular(text::MD),
+                color: p.text_faint.lerp_to_gamma(p.text, glow),
+                ..Default::default()
+            },
         );
     }
-    ui.painter().text(
-        pos2(rect.left() + 34.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        "Thinking",
-        font::regular(text::MD),
-        p.text_faint,
-    );
+    let galley = ui.painter().layout_job(job);
+    let pos = pos2(rect.left() + 18.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, p.text_faint);
+
     if !still {
         ui.ctx().request_repaint();
     }

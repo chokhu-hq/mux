@@ -19,7 +19,7 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui);
         let pad = 2.0;
-        let label_font = font::medium(text::SM + 1.0);
+        let label_font = font::medium(text::MD);
         let widest = self
             .options
             .iter()
@@ -80,10 +80,10 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
                 pos2(rect.left() + pad + segment.x * x, rect.top() + pad),
                 segment,
             );
-            painter.rect_filled(thumb, CornerRadius::same(radius::MD - 1), p.active);
+            painter.rect_filled(thumb, CornerRadius::same(radius::SM), p.active);
             painter.rect_stroke(
                 thumb,
-                CornerRadius::same(radius::MD - 1),
+                CornerRadius::same(radius::SM),
                 Stroke::new(1.0, p.border_strong),
                 StrokeKind::Inside,
             );

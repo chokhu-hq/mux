@@ -1,3 +1,4 @@
+mod agent;
 mod process;
 mod store;
 
@@ -11,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use agent::Agent;
 use process::{Change, Process};
 use store::Store;
 
@@ -27,6 +29,15 @@ pub enum Event {
         session: u64,
         generation: u64,
         code: Option<i32>,
+    },
+    Codex {
+        session: u64,
+        generation: u64,
+        msg: serde_json::Value,
+    },
+    CodexExited {
+        session: u64,
+        generation: u64,
     },
 }
 
@@ -60,6 +71,7 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         state,
         clients: HashMap::new(),
         processes: HashMap::new(),
+        agents: HashMap::new(),
         attached: HashMap::new(),
         generation: 0,
         events: events.clone(),
@@ -154,6 +166,7 @@ struct Server {
     state: PathBuf,
     clients: HashMap<u64, UnboundedSender<ServerMsg>>,
     processes: HashMap<u64, Process>,
+    agents: HashMap<u64, Agent>,
     // which clients are watching each session's terminal
     attached: HashMap<u64, HashSet<u64>>,
     // bumped per spawn so output from a killed process can't leak into its replacement
@@ -222,6 +235,29 @@ impl Server {
                 }
                 self.changed();
             }
+            Event::Codex {
+                session,
+                generation,
+                msg,
+            } => {
+                if let Some(agent) = self.agents.get_mut(&session)
+                    && agent.generation == generation
+                {
+                    agent.handle(msg);
+                    self.agent_changed(session);
+                }
+            }
+            Event::CodexExited {
+                session,
+                generation,
+            } => {
+                if let Some(agent) = self.agents.get_mut(&session)
+                    && agent.generation == generation
+                {
+                    agent.exited();
+                    self.agent_changed(session);
+                }
+            }
         }
     }
 
@@ -258,6 +294,8 @@ impl Server {
             }
             ClientMsg::DeleteSession { id } => {
                 self.processes.remove(&id);
+                self.agents.remove(&id);
+                let _ = std::fs::remove_file(self.agent_path(id));
                 self.attached.remove(&id);
                 self.store.delete_session(id);
                 self.changed();
@@ -301,6 +339,29 @@ impl Server {
                     process.resize(cols, rows);
                 }
             }
+            ClientMsg::AgentOpen { id } => {
+                self.attached.entry(id).or_default().insert(client);
+                let agent = self.agent(id);
+                let msg = ServerMsg::AgentTranscript {
+                    id,
+                    items: agent.items.clone(),
+                    busy: agent.busy,
+                };
+                self.send(client, msg);
+            }
+            ClientMsg::AgentSend { id, text } => self.agent_send(id, text),
+            ClientMsg::AgentDecide {
+                id,
+                approval,
+                decision,
+            } => {
+                self.agent(id).decide(approval, decision);
+                self.agent_changed(id);
+            }
+            ClientMsg::AgentStop { id } => {
+                self.agent(id).stop();
+                self.agent_changed(id);
+            }
         }
     }
 
@@ -331,6 +392,83 @@ impl Server {
             }
         }
         self.changed();
+    }
+
+    fn agent_path(&self, id: u64) -> PathBuf {
+        self.state
+            .with_file_name("agents")
+            .join(format!("{id}.json"))
+    }
+
+    fn agent(&mut self, id: u64) -> &mut Agent {
+        let path = self.agent_path(id);
+        self.agents.entry(id).or_insert_with(|| Agent::load(&path))
+    }
+
+    fn agent_send(&mut self, id: u64, text: String) {
+        let Some(info) = self.store.session_mut(id) else {
+            return;
+        };
+        // a fresh agent takes its name from the first thing it's asked
+        if info.title == "New agent" {
+            let first = text.lines().next().unwrap_or_default().trim();
+            let mut title: String = first.chars().take(48).collect();
+            if first.chars().count() > 48 {
+                title.push('…');
+            }
+            if !title.is_empty() {
+                info.title = title;
+            }
+        }
+        let folder = self.store.session_path(id).map(PathBuf::from);
+        self.generation += 1;
+        let (generation, events) = (self.generation, self.events.clone());
+        let agent = self.agent(id);
+        // an agent's sandbox is its folder, so falling back to the home folder would expose everything
+        match folder {
+            None => agent.error(
+                "This group has no project folder yet. Choose one before starting an agent."
+                    .to_owned(),
+            ),
+            Some(dir) if !dir.is_dir() => {
+                agent.error(format!(
+                    "The project folder {} doesn't exist any more.",
+                    mux_core::display_path(&dir.to_string_lossy())
+                ));
+            }
+            Some(dir) => agent.send(text, id, generation, dir, &events),
+        }
+        self.agent_changed(id);
+        self.changed();
+    }
+
+    // pushes what changed to the clients watching, and keeps the sidebar status in step
+    fn agent_changed(&mut self, id: u64) {
+        let path = self.agent_path(id);
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let (items, busy) = agent.take_changes();
+        let status = agent.status();
+        // saved when a turn starts or ends rather than on every streamed word
+        if (busy.is_some() || (!agent.busy && !items.is_empty()))
+            && let Err(err) = agent.save(&path)
+        {
+            eprintln!("mux: could not save {}: {err}", path.display());
+        }
+        for (index, item) in items {
+            self.send_watchers(id, ServerMsg::AgentItem { id, index, item });
+        }
+        if let Some(busy) = busy {
+            self.send_watchers(id, ServerMsg::AgentBusy { id, busy });
+        }
+        if let Some(info) = self.store.session_mut(id)
+            && info.status != status
+        {
+            info.status = status;
+            info.meta = "codex".to_owned();
+            self.changed();
+        }
     }
 
     fn live(&mut self, session: u64, generation: u64) -> Option<&mut Process> {

@@ -1,7 +1,7 @@
 use egui::{Align2, CornerRadius, CursorIcon, Response, Sense, Ui, Vec2, WidgetInfo};
 
 use super::{Size, hover_t, press_t};
-use crate::theme::{self, control, font, radius};
+use crate::theme::{self, control, font, icon, radius};
 
 pub struct IconButton {
     glyph: char,
@@ -62,7 +62,7 @@ impl IconButton {
                 rect.center(),
                 Align2::CENTER_CENTER,
                 self.glyph,
-                font::icon(16.0),
+                font::icon(icon::LG),
                 fg,
             );
         }

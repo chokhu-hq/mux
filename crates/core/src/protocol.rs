@@ -8,7 +8,7 @@ use crate::{SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -28,6 +28,57 @@ pub struct GroupInfo {
     pub path: Option<String>,
     pub open: bool,
     pub sessions: Vec<SessionInfo>,
+}
+
+// one entry in an agent conversation, shared by every agent backend
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AgentItem {
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+    },
+    Command {
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        status: ItemStatus,
+    },
+    FileChange {
+        changes: Vec<FileChange>,
+        status: ItemStatus,
+    },
+    Approval {
+        id: u64,
+        title: String,
+        detail: String,
+        decision: Option<Decision>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub diff: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemStatus {
+    Running,
+    Done,
+    Failed,
+    Declined,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Decision {
+    Allow,
+    AlwaysAllow,
+    Deny,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +137,22 @@ pub enum ClientMsg {
         cols: u16,
         rows: u16,
     },
+    // subscribes to an agent session and asks for its transcript so far
+    AgentOpen {
+        id: u64,
+    },
+    AgentSend {
+        id: u64,
+        text: String,
+    },
+    AgentDecide {
+        id: u64,
+        approval: u64,
+        decision: Decision,
+    },
+    AgentStop {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +175,21 @@ pub enum ServerMsg {
     Output {
         id: u64,
         data: Vec<u8>,
+    },
+    AgentTranscript {
+        id: u64,
+        items: Vec<AgentItem>,
+        busy: bool,
+    },
+    // sets the item at `index`, appending when it is one past the end
+    AgentItem {
+        id: u64,
+        index: usize,
+        item: AgentItem,
+    },
+    AgentBusy {
+        id: u64,
+        busy: bool,
     },
 }
 

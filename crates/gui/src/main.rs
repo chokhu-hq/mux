@@ -24,6 +24,8 @@ mod connection;
 #[cfg(target_os = "linux")]
 mod drop;
 mod link;
+#[cfg(target_os = "linux")]
+mod notify;
 mod prefs;
 mod sessions;
 mod settings;
@@ -63,6 +65,23 @@ fn main() -> eframe::Result {
 const NEW_AGENT: KeyboardShortcut = shortcut::app(Key::T);
 const NEW_SHELL: KeyboardShortcut = shortcut::app(Key::N);
 const SETTINGS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
+// alt on linux, since ctrl and shift with a number turn into symbols on most layouts
+const JUMP_MODIFIER: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::COMMAND
+} else {
+    Modifiers::ALT
+};
+const NUMBER_KEYS: [Key; 9] = [
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+    Key::Num9,
+];
 
 const COMMANDS: [Command; 6] = [
     Command::new("new-agent", "New agent session")
@@ -118,6 +137,10 @@ struct App {
     // every file changed in the open chat, with the agent's own hunks for when git can't say, and the one shown
     diffs: Vec<(String, String)>,
     diff_index: usize,
+    // the title bar's changes were clicked, so the next frame opens the diff panel
+    review: bool,
+    // sessions whose desktop notification was clicked, sent from the threads waiting on them
+    opened: (std::sync::mpsc::Sender<u64>, std::sync::mpsc::Receiver<u64>),
 }
 
 struct TitleBar {
@@ -125,7 +148,10 @@ struct TitleBar {
     provider: Option<Provider>,
     project: String,
     title: String,
+    branch: Option<String>,
     status: String,
+    // files changed in the chat and lines added and removed, which open the diff panel
+    changes: Option<(usize, usize, usize)>,
     restartable: bool,
 }
 
@@ -156,6 +182,8 @@ impl App {
             viewer_width: 560.0,
             diffs: Vec::new(),
             diff_index: 0,
+            review: false,
+            opened: std::sync::mpsc::channel(),
         };
         app.prefs.apply(ctx);
         app
@@ -270,6 +298,9 @@ impl App {
             }
             return;
         }
+        let branch = self.sessions.selected_branch();
+        // asked for from the title bar last frame, answered here where the chat is at hand
+        let review = std::mem::take(&mut self.review);
         let Some((session, local, outbox, models)) = self.sessions.selected() else {
             if EmptyState::new(icons::TERMINAL_WINDOW, "No session selected")
                 .detail("Pick a session from the sidebar, or start a new one.")
@@ -284,13 +315,48 @@ impl App {
         let rect = ui.max_rect();
         // an agent that finished its turn is just waiting for the next message, not ended
         let ended = matches!(session.status, SessionStatus::Done | SessionStatus::Failed);
+        let agent = session.kind == SessionKind::Agent;
+        // an agent names its model rather than just its cli
+        let model = models
+            .get(&local.settings.provider)
+            .and_then(|list| {
+                list.iter()
+                    .find(|m| Some(&m.id) == local.settings.model.as_ref())
+                    .or_else(|| list.iter().find(|m| m.is_default))
+            })
+            .map(|m| m.name.clone());
+        let meta = match (agent, model) {
+            (true, Some(model)) => model,
+            _ => session.meta.clone(),
+        };
+        let (mut files, mut added, mut removed) = (Vec::new(), 0, 0);
+        for item in &local.chat {
+            if let ChatItem::Diff(diff) = item {
+                if !files.contains(&&diff.path) {
+                    files.push(&diff.path);
+                }
+                for line in &diff.lines {
+                    match line.kind {
+                        mux_ui::chat::DiffKind::Add => added += 1,
+                        mux_ui::chat::DiffKind::Remove => removed += 1,
+                        mux_ui::chat::DiffKind::Context => {}
+                    }
+                }
+            }
+        }
+        let first_diff = local
+            .chat
+            .iter()
+            .position(|item| matches!(item, ChatItem::Diff(_)));
         self.titlebar = Some(TitleBar {
             id: session.id,
-            provider: (session.kind == SessionKind::Agent).then_some(session.provider),
+            provider: agent.then_some(session.provider),
             project: group.as_ref().map(|g| g.2.clone()).unwrap_or_default(),
             title: session.title.clone(),
-            status: format!("{} · {}", session.status.label(), session.meta),
-            restartable: ended && session.kind != SessionKind::Agent,
+            branch,
+            status: format!("{} · {meta}", session.status.label()),
+            changes: (agent && !files.is_empty()).then_some((files.len(), added, removed)),
+            restartable: ended && !agent,
         });
         let id = session.id;
         if session.kind == SessionKind::Agent {
@@ -321,13 +387,35 @@ impl App {
                     local.attachments.push(path);
                 }
             }
+            let commands = slash_commands(
+                local.settings.provider,
+                &local.skills,
+                local.busy,
+                first_diff.is_some(),
+            );
             let action = ChatView::new(&local.chat, &mut local.draft)
+                .commands(&commands)
                 .attachments(&mut local.attachments)
                 .dropping(self.dropping)
                 .running(local.busy)
                 .context(local.context)
                 .controls(|ui| configure = agent_controls(ui, models, &settings, started))
                 .show(&mut body_ui);
+            let action = action.or(first_diff.filter(|_| review).map(ChatAction::OpenDiff));
+            // mux's own slash commands are the same actions the buttons around the chat take
+            let action = match action {
+                Some(ChatAction::Command(name)) => match name.as_str() {
+                    "compact" => Some(ChatAction::Compact),
+                    "review" => first_diff.map(ChatAction::OpenDiff),
+                    "stop" => Some(ChatAction::Stop),
+                    "new" => {
+                        *run = Some("new-agent");
+                        None
+                    }
+                    _ => None,
+                },
+                action => action,
+            };
             if let Some(settings) = configure {
                 local.settings = settings.clone();
                 outbox.push(ClientMsg::AgentConfigure { id, settings });
@@ -377,6 +465,8 @@ impl App {
                     }
                 }
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
+                // already turned into one of the actions above
+                Some(ChatAction::Command(_)) => {}
                 Some(ChatAction::Compact) => outbox.push(ClientMsg::AgentCompact { id }),
                 Some(ChatAction::Decide(index, decision)) => {
                     if let Some(Some(approval)) = local.approvals.get(index) {
@@ -508,6 +598,20 @@ impl App {
                 .font(font::medium(text::MD))
                 .color(p.text),
         );
+        if let Some(branch) = &info.branch {
+            crumbs.add_space(space::XS);
+            crumbs.spacing_mut().item_spacing.x = space::XS;
+            crumbs.label(
+                egui::RichText::new(icons::GIT_BRANCH.to_string())
+                    .font(font::icon(icon::SM))
+                    .color(p.text_faint),
+            );
+            crumbs.label(
+                egui::RichText::new(branch)
+                    .font(font::regular(text::SM + 1.0))
+                    .color(p.text_faint),
+            );
+        }
         crumbs.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if info.restartable
                 && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
@@ -527,6 +631,18 @@ impl App {
             if let (Some(provider), false) = (info.provider, usage.is_empty()) {
                 ui.add_space(space::SM);
                 UsageRing::new(&usage).provider(provider).show(ui);
+            }
+            if let Some((files, added, removed)) = info.changes {
+                ui.add_space(space::SM);
+                if changes_button(ui, added, removed)
+                    .tip(format!(
+                        "{files} {} changed in this chat, click to review",
+                        if files == 1 { "file" } else { "files" }
+                    ))
+                    .clicked()
+                {
+                    self.review = true;
+                }
             }
         });
     }
@@ -931,6 +1047,8 @@ fn agent_controls(
         chip.width(ui) + gap
     };
     let budget = ui.available_width();
+    // before the first message there's also the choice of where it works
+    let rest = rest + if locked { 0.0 } else { width("Worktree", true) };
     let full = width(label, true) + rest + width(access.label(), true) <= budget;
     let named = width(label, true) + rest + width("", true) <= budget;
     let shown = if named { label } else { "" };
@@ -1163,6 +1281,64 @@ fn agent_controls(
         }
     });
 
+    // where the agent works can only be chosen before it starts
+    if !locked {
+        let place = if settings.worktree {
+            "Worktree"
+        } else {
+            "Local"
+        };
+        let chip = Chip::new(if full { place } else { "" })
+            .icon(if settings.worktree {
+                icons::GIT_BRANCH
+            } else {
+                icons::FOLDER
+            })
+            .show(ui)
+            .tip(format!("Works in: {place}"));
+        menu(&chip).show(|ui| {
+            ui.set_width(300.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(space::XS);
+            ui.horizontal(|ui| {
+                ui.add_space(space::SM);
+                ui.label(
+                    egui::RichText::new("Where it works")
+                        .font(font::medium(text::SM))
+                        .color(p.text_faint),
+                );
+            });
+            ui.add_space(space::XS);
+            for (worktree, label, icon, detail) in [
+                (
+                    false,
+                    "Local",
+                    icons::FOLDER,
+                    "In the project folder itself",
+                ),
+                (
+                    true,
+                    "New worktree",
+                    icons::GIT_BRANCH,
+                    "On its own branch, in a separate checkout",
+                ),
+            ] {
+                if MenuItem::new(label)
+                    .icon(icon)
+                    .detail(detail)
+                    .checked(settings.worktree == worktree)
+                    .show(ui)
+                    .clicked()
+                {
+                    let mut changed = settings.clone();
+                    changed.worktree = worktree;
+                    next = Some(changed);
+                    ui.close();
+                }
+            }
+        });
+    }
+
     if let Some(detail) = &current.fast {
         let fast = IconButton::new(icons::LIGHTNING, "Fast mode")
             .selected(settings.fast)
@@ -1175,6 +1351,85 @@ fn agent_controls(
         }
     }
     next
+}
+
+// what typing a slash offers: mux's commands that make sense right now, then the agent's own
+fn slash_commands(
+    provider: Provider,
+    skills: &[mux_core::protocol::Skill],
+    busy: bool,
+    changed: bool,
+) -> Vec<mux_ui::chat::SlashCommand> {
+    let builtin = |name: &str, detail: &str| mux_ui::chat::SlashCommand {
+        name: name.to_owned(),
+        detail: detail.to_owned(),
+        builtin: true,
+    };
+    let mut commands = vec![
+        builtin("compact", "Summarise older messages to free up context"),
+        builtin("new", "Start a new agent in this project"),
+    ];
+    if changed {
+        commands.push(builtin(
+            "review",
+            "Step through the files this chat changed",
+        ));
+    }
+    if busy {
+        commands.push(builtin("stop", "Stop what the agent is doing"));
+    }
+    // a skill without a description of its own at least says where it comes from
+    commands.extend(skills.iter().map(|skill| mux_ui::chat::SlashCommand {
+        name: skill.name.clone(),
+        detail: if skill.description.is_empty() {
+            format!("{} {} skill", skill.scope, provider.label())
+        } else {
+            skill.description.clone()
+        },
+        builtin: false,
+    }));
+    commands
+}
+
+// the chat's added and removed lines as a quiet button that opens them for review
+fn changes_button(ui: &mut egui::Ui, added: usize, removed: usize) -> egui::Response {
+    let p = theme::palette(ui);
+    let painter = ui.painter();
+    let font = font::medium(text::SM + 1.0);
+    let plus = painter.layout_no_wrap(format!("+{added}"), font.clone(), p.success);
+    let minus = painter.layout_no_wrap(format!("−{removed}"), font, p.danger);
+    let width =
+        space::SM + icon::SM + space::XS + plus.size().x + space::XS + minus.size().x + space::SM;
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(width, theme::control::SM), egui::Sense::click());
+    let hover = motion::spring_bool(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        Spring::QUICK,
+    );
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same(theme::radius::MD),
+        p.hover.gamma_multiply(hover),
+    );
+    let y = rect.center().y;
+    let mut x = rect.left() + space::SM;
+    ui.painter().text(
+        pos2(x + icon::SM / 2.0, y),
+        egui::Align2::CENTER_CENTER,
+        icons::GIT_DIFF,
+        font::icon(icon::SM),
+        p.text_muted,
+    );
+    x += icon::SM + space::XS;
+    let plus_width = plus.size().x;
+    ui.painter()
+        .galley(pos2(x, y - plus.size().y / 2.0), plus, p.success);
+    x += plus_width + space::XS;
+    ui.painter()
+        .galley(pos2(x, y - minus.size().y / 2.0), minus, p.danger);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 // fills the model list's usual space with a short centred message, so switching tabs never resizes the menu
@@ -1336,6 +1591,40 @@ impl App {
         Rect::from_min_max(main.min, pos2(edge, main.bottom()))
     }
 
+    // agents that finished or need an answer get a dot in the sidebar, and a notification when mux is in the background
+    fn alerts(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.focused);
+        let looking = self
+            .sessions
+            .selected_id()
+            .filter(|_| focused && !self.settings_open);
+        for alert in self.sessions.take_alerts(looking) {
+            if focused {
+                continue;
+            }
+            let body = match alert.event {
+                sessions::Event::Finished => "Finished and is ready for you",
+                sessions::Event::Waiting => "Needs your approval to continue",
+                sessions::Event::Failed => "Stopped with an error",
+            };
+            #[cfg(target_os = "linux")]
+            notify::send(
+                &alert.title,
+                body,
+                alert.id,
+                self.opened.0.clone(),
+                ctx.clone(),
+            );
+            #[cfg(not(target_os = "linux"))]
+            let _ = body;
+        }
+        for id in self.opened.1.try_iter() {
+            self.sessions.select(id);
+            self.settings_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
     fn show_diff(&mut self, index: usize) {
         let Some((path, fallback)) = self.diffs.get(index) else {
             return;
@@ -1429,8 +1718,28 @@ impl eframe::App for App {
         };
         self.take_drops(&ctx, frame);
         ImageViewer::show(&ctx);
-        let mut run = self.palette.show(&ctx, &COMMANDS);
+        let destinations = self.sessions.destinations();
+        let mut run = match self.palette.show(&ctx, &COMMANDS, &destinations) {
+            Some(mux_ui::Choice::Command(id)) => Some(id),
+            Some(mux_ui::Choice::Destination(id)) => {
+                self.sessions.select(id);
+                self.settings_open = false;
+                None
+            }
+            None => None,
+        };
+        // the first nine sessions are a key away, the way tabs are in a browser
+        let jump = ctx.input_mut(|i| {
+            NUMBER_KEYS
+                .iter()
+                .position(|key| i.consume_key(JUMP_MODIFIER, *key))
+        });
+        if let Some(session) = jump.and_then(|n| destinations.get(n)) {
+            self.sessions.select(session.id);
+            self.settings_open = false;
+        }
         self.link.tick(&ctx, &mut self.sessions);
+        self.alerts(&ctx);
         mux_ui::capture::screenshot(&ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)

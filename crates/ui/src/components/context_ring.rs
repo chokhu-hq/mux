@@ -1,10 +1,16 @@
-use egui::{Align, CornerRadius, CursorIcon, Layout, RichText, Sense, Ui, Vec2};
+use egui::{
+    Align, Align2, CornerRadius, CursorIcon, Layout, Order, Rect, RichText, Sense, Ui, Vec2,
+};
 use mux_core::protocol::ContextUsage;
 
 use super::usage_ring::{BAR, WIDTH, bar, level_color, ring};
-use super::{MenuItem, TooltipExt, hover_t};
-use crate::icons;
+use super::{Button, Size, hover_t};
+use crate::motion::{Spring, spring_bool};
 use crate::theme::{self, control, font, radius, space, text};
+
+// how long the pointer rests on the ring before the card opens, and how long it lingers once left
+const OPEN_AFTER: f64 = 0.12;
+const CLOSE_AFTER: f64 = 0.2;
 
 // a small ring for how much of the model's context window the conversation fills
 pub struct ContextRing {
@@ -41,32 +47,101 @@ impl ContextRing {
             ring(ui, rect.center(), used);
         }
         let context = self.context;
-        let menu_open =
-            egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
         let response = response.on_hover_cursor(CursorIcon::PointingHand);
-        let response = if menu_open {
-            response
+
+        // a hover card rather than a tooltip, so the pointer can move onto it and press compact
+        let id = response.id.with("card");
+        let card: Option<Rect> = ui.data(|d| d.get_temp(id.with("rect")));
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let now = ui.input(|i| i.time);
+        // the gap between the ring and the card counts as on the card, so crossing it doesn't close it
+        let over_card = card.is_some_and(|card| {
+            pointer.is_some_and(|pos| card.union(rect).expand(space::XS).contains(pos))
+        });
+        // stored as options, and read back as the same type, since egui keys its memory by type too
+        let mut since: Option<f64> = ui
+            .data(|d| d.get_temp::<Option<f64>>(id.with("since")))
+            .flatten();
+        let mut left: Option<f64> = ui
+            .data(|d| d.get_temp::<Option<f64>>(id.with("left")))
+            .flatten();
+        let was_open: bool = ui.data(|d| d.get_temp(id.with("open"))).unwrap_or(false);
+        let mut open = was_open;
+        if response.clicked() {
+            open = true;
+        }
+        if response.hovered() {
+            let start = *since.get_or_insert(now);
+            if now - start >= OPEN_AFTER {
+                open = true;
+            } else {
+                ui.ctx()
+                    .request_repaint_after_secs((start + OPEN_AFTER - now) as f32);
+            }
         } else {
-            response.tip_ui(|ui| details(ui, context))
-        };
+            since = None;
+        }
+        if open && (response.hovered() || over_card) {
+            left = None;
+        } else if open {
+            let start = *left.get_or_insert(now);
+            if now - start >= CLOSE_AFTER {
+                open = false;
+                left = None;
+            } else {
+                ui.ctx()
+                    .request_repaint_after_secs((start + CLOSE_AFTER - now) as f32);
+            }
+        }
+        ui.data_mut(|d| {
+            d.insert_temp(id.with("since"), since);
+            d.insert_temp(id.with("left"), left);
+            d.insert_temp(id.with("open"), open);
+        });
+
         let mut compact = false;
-        egui::Popup::menu(&response)
-            .align(egui::RectAlign::TOP_END)
-            .gap(space::XS)
-            .show(|ui| {
-                ui.add_enabled_ui(self.can_compact, |ui| {
-                    let detail = if self.can_compact {
-                        "Summarise older messages to free up space"
-                    } else {
-                        "Available once the agent is done"
-                    };
-                    compact = MenuItem::new("Compact now")
-                        .icon(icons::ARROWS_IN_LINE_VERTICAL)
-                        .detail(detail)
-                        .show(ui)
-                        .clicked();
+        let t = spring_bool(ui.ctx(), id.with("t"), open, Spring::QUICK);
+        if t > 0.01 {
+            let can_compact = self.can_compact;
+            let shown = egui::Area::new(id)
+                .order(Order::Foreground)
+                .pivot(Align2::RIGHT_BOTTOM)
+                .fixed_pos(rect.right_top() - Vec2::new(0.0, space::XS + (1.0 - t) * 4.0))
+                .constrain_to(ui.ctx().content_rect().shrink(space::SM))
+                .show(ui.ctx(), |ui| {
+                    ui.multiply_opacity(t);
+                    theme::floating(ui)
+                        .inner_margin(egui::Margin::same(space::MD as i8))
+                        .show(ui, |ui| {
+                            details(ui, context);
+                            ui.add_space(space::MD);
+                            if can_compact {
+                                compact =
+                                    Button::new("Compact now").size(Size::Sm).show(ui).clicked();
+                            } else {
+                                // a disabled button reads as broken, so a working agent just says when it'll be possible
+                                let p = theme::palette(ui);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = space::XS;
+                                    ui.label(
+                                        RichText::new(crate::icons::CLOCK.to_string())
+                                            .font(font::icon(crate::theme::icon::SM))
+                                            .color(p.text_faint),
+                                    );
+                                    ui.label(
+                                        RichText::new("You can compact once it finishes")
+                                            .font(font::regular(text::SM))
+                                            .color(p.text_faint),
+                                    );
+                                });
+                            }
+                        });
                 });
-            });
+            ui.data_mut(|d| d.insert_temp(id.with("rect"), shown.response.rect));
+        }
+        if compact {
+            ui.data_mut(|d| d.insert_temp(id.with("open"), false));
+        }
         compact
     }
 }
@@ -122,7 +197,7 @@ fn details(ui: &mut Ui, context: ContextUsage) {
     ui.add_space(space::SM);
     ui.add(
         egui::Label::new(
-            RichText::new("Older messages are summarised as it fills. Click to compact now.")
+            RichText::new("Older messages are summarised as it fills")
                 .font(font::regular(text::SM))
                 .color(p.text_faint),
         )

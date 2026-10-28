@@ -23,6 +23,7 @@ serde_json = "1"
 postcard = { version = "1.1", features = ["use-std"] }
 portable-pty = "0.9"
 libc = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "io-util", "sync", "process", "time"] }
 
 # egui, syntect and the image decoders are many times slower unoptimised, so dependencies build optimised even in dev

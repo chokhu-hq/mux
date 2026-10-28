@@ -2,6 +2,7 @@ mod attachments;
 mod cards;
 mod composer;
 mod markdown;
+mod slash;
 
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
 use mux_core::protocol::ContextUsage;
@@ -10,6 +11,7 @@ pub use attachments::open_externally;
 pub use cards::thinking;
 pub use composer::{Composer, ComposerAction, Controls};
 pub use markdown::markdown;
+pub use slash::SlashCommand;
 
 use crate::components::EmptyState;
 use crate::icons;
@@ -30,7 +32,17 @@ pub enum ChatItem {
     Permission(PermissionRequest),
     Compaction(ToolStatus),
     Subagent(Subagent),
+    // how many files a finished turn changed, opening the first of them for review
+    Changes(Changes),
     Thinking,
+}
+
+pub struct Changes {
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+    // the index of the turn's first edit card
+    pub first: usize,
 }
 
 // a helper agent the main one started, with its own tool calls and final report
@@ -110,6 +122,8 @@ pub enum ChatAction {
     Compact,
     // the edit card at this index was clicked, to see its file's full diff
     OpenDiff(usize),
+    // one of mux's own slash commands, by name
+    Command(String),
     Decide(usize, Decision),
 }
 
@@ -121,6 +135,7 @@ pub struct ChatView<'a> {
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
     dropping: bool,
+    commands: &'a [SlashCommand],
 }
 
 impl<'a> ChatView<'a> {
@@ -133,7 +148,13 @@ impl<'a> ChatView<'a> {
             context: None,
             attachments: None,
             dropping: false,
+            commands: &[],
         }
+    }
+
+    pub fn commands(mut self, commands: &'a [SlashCommand]) -> Self {
+        self.commands = commands;
+        self
     }
 
     pub fn attachments(mut self, attachments: &'a mut Vec<String>) -> Self {
@@ -178,7 +199,8 @@ impl<'a> ChatView<'a> {
         let mut bottom = ui.new_child(UiBuilder::new().max_rect(composer));
         let mut input = Composer::new(self.draft)
             .running(self.running)
-            .context(self.context);
+            .context(self.context)
+            .commands(self.commands);
         if let Some(attachments) = self.attachments {
             input = input.attachments(attachments);
         }
@@ -191,6 +213,7 @@ impl<'a> ChatView<'a> {
                 ComposerAction::Attach => ChatAction::Attach,
                 ComposerAction::Stop => ChatAction::Stop,
                 ComposerAction::Compact => ChatAction::Compact,
+                ComposerAction::Command(name) => ChatAction::Command(name),
             });
         }
         let measured = bottom.min_rect().height();
@@ -266,6 +289,11 @@ impl<'a> ChatView<'a> {
                                     }
                                 }
                                 ChatItem::Compaction(status) => cards::compaction(ui, *status),
+                                ChatItem::Changes(changes) => {
+                                    if cards::changes(ui, changes) {
+                                        action = Some(ChatAction::OpenDiff(changes.first));
+                                    }
+                                }
                                 ChatItem::Subagent(agent) => {
                                     if let Some(target) = cards::subagent(ui, agent) {
                                         action = Some(ChatAction::OpenLink(target));

@@ -8,7 +8,8 @@ use egui::{
 };
 
 use super::{
-    Decision, DiffKind, FileDiff, PermissionRequest, Subagent, ToolCall, ToolKind, ToolStatus,
+    Changes, Decision, DiffKind, FileDiff, PermissionRequest, Subagent, ToolCall, ToolKind,
+    ToolStatus,
 };
 use crate::components::{Button, TooltipExt, hover_t, reveal};
 use crate::icons;
@@ -66,12 +67,43 @@ fn bubble(ui: &mut Ui, message: &str) {
     let p = theme::palette(ui);
     // lay the text out first so the bubble hugs short messages instead of filling the row
     let max = ui.available_width() * 0.8 - 24.0;
-    let galley = ui.painter().layout(
-        message.to_owned(),
-        font::regular(text::MD + 1.0),
-        p.text,
-        max,
-    );
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = max;
+    // `$skill` mentions stand out, so it's clear which instructions the message pulled in
+    let plain = TextFormat {
+        font_id: font::regular(text::MD + 1.0),
+        color: p.text,
+        ..Default::default()
+    };
+    let skill = TextFormat {
+        font_id: font::medium(text::MD + 1.0),
+        color: p.accent,
+        ..plain.clone()
+    };
+    let mut rest = message;
+    while !rest.is_empty() {
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let space_end = rest[word_end..]
+            .find(|c: char| !c.is_whitespace())
+            .map_or(rest.len(), |i| word_end + i);
+        let word = &rest[..word_end];
+        let mention = word
+            .strip_prefix('$')
+            .and_then(|name| name.chars().next())
+            .is_some_and(char::is_alphabetic);
+        job.append(
+            word,
+            0.0,
+            if mention {
+                skill.clone()
+            } else {
+                plain.clone()
+            },
+        );
+        job.append(&rest[word_end..space_end], 0.0, plain.clone());
+        rest = &rest[space_end..];
+    }
+    let galley = ui.painter().layout_job(job);
     let width = galley.size().x;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         Frame::new()
@@ -684,6 +716,71 @@ pub fn thinking(ui: &mut Ui, turn: usize) {
     if !still {
         ui.ctx().request_repaint();
     }
+}
+
+// the end of a turn that changed several files, a click away from reviewing them
+pub fn changes(ui: &mut Ui, changes: &Changes) -> bool {
+    let p = theme::palette(ui);
+    let mut open = false;
+    card(ui, |ui| {
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+        let t = hover_t(ui, &response);
+        ui.painter().rect_filled(
+            rect.shrink(1.0),
+            CornerRadius::same(radius::LG),
+            p.hover.gamma_multiply(t * 0.6),
+        );
+        let y = rect.center().y;
+        let x = rect.left() + space::MD;
+        glyph(
+            ui,
+            pos2(x + icon::MD / 2.0, y),
+            icons::GIT_DIFF,
+            icon::MD,
+            p.text_muted,
+        );
+        let label = ui.painter().text(
+            pos2(x + icon::MD + space::SM, y),
+            Align2::LEFT_CENTER,
+            format!("Changed {} files", changes.files),
+            font::medium(text::MD),
+            p.text,
+        );
+        let plus = ui.painter().text(
+            pos2(label.right() + space::SM, y),
+            Align2::LEFT_CENTER,
+            format!("+{}", changes.added),
+            font::medium(text::SM),
+            p.success,
+        );
+        ui.painter().text(
+            pos2(plus.right() + space::XS, y),
+            Align2::LEFT_CENTER,
+            format!("−{}", changes.removed),
+            font::medium(text::SM),
+            p.danger,
+        );
+        let review = ui.painter().text(
+            pos2(rect.right() - space::MD - icon::MD - space::XS, y),
+            Align2::RIGHT_CENTER,
+            "Review",
+            font::medium(text::SM + 1.0),
+            p.text_muted.lerp_to_gamma(p.text, t),
+        );
+        glyph(
+            ui,
+            pos2(review.right() + space::XS + icon::MD / 2.0, y),
+            icons::CARET_RIGHT,
+            icon::MD,
+            p.text_muted.lerp_to_gamma(p.text, t),
+        );
+        open = response
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .tip("Step through every file this turn changed")
+            .clicked();
+    });
+    open
 }
 
 // a quiet divider where older messages were summarised, so everything above it reads as history

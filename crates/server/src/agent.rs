@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,8 @@ use std::process::Stdio;
 
 use base64::Engine;
 use mux_core::protocol::{
-    AgentItem, AgentSettings, ContextUsage, Decision, FileChange, ItemStatus, UsageWindow, is_image,
+    AgentItem, AgentSettings, AgentSummary, ContextUsage, Decision, FileChange, ItemStatus, Skill,
+    UsageWindow, is_image,
 };
 use mux_core::{Access, Provider, SessionStatus};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,8 @@ struct Saved {
     settings: AgentSettings,
     #[serde(default)]
     context: Option<ContextUsage>,
+    #[serde(default)]
+    commands: Vec<String>,
 }
 
 enum Call {
@@ -71,6 +74,11 @@ pub struct Agent {
     pub usage: Option<Vec<UsageWindow>>,
     pub context: Option<ContextUsage>,
     context_changed: bool,
+    // the skill names claude last reported, which include plugin skills that aren't files mux can read
+    pub commands: Vec<String>,
+    // the skills found on disk or listed by codex, set by the server when the chat opens
+    found: Vec<Skill>,
+    commands_changed: bool,
     thread_id: Option<String>,
     thread_live: bool,
     turn_id: Option<String>,
@@ -89,8 +97,10 @@ pub struct Agent {
     next_approval: u64,
     changed: BTreeSet<usize>,
     busy_changed: bool,
-    // messages claude has been sent but not answered yet, since it runs each queued one as its own turn
-    claude_turns: usize,
+    // messages claude hasn't echoed back yet, which it may fold into one turn when they arrive close together
+    claude_waiting: VecDeque<String>,
+    // claude is mid turn, whether answering a message or one it started itself, like a background subagent waking
+    claude_turn: bool,
     // a subagent's own tool calls by id, as its card and the step within it
     sub_steps: HashMap<String, (usize, usize)>,
     // claude's subagent task ids and codex's subagent threads, each pointing at its card
@@ -134,6 +144,9 @@ impl Agent {
             usage: None,
             context: saved.context,
             context_changed: false,
+            commands: saved.commands,
+            found: Vec::new(),
+            commands_changed: false,
             thread_id: saved.thread_id,
             thread_live: false,
             turn_id: None,
@@ -150,7 +163,8 @@ impl Agent {
             next_approval: 0,
             changed: BTreeSet::new(),
             busy_changed: false,
-            claude_turns: 0,
+            claude_waiting: VecDeque::new(),
+            claude_turn: false,
             sub_steps: HashMap::new(),
             tasks: HashMap::new(),
             child_threads: HashMap::new(),
@@ -164,6 +178,60 @@ impl Agent {
             self.context = Some(context);
             self.context_changed = true;
         }
+    }
+
+    pub fn set_skills(&mut self, found: Vec<Skill>) {
+        if found != self.found {
+            self.found = found;
+            self.commands_changed = true;
+        }
+    }
+
+    // every skill on offer: for claude its own list decides the names, and the files found supply descriptions,
+    // matched with or without the `plugin:` prefix claude gives skills that came from a plugin or an account
+    pub fn skills(&self) -> Vec<Skill> {
+        if self.settings.provider != Provider::Claude || self.commands.is_empty() {
+            return self.found.clone();
+        }
+        let mut skills: Vec<Skill> = self
+            .commands
+            .iter()
+            .map(|name| {
+                let short = name.rsplit(':').next().unwrap_or(name);
+                match self
+                    .found
+                    .iter()
+                    .find(|s| s.name == *name || s.name == short)
+                {
+                    Some(found) => Skill {
+                        name: name.clone(),
+                        ..found.clone()
+                    },
+                    None => Skill {
+                        name: name.clone(),
+                        description: String::new(),
+                        path: String::new(),
+                        scope: "Plugin".to_owned(),
+                    },
+                }
+            })
+            .collect();
+        // a skill added since claude last started isn't in its list yet, but will be once it restarts
+        for found in &self.found {
+            let listed = skills.iter().any(|s| {
+                s.name == found.name || s.name.rsplit(':').next() == Some(found.name.as_str())
+            });
+            if !listed {
+                skills.push(found.clone());
+            }
+        }
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+
+    // the skills when they changed since the last call
+    pub fn take_skills(&mut self) -> Option<Vec<Skill>> {
+        std::mem::take(&mut self.commands_changed).then(|| self.skills())
     }
 
     // the context usage when it changed since the last call, for the server to pass on
@@ -183,10 +251,46 @@ impl Agent {
             items: self.items.clone(),
             settings: self.settings.clone(),
             context: self.context,
+            commands: self.commands.clone(),
         };
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
         fs::rename(tmp, path)
+    }
+
+    // a short account of the conversation for the sidebar, where a diff's lines say what changed
+    pub fn summary(&self) -> AgentSummary {
+        let mut summary = AgentSummary {
+            model: self.settings.model.clone().unwrap_or_default(),
+            context: self.context,
+            ..AgentSummary::default()
+        };
+        let mut files = Vec::new();
+        for item in &self.items {
+            match item {
+                AgentItem::User { .. } => summary.messages += 1,
+                AgentItem::Assistant { text } if !text.trim().is_empty() => {
+                    summary.preview = text.chars().take(240).collect();
+                }
+                AgentItem::FileChange { changes, .. } => {
+                    for change in changes {
+                        if !files.contains(&change.path) {
+                            files.push(change.path.clone());
+                        }
+                        for line in change.diff.lines() {
+                            if line.starts_with('+') && !line.starts_with("+++") {
+                                summary.added += 1;
+                            } else if line.starts_with('-') && !line.starts_with("---") {
+                                summary.removed += 1;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        summary.files = files.len() as u32;
+        summary
     }
 
     pub fn status(&self) -> SessionStatus {
@@ -240,9 +344,9 @@ impl Agent {
         if self.settings.provider == Provider::Claude {
             let line = json!({
                 "type": "user",
-                "message": { "role": "user", "content": claude_content(&text, &attachments) }
+                "message": { "role": "user", "content": claude_content(&text, &attachments, &self.skills()) }
             });
-            self.claude_turns += 1;
+            self.claude_waiting.push_back(text.clone());
             self.write(line);
         } else if let (true, true, Some(thread), Some(turn)) = (
             was_busy,
@@ -252,6 +356,7 @@ impl Agent {
         ) {
             // codex takes new input into the turn that's already running
             let mut params = turn_params(&thread, &text, &attachments, &self.settings);
+            add_skills(&mut params, &text, &self.skills());
             params =
                 json!({ "threadId": thread, "expectedTurnId": turn, "input": params["input"] });
             self.call(Call::Steer(text, attachments), "turn/steer", params);
@@ -289,7 +394,8 @@ impl Agent {
             return;
         }
         if claude {
-            self.claude_turns += 1;
+            // claude never echoes /compact itself, so its turn counts as started now
+            self.claude_turn = true;
             self.write(json!({
                 "type": "user",
                 "message": { "role": "user", "content": "/compact" }
@@ -433,7 +539,8 @@ impl Agent {
         self.turn_id = None;
         self.live_text = None;
         self.launched = None;
-        self.claude_turns = 0;
+        self.claude_waiting.clear();
+        self.claude_turn = false;
         // whatever was waiting will never run on this process
         self.unqueue(usize::MAX);
         self.compact_queued = false;
@@ -807,6 +914,17 @@ impl Agent {
             }
             Some("system") if msg["subtype"] == "init" => {
                 self.session_id = msg["session_id"].as_str().map(str::to_owned);
+                // skills are prompts and work when claude runs headless, unlike its terminal commands
+                let commands: Vec<String> = msg["skills"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect();
+                if !commands.is_empty() && commands != self.commands {
+                    self.commands = commands;
+                    self.commands_changed = true;
+                }
             }
             // claude compacts on its own as the window fills, and says so before it starts
             Some("system") if msg["subtype"] == "status" && msg["status"] == "compacting" => {
@@ -835,6 +953,7 @@ impl Agent {
                 }
             }
             Some("stream_event") => {
+                self.claude_turn = true;
                 let event = &msg["event"];
                 match event["type"].as_str() {
                     Some("content_block_start") if event["content_block"]["type"] == "text" => {
@@ -855,6 +974,7 @@ impl Agent {
                 }
             }
             Some("assistant") => {
+                self.claude_turn = true;
                 if let Some(used) = claude_context(&msg["message"]["usage"]) {
                     let window = self.context.map_or(0, |c| c.window);
                     self.set_context(ContextUsage { used, window });
@@ -879,6 +999,7 @@ impl Agent {
                     }
                 }
             }
+            Some("user") if msg["isReplay"] == true => self.claude_echo(msg),
             Some("user") => {
                 for block in msg["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] == "tool_result" {
@@ -913,15 +1034,48 @@ impl Agent {
                 self.live_text = None;
                 self.expire_approvals();
                 self.finish_compaction(ItemStatus::Failed);
-                self.claude_turns = self.claude_turns.saturating_sub(1);
-                // claude moves on to the oldest message still waiting
-                if self.claude_turns > 0 {
-                    self.unqueue(1);
-                }
-                self.set_busy(self.claude_turns > 0);
+                self.claude_turn = false;
+                // messages it hasn't echoed yet will start a turn of their own
+                self.set_busy(!self.claude_waiting.is_empty());
             }
             _ => {}
         }
+    }
+
+    // claude echoes a message when it starts on it, and one echo can carry several sent close together
+    fn claude_echo(&mut self, msg: &Value) {
+        let content = &msg["message"]["content"];
+        let text = match content {
+            Value::String(text) => text.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => return,
+        };
+        // the output of claude's own local commands comes back the same way and isn't a message
+        if text.trim_start().starts_with("<local-command") {
+            return;
+        }
+        if self.claude_waiting.pop_front().is_none() {
+            return;
+        }
+        while let Some(next) = self.claude_waiting.front() {
+            if next.trim().is_empty() || !text.contains(next.trim()) {
+                break;
+            }
+            self.claude_waiting.pop_front();
+        }
+        self.claude_turn = true;
+        self.set_busy(true);
+        // whatever's still waiting stays queued, everything echoed has been picked up
+        let queued = self
+            .items
+            .iter()
+            .filter(|i| matches!(i, AgentItem::User { queued: true, .. }))
+            .count();
+        self.unqueue(queued.saturating_sub(self.claude_waiting.len()));
     }
 
     fn claude_tool(&mut self, block: &Value) {
@@ -1056,7 +1210,8 @@ impl Agent {
         let Some(thread) = self.thread_id.clone() else {
             return;
         };
-        let params = turn_params(&thread, &text, &attachments, &self.settings);
+        let mut params = turn_params(&thread, &text, &attachments, &self.settings);
+        add_skills(&mut params, &text, &self.skills());
         self.call(Call::StartTurn, "turn/start", params);
     }
 
@@ -1111,10 +1266,12 @@ impl Agent {
 
 // sent on every turn, so a change in the picker applies to the very next message
 // claude gets images inline, and other files as paths its read tool can open
-fn claude_content(text: &str, attachments: &[String]) -> Value {
+fn claude_content(text: &str, attachments: &[String], skills: &[Skill]) -> Value {
     let (images, files): (Vec<&String>, Vec<&String>) =
         attachments.iter().partition(|p| is_image(p));
-    let mut text = text.to_owned();
+    // a mentioned skill needs its own block to start with `/name`, and the rest goes ahead of it
+    let mut blocks = crate::skills::claude_blocks(text, skills);
+    let mut text = blocks.pop().unwrap_or_default();
     if !files.is_empty() {
         text.push_str("\n\nAttached files:");
         for path in files {
@@ -1135,6 +1292,9 @@ fn claude_content(text: &str, attachments: &[String]) -> Value {
             } })),
             Err(err) => text.push_str(&format!("\n\n(Couldn't attach {path}: {err})")),
         }
+    }
+    for block in blocks {
+        content.push(json!({ "type": "text", "text": block }));
     }
     content.push(json!({ "type": "text", "text": text }));
     Value::Array(content)
@@ -1171,6 +1331,20 @@ fn claude_context(usage: &Value) -> Option<u64> {
 }
 
 // codex reads images itself and gets other files as mentions it can open
+// codex is handed each skill a message mentions by its path, alongside the text that names it
+fn add_skills(params: &mut Value, text: &str, skills: &[Skill]) {
+    let mut seen = Vec::new();
+    for (_, _, skill) in crate::skills::mentions(text, skills) {
+        if seen.contains(&&skill.name) || skill.path.is_empty() {
+            continue;
+        }
+        seen.push(&skill.name);
+        if let Some(input) = params["input"].as_array_mut() {
+            input.push(json!({ "type": "skill", "name": skill.name, "path": skill.path }));
+        }
+    }
+}
+
 fn turn_params(
     thread: &str,
     text: &str,
@@ -1216,6 +1390,8 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
+        // echoes each message as claude starts on it, which is how mux knows what's still waiting
+        "--replay-user-messages",
         // sends permission prompts to us over stdio instead of answering them inside the cli
         "--permission-prompt-tool",
         "stdio",
@@ -1377,14 +1553,44 @@ mod tests {
         agent.handle(json!({ "method": method, "params": params }));
     }
 
+    // the order claude 2.1.312 sent things in when two messages arrived during a turn and were answered together
     #[test]
-    fn claude_stays_busy_until_every_queued_message_is_answered() {
+    fn claude_is_done_when_merged_messages_get_one_answer() {
         let mut agent = claude_agent();
-        agent.claude_turns = 2;
+        let user = |text: &str| AgentItem::User {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+        };
+        agent.items = vec![user("count")];
+        agent.claude_waiting = VecDeque::from(["count".to_owned()]);
         agent.set_busy(true);
+        let echo = |text: &str| json!({ "type": "user", "isReplay": true, "message": { "role": "user", "content": text } });
         let result = json!({ "type": "result", "subtype": "success", "result": "ok" });
+        agent.handle(echo("count"));
+        // two more arrive while it counts
+        for text in ["Now say hi.", "And say bye."] {
+            agent.items.push(AgentItem::User {
+                text: text.into(),
+                attachments: Vec::new(),
+                queued: true,
+            });
+            agent.claude_waiting.push_back(text.into());
+        }
         agent.handle(result.clone());
-        assert!(agent.busy, "the second message is still running");
+        assert!(agent.busy, "two messages are still waiting");
+        agent.handle(echo("Now say hi.\nAnd say bye."));
+        assert!(agent.claude_waiting.is_empty());
+        assert!(
+            !agent
+                .items
+                .iter()
+                .any(|i| matches!(i, AgentItem::User { queued: true, .. }))
+        );
+        agent.handle(result.clone());
+        assert!(!agent.busy);
+        // a background subagent waking claude up later runs a turn nobody sent, and still ends cleanly
+        agent.handle(json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "it finished" }] } }));
         agent.handle(result);
         assert!(!agent.busy);
     }
@@ -1547,6 +1753,41 @@ mod tests {
     }
 
     #[test]
+    fn sums_up_the_conversation_for_the_sidebar() {
+        let mut agent = agent();
+        agent.settings.model = Some("gpt-6.1-sol".into());
+        agent.items = vec![
+            AgentItem::User {
+                text: "fix it".into(),
+                attachments: Vec::new(),
+                queued: false,
+            },
+            AgentItem::FileChange {
+                changes: vec![FileChange {
+                    path: "a.rs".into(),
+                    diff: "--- a/a.rs\n+++ b/a.rs\n@@ -1 +1,2 @@\n-old\n+new\n+more".into(),
+                }],
+                status: ItemStatus::Done,
+            },
+            AgentItem::Assistant {
+                text: "Fixed the flaky test.".into(),
+            },
+        ];
+        let summary = agent.summary();
+        assert_eq!(summary.model, "gpt-6.1-sol");
+        assert_eq!(summary.preview, "Fixed the flaky test.");
+        assert_eq!(
+            (
+                summary.messages,
+                summary.files,
+                summary.added,
+                summary.removed
+            ),
+            (1, 1, 2, 1)
+        );
+    }
+
+    #[test]
     fn claude_messages_sent_mid_turn_wait_their_turn() {
         let mut agent = claude_agent();
         let user = |queued| AgentItem::User {
@@ -1555,12 +1796,15 @@ mod tests {
             queued,
         };
         agent.items = vec![user(false), user(true), user(true)];
-        agent.claude_turns = 3;
+        agent.claude_waiting = VecDeque::from(["a".to_owned(), "b".to_owned()]);
         agent.set_busy(true);
+        let echo = |text: &str| json!({ "type": "user", "isReplay": true, "message": { "role": "user", "content": text } });
         let result = json!({ "type": "result", "subtype": "success", "result": "ok" });
         agent.handle(result.clone());
+        agent.handle(echo("a"));
         assert_eq!(agent.items, [user(false), user(false), user(true)]);
         agent.handle(result.clone());
+        agent.handle(echo("b"));
         agent.handle(result);
         assert_eq!(agent.items, [user(false), user(false), user(false)]);
         assert!(!agent.busy);
@@ -1750,7 +1994,7 @@ mod tests {
         let image = dir.join("dot.png");
         fs::write(&image, b"png").unwrap();
         let image = image.to_string_lossy().into_owned();
-        let content = claude_content("look", &[image, "/p/notes.md".to_owned()]);
+        let content = claude_content("look", &[image, "/p/notes.md".to_owned()], &[]);
         assert_eq!(content[0]["source"]["media_type"], "image/png");
         assert_eq!(content[0]["source"]["data"], "cG5n");
         assert_eq!(content[1]["text"], "look\n\nAttached files:\n- /p/notes.md");
@@ -1911,6 +2155,7 @@ mod tests {
             effort: Some("high".into()),
             fast: true,
             access: Access::AutoEdits,
+            worktree: false,
         };
         let args = claude_args(&settings, Some("s1")).join(" ");
         assert!(args.contains("--permission-prompt-tool stdio"));

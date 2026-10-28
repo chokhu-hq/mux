@@ -25,7 +25,9 @@ mod usage_ring;
 pub use badge::{Badge, Tone};
 pub use button::{Button, Size, Variant};
 pub use chip::Chip;
-pub use command_palette::{Command, CommandPalette, SHORTCUT as PALETTE_SHORTCUT};
+pub use command_palette::{
+    Choice, Command, CommandPalette, Destination, SHORTCUT as PALETTE_SHORTCUT,
+};
 pub use context_ring::{ContextRing, tokens as short_tokens};
 pub use empty_state::EmptyState;
 pub use file_viewer::{FileView, FileViewAction, link_target, open_in_editor};

@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 15;
+pub const PROTOCOL: u32 = 19;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -22,6 +22,28 @@ pub struct SessionInfo {
     pub updated: u64,
     #[serde(default)]
     pub provider: Provider,
+    // the separate checkout an agent works in, when it was started on its own branch
+    #[serde(default)]
+    pub worktree: Option<String>,
+    // that checkout's branch, filled in by the server when it sends state
+    #[serde(default)]
+    pub branch: Option<String>,
+    // what an agent has been up to, for the sidebar and its hover card
+    #[serde(default)]
+    pub summary: Option<AgentSummary>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentSummary {
+    // the model picked, empty for the cli's default
+    pub model: String,
+    // the start of the agent's latest reply
+    pub preview: String,
+    pub messages: u32,
+    pub files: u32,
+    pub added: u32,
+    pub removed: u32,
+    pub context: Option<ContextUsage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,6 +165,9 @@ pub struct AgentSettings {
     pub fast: bool,
     #[serde(default)]
     pub access: Access,
+    // start in a new git worktree on its own branch rather than the project folder itself
+    #[serde(default)]
+    pub worktree: bool,
 }
 
 // how much of the model's context window the conversation fills, where a window of 0 means not known yet
@@ -175,6 +200,17 @@ impl TokenTotals {
         self.output += other.output;
         self.reasoning += other.reasoning;
     }
+}
+
+// a reusable set of instructions an agent can be pointed at with `$name`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    // where its instructions live, which codex is handed along with the message
+    pub path: String,
+    // personal, project, plugin or built in
+    pub scope: String,
 }
 
 // one model's tokens on one local day, read from the agent clis' own history
@@ -358,6 +394,11 @@ pub enum ServerMsg {
     AgentContext {
         id: u64,
         context: ContextUsage,
+    },
+    // the skills the agent can be asked to use, for the composer's menus
+    AgentSkills {
+        id: u64,
+        skills: Vec<Skill>,
     },
     // the last month of token use, with which day counts as today
     TokenHistory {

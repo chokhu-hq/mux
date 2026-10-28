@@ -108,7 +108,15 @@ impl Store {
         self.groups.retain(|g| g.id != id || !g.sessions.is_empty());
     }
 
+    // where a session runs: its own worktree when it has one, otherwise its group's folder
     pub fn session_path(&self, id: u64) -> Option<&str> {
+        if let Some(worktree) = self.session(id).and_then(|s| s.worktree.as_deref()) {
+            return Some(worktree);
+        }
+        self.project_path(id)
+    }
+
+    pub fn project_path(&self, id: u64) -> Option<&str> {
         self.groups
             .iter()
             .find(|g| g.sessions.iter().any(|s| s.id == id))?
@@ -160,6 +168,9 @@ impl Store {
             meta,
             updated: now(),
             provider: Default::default(),
+            worktree: None,
+            branch: None,
+            summary: None,
         });
         id
     }

@@ -2,8 +2,10 @@ mod agent;
 mod history;
 mod models;
 mod process;
+mod skills;
 mod store;
 mod usage;
+mod worktree;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -44,6 +46,8 @@ pub enum Event {
     },
     Models(Provider, Result<models::Catalog, String>),
     History(Box<history::History>),
+    // the skills found for a session's agent, tagged with which agent they're for
+    Skills(u64, Provider, Vec<mux_core::protocol::Skill>),
 }
 
 // blocks until ctrl+c or a client asks the server to shut down
@@ -278,6 +282,14 @@ impl Server {
                     self.agent_changed(session);
                 }
             }
+            Event::Skills(id, provider, skills) => {
+                // a switch of agent since asking makes these the wrong agent's skills
+                let agent = self.agent(id);
+                if agent.settings.provider == provider {
+                    agent.set_skills(skills);
+                    self.agent_changed(id);
+                }
+            }
             Event::History(history) => {
                 let (today, days) = history.summary();
                 self.history = Some(history);
@@ -356,6 +368,9 @@ impl Server {
                 self.changed();
             }
             ClientMsg::DeleteSession { id } => {
+                if let Some(path) = self.store.session(id).and_then(|s| s.worktree.clone()) {
+                    worktree::remove(path);
+                }
                 self.processes.remove(&id);
                 self.agents.remove(&id);
                 let _ = std::fs::remove_file(self.agent_path(id));
@@ -412,7 +427,10 @@ impl Server {
                     settings: agent.settings.clone(),
                     context: agent.context,
                 };
+                let (skills, provider) = (agent.skills(), agent.settings.provider);
                 self.send(client, msg);
+                self.send(client, ServerMsg::AgentSkills { id, skills });
+                self.fetch_skills(id, provider);
                 for provider in Provider::ALL {
                     if !self.models.contains_key(&provider) {
                         self.fetch_models(provider);
@@ -435,13 +453,26 @@ impl Server {
             ClientMsg::AgentConfigure { id, mut settings } => {
                 let path = self.agent_path(id);
                 let agent = self.agent(id);
-                // a conversation stays with the agent that started it, since neither can resume the other's
+                let before = agent.settings.provider;
+                // a conversation stays with the agent and the folder it started in
                 if !agent.items.is_empty() {
                     settings.provider = agent.settings.provider;
+                    settings.worktree = agent.settings.worktree;
                 }
                 agent.settings = settings.clone();
                 if let Err(err) = agent.save(&path) {
                     eprintln!("mux: could not save {}: {err}", path.display());
+                }
+                let summary = agent.summary();
+                // the other agent has its own skills, so the menu needs them instead
+                if before != settings.provider {
+                    agent.set_skills(Vec::new());
+                }
+                if let Some(info) = self.store.session_mut(id)
+                    && info.summary.as_ref() != Some(&summary)
+                {
+                    info.summary = Some(summary);
+                    self.changed();
                 }
                 if let Some(info) = self.store.session_mut(id)
                     && info.provider != settings.provider
@@ -449,7 +480,13 @@ impl Server {
                     info.provider = settings.provider;
                     self.changed();
                 }
+                let switched = before != settings.provider;
                 self.send_watchers(id, ServerMsg::AgentSettings { id, settings });
+                if switched {
+                    self.agent_changed(id);
+                    let provider = self.agent(id).settings.provider;
+                    self.fetch_skills(id, provider);
+                }
             }
             ClientMsg::AgentSend {
                 id,
@@ -527,6 +564,37 @@ impl Server {
                 info.title = title;
             }
         }
+        // the first message of a worktree agent makes its checkout, named after what it was asked
+        let wants_worktree = info.worktree.is_none()
+            && self
+                .agents
+                .get(&id)
+                .is_some_and(|a| a.settings.worktree && a.items.is_empty());
+        if wants_worktree {
+            let title = self
+                .store
+                .session(id)
+                .map(|s| s.title.clone())
+                .unwrap_or_default();
+            match self
+                .store
+                .project_path(id)
+                .map(|repo| worktree::add(repo, &title, id))
+            {
+                Some(Ok(path)) => {
+                    if let Some(info) = self.store.session_mut(id) {
+                        info.worktree = Some(path);
+                    }
+                }
+                Some(Err(reason)) => {
+                    self.agent(id).error(reason);
+                    self.agent_changed(id);
+                    self.changed();
+                    return;
+                }
+                None => {}
+            }
+        }
         let folder = self.store.session_path(id).map(PathBuf::from);
         self.generation += 1;
         let (generation, events) = (self.generation, self.events.clone());
@@ -547,6 +615,23 @@ impl Server {
         }
         self.agent_changed(id);
         self.changed();
+    }
+
+    // skills are read fresh each time a chat opens, so a new or edited one shows up without restarting
+    fn fetch_skills(&self, id: u64, provider: Provider) {
+        let Some(folder) = self.store.session_path(id).map(PathBuf::from) else {
+            return;
+        };
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let skills = match provider {
+                Provider::Claude => tokio::task::spawn_blocking(move || skills::claude(&folder))
+                    .await
+                    .unwrap_or_default(),
+                Provider::Codex => skills::codex(&folder).await.unwrap_or_default(),
+            };
+            let _ = events.send(Event::Skills(id, provider, skills));
+        });
     }
 
     // the model list comes with the plan limits, so fetching it again is how usage is refreshed
@@ -589,12 +674,13 @@ impl Server {
         let label = provider.label();
         let usage = agent.usage.take();
         let context = agent.take_context();
-        // saved when a turn starts or ends rather than on every streamed word
-        if (busy.is_some() || (!agent.busy && !items.is_empty()))
-            && let Err(err) = agent.save(&path)
-        {
+        let skills = agent.take_skills();
+        // saved when a turn starts or ends rather than on every streamed word, and the sidebar's summary with it
+        let settled = busy.is_some() || (!agent.busy && !items.is_empty());
+        if settled && let Err(err) = agent.save(&path) {
             eprintln!("mux: could not save {}: {err}", path.display());
         }
+        let summary = settled.then(|| agent.summary());
         for (index, item) in items {
             self.send_watchers(id, ServerMsg::AgentItem { id, index, item });
         }
@@ -607,11 +693,20 @@ impl Server {
         if let Some(context) = context {
             self.send_watchers(id, ServerMsg::AgentContext { id, context });
         }
+        if let Some(skills) = skills {
+            self.send_watchers(id, ServerMsg::AgentSkills { id, skills });
+        }
         if let Some(info) = self.store.session_mut(id)
             && info.status != status
         {
             info.status = status;
             info.meta = label.to_owned();
+            self.changed();
+        }
+        if let (Some(summary), Some(info)) = (summary, self.store.session_mut(id))
+            && info.summary.as_ref() != Some(&summary)
+        {
+            info.summary = Some(summary);
             self.changed();
         }
     }
@@ -662,6 +757,9 @@ impl Server {
         let mut groups = self.store.groups.clone();
         for group in &mut groups {
             group.branch = group.path.as_deref().and_then(git_branch);
+            for session in &mut group.sessions {
+                session.branch = session.worktree.as_deref().and_then(git_branch);
+            }
         }
         ServerMsg::State { groups }
     }

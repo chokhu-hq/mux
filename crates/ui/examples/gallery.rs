@@ -106,7 +106,7 @@ impl eframe::App for Gallery {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         mux_ui::capture::screenshot(&ctx);
-        if let Some(id) = self.palette.show(&ctx, &COMMANDS) {
+        if let Some(mux_ui::Choice::Command(id)) = self.palette.show(&ctx, &COMMANDS, &[]) {
             if id == "toggle-theme" {
                 let dark = ctx.theme() == Theme::Dark;
                 ctx.set_theme(if dark { Theme::Light } else { Theme::Dark });
@@ -394,7 +394,8 @@ impl eframe::App for Gallery {
                                                         ChatAction::Attach
                                                         | ChatAction::OpenLink(_)
                                                         | ChatAction::Compact
-                                                        | ChatAction::OpenDiff(_),
+                                                        | ChatAction::OpenDiff(_)
+                                                        | ChatAction::Command(_),
                                                     ) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;

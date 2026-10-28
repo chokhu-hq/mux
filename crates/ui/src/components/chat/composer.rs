@@ -15,6 +15,8 @@ pub enum ComposerAction {
     Stop,
     Attach,
     Compact,
+    // one of mux's own slash commands was picked
+    Command(String),
 }
 
 // how full the context window gets before the composer suggests compacting
@@ -29,6 +31,7 @@ pub struct Composer<'a> {
     controls: Option<Controls<'a>>,
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
+    commands: &'a [super::SlashCommand],
 }
 
 impl<'a> Composer<'a> {
@@ -40,7 +43,14 @@ impl<'a> Composer<'a> {
             controls: None,
             context: None,
             attachments: None,
+            commands: &[],
         }
+    }
+
+    // what typing a slash offers
+    pub fn commands(mut self, commands: &'a [super::SlashCommand]) -> Self {
+        self.commands = commands;
+        self
     }
 
     // files waiting to go with the next message, shown above the text
@@ -85,10 +95,27 @@ impl<'a> Composer<'a> {
         }
         // a message can be just the files, with nothing typed
         let has_files = self.attachments.as_ref().is_some_and(|a| !a.is_empty());
+        // the slash menu reads its keys first, so enter picks a command rather than sending
+        let mut picked = None;
+        if !self.commands.is_empty() {
+            let anchor = ui.cursor().min;
+            let width = ui.available_width().min(440.0);
+            if let Some(super::slash::Pick::Run(name)) = super::slash::menu(
+                ui,
+                edit_id,
+                self.draft,
+                self.commands,
+                anchor,
+                width,
+                focused,
+            ) {
+                picked = Some(ComposerAction::Command(name));
+            }
+        }
         // enter sends and shift+enter falls through to the text edit as a newline
         // messages can go out while the agent works, the agent picks them up as it goes
         let mut send = focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-        let mut action = None;
+        let mut action = picked;
 
         if let Some(context) = self.context
             && !self.running

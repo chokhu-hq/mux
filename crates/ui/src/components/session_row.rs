@@ -21,6 +21,10 @@ pub struct SessionRow<'a> {
     branch: &'a str,
     provider: Option<Provider>,
     selected: bool,
+    unread: bool,
+    model: &'a str,
+    // lines added and removed by an agent, shown at the end of the bottom line
+    changes: Option<(u32, u32)>,
 }
 
 impl<'a> SessionRow<'a> {
@@ -36,6 +40,9 @@ impl<'a> SessionRow<'a> {
             branch: "",
             provider: None,
             selected: false,
+            unread: false,
+            model: "",
+            changes: None,
         }
     }
 
@@ -63,6 +70,23 @@ impl<'a> SessionRow<'a> {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    // the model an agent runs, named beside its mark
+    pub fn model(mut self, model: &'a str) -> Self {
+        self.model = model;
+        self
+    }
+
+    pub fn changes(mut self, added: u32, removed: u32) -> Self {
+        self.changes = Some((added, removed));
+        self
+    }
+
+    // something happened here since it was last looked at, like an agent finishing
+    pub fn unread(mut self, unread: bool) -> Self {
+        self.unread = unread;
         self
     }
 
@@ -95,12 +119,24 @@ impl<'a> SessionRow<'a> {
             let time =
                 ui.painter()
                     .layout_no_wrap(self.time.to_owned(), small.clone(), p.text_faint);
-            let time_w = time.size().x;
+            let mut time_w = time.size().x;
             ui.painter().galley(
                 pos2(inner.right() - time_w, row(0.0) - time.size().y / 2.0),
                 time,
                 p.text_faint,
             );
+            let dot = spring_bool(
+                ui.ctx(),
+                response.id.with("unread"),
+                self.unread,
+                Spring::QUICK,
+            );
+            if dot > 0.01 {
+                let center = pos2(inner.right() - time_w - space::SM - 3.0, row(0.0));
+                ui.painter()
+                    .circle_filled(center, 3.5 * dot, p.accent.gamma_multiply(dot));
+                time_w += space::SM + 7.0;
+            }
             let context = elided(
                 ui,
                 self.context,
@@ -150,34 +186,53 @@ impl<'a> SessionRow<'a> {
                     status_color(p, self.status),
                 );
             }
-            if !self.branch.is_empty() {
-                let x = inner.left() + icon::SM + space::SM;
+            // the bottom line reads mark, model, branch, with what changed pinned to the right
+            let y = row(2.0);
+            let mut right = inner.right();
+            if let Some((added, removed)) = self.changes.filter(|(a, r)| a + r > 0) {
+                let minus = ui.painter().text(
+                    pos2(right, y),
+                    Align2::RIGHT_CENTER,
+                    format!("−{removed}"),
+                    small.clone(),
+                    p.danger.gamma_multiply(0.85),
+                );
+                let plus = ui.painter().text(
+                    pos2(minus.left() - space::XS, y),
+                    Align2::RIGHT_CENTER,
+                    format!("+{added}"),
+                    small.clone(),
+                    p.success.gamma_multiply(0.85),
+                );
+                right = plus.left() - space::SM;
+            }
+            let mut x = inner.left() + icon::SM + space::SM;
+            if !self.model.is_empty() {
+                let model = elided(ui, self.model, small.clone(), p.text_faint, right - x);
+                let width = model.size().x;
+                ui.painter()
+                    .galley(pos2(x, y - model.size().y / 2.0), model, p.text_faint);
+                x += width + space::SM;
+            }
+            if !self.branch.is_empty() && right - x > icon::SM + space::LG {
                 ui.painter().text(
-                    pos2(x + icon::SM / 2.0, row(2.0)),
+                    pos2(x + icon::SM / 2.0, y),
                     Align2::CENTER_CENTER,
                     icons::GIT_BRANCH,
                     font::icon(icon::SM),
                     p.text_faint,
                 );
                 let branch_x = x + icon::SM + space::XS;
-                let branch = elided(
-                    ui,
-                    self.branch,
-                    small,
-                    p.text_faint,
-                    inner.right() - branch_x,
-                );
+                let branch = elided(ui, self.branch, small, p.text_faint, right - branch_x);
                 ui.painter().galley(
-                    pos2(branch_x, row(2.0) - branch.size().y / 2.0),
+                    pos2(branch_x, y - branch.size().y / 2.0),
                     branch,
                     p.text_faint,
                 );
             }
         }
 
-        response
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(format!("{} · {}", self.kind.label(), self.status.label()))
+        response.on_hover_cursor(CursorIcon::PointingHand)
     }
 }
 

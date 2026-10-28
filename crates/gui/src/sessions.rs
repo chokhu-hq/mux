@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{
     self, CursorIcon, Id, Key, Modifiers, Order, Rect, Sense, Stroke, UiBuilder, Vec2, pos2, vec2,
 };
 use mux_core::protocol::{
     self as wire, AgentItem, AgentSettings, ClientMsg, ContextUsage, GroupInfo, ItemStatus,
-    ModelOption, ServerMsg, SessionInfo, UsageDay, UsageWindow,
+    ModelOption, ServerMsg, SessionInfo, Skill, UsageDay, UsageWindow,
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 use mux_ui::chat::{
@@ -35,6 +35,8 @@ pub struct Local {
     pub busy: bool,
     pub settings: AgentSettings,
     pub context: Option<ContextUsage>,
+    // the skills the agent can be pointed at with `$name`, offered alongside mux's commands
+    pub skills: Vec<Skill>,
     // files picked or dropped for the next message
     pub attachments: Vec<String>,
     transcript: Vec<AgentItem>,
@@ -82,6 +84,18 @@ enum Action {
     NewAgent(u64),
 }
 
+pub enum Event {
+    Finished,
+    Waiting,
+    Failed,
+}
+
+pub struct Alert {
+    pub id: u64,
+    pub title: String,
+    pub event: Event,
+}
+
 #[derive(Default)]
 pub struct Sessions {
     groups: Vec<GroupInfo>,
@@ -100,10 +114,55 @@ pub struct Sessions {
     usage: HashMap<Provider, Vec<UsageWindow>>,
     // the last month of token use and which day is today, once the server has read the clis' history
     tokens: Option<(i64, Vec<UsageDay>)>,
+    // sessions where an agent finished or stopped to ask something, since they were last looked at
+    unread: HashSet<u64>,
+    // agents that just finished, failed or started waiting, for the app to point out
+    alerts: Vec<Alert>,
     pub outbox: Vec<ClientMsg>,
 }
 
 impl Sessions {
+    // what agents did since the last call, marking each unread unless it's the one being looked at
+    pub fn take_alerts(&mut self, looking: Option<u64>) -> Vec<Alert> {
+        let alerts = std::mem::take(&mut self.alerts);
+        for alert in &alerts {
+            if looking != Some(alert.id) {
+                self.unread.insert(alert.id);
+            }
+        }
+        if let Some(id) = looking {
+            self.unread.remove(&id);
+        }
+        alerts
+    }
+
+    // every session in sidebar order, for the palette and the number shortcuts
+    pub fn destinations(&self) -> Vec<mux_ui::Destination> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(move |s| (g, s)))
+            .map(|(group, session)| mux_ui::Destination {
+                id: session.id,
+                title: session.title.clone(),
+                detail: group.name.clone(),
+                icon: match session.kind {
+                    SessionKind::Agent => icons::ROBOT,
+                    SessionKind::Shell => icons::TERMINAL,
+                    SessionKind::Task => icons::PLAY,
+                },
+            })
+            .collect()
+    }
+
+    pub fn select(&mut self, id: u64) {
+        self.selected = Some(id);
+        self.picked = true;
+    }
+
+    pub fn selected_id(&self) -> Option<u64> {
+        self.selected
+    }
+
     pub fn take_picked(&mut self) -> bool {
         std::mem::take(&mut self.picked)
     }
@@ -112,7 +171,31 @@ impl Sessions {
         match msg {
             ServerMsg::Welcome { .. } => {}
             ServerMsg::State { groups } => {
+                let before: HashMap<u64, SessionStatus> =
+                    self.infos().map(|s| (s.id, s.status)).collect();
                 self.groups = groups;
+                // only a change seen while connected counts, so starting up doesn't announce every session
+                if self.loaded {
+                    let alerts: Vec<Alert> = self
+                        .infos()
+                        .filter(|s| s.kind == SessionKind::Agent)
+                        .filter_map(|s| {
+                            let was = *before.get(&s.id)?;
+                            let event = match (was, s.status) {
+                                (SessionStatus::Running, SessionStatus::Done) => Event::Finished,
+                                (SessionStatus::Running, SessionStatus::Waiting) => Event::Waiting,
+                                (SessionStatus::Running, SessionStatus::Failed) => Event::Failed,
+                                _ => return None,
+                            };
+                            Some(Alert {
+                                id: s.id,
+                                title: s.title.clone(),
+                                event,
+                            })
+                        })
+                        .collect();
+                    self.alerts.extend(alerts);
+                }
                 let ids: Vec<u64> = self.infos().map(|s| s.id).collect();
                 self.locals.retain(|id, _| ids.contains(id));
                 if !self.loaded {
@@ -140,6 +223,11 @@ impl Sessions {
             ServerMsg::Output { id, data } => {
                 if let Some(terminal) = self.locals.get_mut(&id).and_then(|l| l.terminal.as_mut()) {
                     terminal.feed(&data);
+                }
+            }
+            ServerMsg::AgentSkills { id, skills } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.skills = skills;
                 }
             }
             ServerMsg::AgentTranscript {
@@ -229,6 +317,13 @@ impl Sessions {
     }
 
     // the id, folder and name of the group holding the selected session
+    // the branch the selected session works on, its own worktree's or else its project's
+    pub fn selected_branch(&self) -> Option<String> {
+        let (g, i) = self.locate(self.selected?)?;
+        let group = &self.groups[g];
+        group.sessions[i].branch.clone().or(group.branch.clone())
+    }
+
     pub fn selected_group(&self) -> Option<(u64, Option<String>, String)> {
         let (g, _) = self.locate(self.selected?)?;
         let group = &self.groups[g];
@@ -442,12 +537,30 @@ impl Sessions {
                                 SessionRow::new(&session.title, session.kind, session.status)
                                     .context(&context)
                                     .time(&time)
-                                    .branch(group.branch.as_deref().unwrap_or_default())
-                                    .selected(self.selected == Some(session.id));
+                                    .branch(
+                                        session
+                                            .branch
+                                            .as_deref()
+                                            .or(group.branch.as_deref())
+                                            .unwrap_or_default(),
+                                    )
+                                    .selected(self.selected == Some(session.id))
+                                    .unread(self.unread.contains(&session.id));
+                            let model = model_name(&self.models, session);
                             if session.kind == SessionKind::Agent {
-                                row = row.provider(session.provider);
+                                row = row.provider(session.provider).model(&model);
                             }
-                            row.show(ui)
+                            if let Some(summary) = &session.summary {
+                                row = row.changes(summary.added, summary.removed);
+                            }
+                            let branch = session.branch.as_deref().or(group.branch.as_deref());
+                            // the card waits until the pointer settles, and never shows mid drag
+                            let row = row.show(ui);
+                            if dragging.is_some() {
+                                row
+                            } else {
+                                row.tip_ui(|ui| session_card(ui, session, group, branch, &model))
+                            }
                         })
                         .inner;
                     if row.clicked() {
@@ -677,6 +790,195 @@ fn row_context(session: &SessionInfo) -> String {
     }
 }
 
+// the model an agent runs as people know it, falling back to its id and then to the cli's default
+fn model_name(models: &Models, session: &SessionInfo) -> String {
+    if session.kind != SessionKind::Agent {
+        return String::new();
+    }
+    let list = models.get(&session.provider);
+    let id = session
+        .summary
+        .as_ref()
+        .map(|s| s.model.as_str())
+        .unwrap_or_default();
+    list.and_then(|list| {
+        list.iter()
+            .find(|m| !id.is_empty() && m.id == id)
+            .or_else(|| list.iter().find(|m| id.is_empty() && m.is_default))
+    })
+    .map_or_else(|| id.to_owned(), |m| m.name.clone())
+}
+
+// everything worth knowing about a session at a glance, shown when its row is hovered
+fn session_card(
+    ui: &mut egui::Ui,
+    session: &SessionInfo,
+    group: &GroupInfo,
+    branch: Option<&str>,
+    model: &str,
+) {
+    let p = theme::palette(ui);
+    ui.set_width(300.0);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.spacing_mut().interact_size.y = 0.0;
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(&session.title)
+                .font(theme::font::medium(theme::text::MD + 1.0))
+                .color(p.text),
+        )
+        .wrap(),
+    );
+    ui.add_space(theme::space::XS);
+    let (color, label) = match session.status {
+        SessionStatus::Running => (p.accent, "Working"),
+        SessionStatus::Waiting => (p.warning, "Needs your input"),
+        SessionStatus::Failed => (p.danger, "Failed"),
+        SessionStatus::Done if session.kind == SessionKind::Agent => (p.success, "Finished"),
+        SessionStatus::Done => (p.text_faint, "Exited"),
+        SessionStatus::Idle => (p.text_faint, "Not started"),
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::space::SM;
+        let (dot, _) = ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
+        ui.painter().circle_filled(dot.center(), 3.5, color);
+        let when = ago(session.updated);
+        let text = if when.is_empty() || when == "now" {
+            label.to_owned()
+        } else {
+            format!("{label} · {when} ago")
+        };
+        ui.label(
+            egui::RichText::new(text)
+                .font(theme::font::regular(theme::text::SM + 1.0))
+                .color(p.text_muted),
+        );
+    });
+    ui.add_space(theme::space::MD);
+    let line = ui.available_rect_before_wrap();
+    ui.painter()
+        .hline(line.x_range(), line.top(), Stroke::new(1.0, p.border));
+    ui.add_space(theme::space::SM);
+
+    let mut facts: Vec<(&str, String)> = Vec::new();
+    let folder = session
+        .worktree
+        .as_deref()
+        .or(group.path.as_deref())
+        .map(mux_core::display_path)
+        .unwrap_or_else(|| "No folder".to_owned());
+    facts.push(("Project", group.name.clone()));
+    facts.push((
+        if session.worktree.is_some() {
+            "Worktree"
+        } else {
+            "Folder"
+        },
+        folder,
+    ));
+    if let Some(branch) = branch {
+        facts.push(("Branch", branch.to_owned()));
+    }
+    match session.kind {
+        SessionKind::Agent => {
+            let agent = session.provider.label();
+            facts.push((
+                "Agent",
+                if model.is_empty() {
+                    agent.to_owned()
+                } else {
+                    format!("{agent} · {model}")
+                },
+            ));
+            if let Some(summary) = &session.summary {
+                facts.push(("Messages", summary.messages.to_string()));
+                if summary.files > 0 {
+                    let files = if summary.files == 1 { "file" } else { "files" };
+                    facts.push((
+                        "Changes",
+                        format!(
+                            "{} {files}, +{} −{}",
+                            summary.files, summary.added, summary.removed
+                        ),
+                    ));
+                }
+                if let Some(context) = summary.context.filter(|c| c.window > 0) {
+                    let share = context.used as f32 / context.window as f32;
+                    facts.push((
+                        "Context",
+                        format!(
+                            "{} of {} · {}%",
+                            mux_ui::short_tokens(context.used),
+                            mux_ui::short_tokens(context.window),
+                            (share * 100.0).round() as u32
+                        ),
+                    ));
+                }
+            }
+        }
+        SessionKind::Shell | SessionKind::Task if !session.meta.is_empty() => {
+            let label = if session.kind == SessionKind::Task {
+                "Command"
+            } else {
+                "Running in"
+            };
+            facts.push((label, session.meta.clone()));
+        }
+        _ => {}
+    }
+    for (label, value) in facts {
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(
+                    egui::RichText::new(label)
+                        .font(theme::font::regular(theme::text::SM + 1.0))
+                        .color(p.text_faint),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut job = egui::text::LayoutJob::simple_singleline(
+                        value,
+                        theme::font::regular(theme::text::SM + 1.0),
+                        p.text,
+                    );
+                    job.wrap = egui::text::TextWrapping {
+                        max_width: 200.0,
+                        max_rows: 1,
+                        break_anywhere: true,
+                        overflow_character: Some('…'),
+                    };
+                    ui.label(job);
+                });
+            },
+        );
+    }
+
+    let preview = session
+        .summary
+        .as_ref()
+        .map(|s| s.preview.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default()
+        .replace("**", "")
+        .replace('`', "");
+    if !preview.is_empty() {
+        ui.add_space(theme::space::SM);
+        let line = ui.available_rect_before_wrap();
+        ui.painter()
+            .hline(line.x_range(), line.top(), Stroke::new(1.0, p.border));
+        ui.add_space(theme::space::SM);
+        let mut job = egui::text::LayoutJob::simple(
+            preview,
+            theme::font::regular(theme::text::SM + 1.0),
+            p.text_muted,
+            300.0,
+        );
+        job.wrap.max_rows = 3;
+        job.wrap.overflow_character = Some('…');
+        ui.label(job);
+    }
+}
+
 fn ago(updated: u64) -> String {
     if updated == 0 {
         return String::new();
@@ -810,9 +1112,59 @@ fn chat_items(
         }
         approvals.push(approval);
     }
-    chat::set_thinking(&mut items, busy);
     approvals.resize(items.len(), None);
+    let (mut items, approvals) = summarise_changes(items, approvals, busy);
+    chat::set_thinking(&mut items, busy);
     (items, approvals)
+}
+
+// a finished turn that touched several files ends with one line that opens them all for review
+fn summarise_changes(
+    items: Vec<ChatItem>,
+    approvals: Vec<Option<u64>>,
+    busy: bool,
+) -> (Vec<ChatItem>, Vec<Option<u64>>) {
+    let mut out = Vec::with_capacity(items.len());
+    let mut out_approvals = Vec::with_capacity(items.len());
+    // the first edit card's place in `out`, the files touched and the lines added and removed
+    let mut turn: Option<(usize, Vec<String>, usize, usize)> = None;
+    let close = |turn: &mut Option<(usize, Vec<String>, usize, usize)>,
+                 out: &mut Vec<ChatItem>,
+                 out_approvals: &mut Vec<Option<u64>>| {
+        if let Some((first, files, added, removed)) = turn.take()
+            && files.len() > 1
+        {
+            out.push(ChatItem::Changes(chat::Changes {
+                files: files.len(),
+                added,
+                removed,
+                first,
+            }));
+            out_approvals.push(None);
+        }
+    };
+    for (item, approval) in items.into_iter().zip(approvals) {
+        if matches!(item, ChatItem::User { .. }) {
+            close(&mut turn, &mut out, &mut out_approvals);
+        }
+        if let ChatItem::Diff(diff) = &item {
+            let count = |kind| diff.lines.iter().filter(|l| l.kind == kind).count();
+            let (add, remove) = (count(chat::DiffKind::Add), count(chat::DiffKind::Remove));
+            let entry = turn.get_or_insert_with(|| (out.len(), Vec::new(), 0, 0));
+            if !entry.1.contains(&diff.path) {
+                entry.1.push(diff.path.clone());
+            }
+            entry.2 += add;
+            entry.3 += remove;
+        }
+        out.push(item);
+        out_approvals.push(approval);
+    }
+    // the turn still running isn't summed up until it's done
+    if !busy {
+        close(&mut turn, &mut out, &mut out_approvals);
+    }
+    (out, out_approvals)
 }
 
 fn tool_kind(name: &str) -> ToolKind {
@@ -880,6 +1232,86 @@ fn diff_lines(diff: &str) -> Vec<DiffLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_turns_that_touch_several_files_get_a_summary() {
+        let user = || AgentItem::User {
+            text: "go".into(),
+            attachments: Vec::new(),
+            queued: false,
+        };
+        let edit = |path: &str| AgentItem::FileChange {
+            changes: vec![wire::FileChange {
+                path: path.into(),
+                diff: "@@ -1 +1 @@\n-a\n+b\n+c".into(),
+            }],
+            status: ItemStatus::Done,
+        };
+        let transcript = vec![
+            user(),
+            edit("a.rs"),
+            edit("b.rs"),
+            edit("a.rs"),
+            user(),
+            edit("c.rs"),
+        ];
+        let (items, approvals) = chat_items(&transcript, false, Provider::Codex);
+        assert_eq!(items.len(), approvals.len());
+        let summaries: Vec<(usize, usize, usize, usize)> = items
+            .iter()
+            .filter_map(|i| match i {
+                ChatItem::Changes(c) => Some((c.files, c.added, c.removed, c.first)),
+                _ => None,
+            })
+            .collect();
+        // the second turn only touched one file, so its edit card says it all
+        assert_eq!(summaries, [(2, 6, 3, 1)]);
+        let (busy, _) = chat_items(&transcript[..4], true, Provider::Codex);
+        assert!(!busy.iter().any(|i| matches!(i, ChatItem::Changes(_))));
+    }
+
+    #[test]
+    fn finished_agents_alert_once_and_stay_unread_until_looked_at() {
+        let state = |status| ServerMsg::State {
+            groups: vec![GroupInfo {
+                id: 1,
+                name: "p".into(),
+                path: None,
+                branch: None,
+                open: true,
+                sessions: vec![SessionInfo {
+                    id: 2,
+                    title: "fix tests".into(),
+                    kind: SessionKind::Agent,
+                    status,
+                    meta: String::new(),
+                    updated: 0,
+                    provider: Provider::Claude,
+                    worktree: None,
+                    branch: None,
+                    summary: None,
+                }],
+            }],
+        };
+        let mut sessions = Sessions::default();
+        // what's already done at startup isn't news
+        sessions.apply(state(SessionStatus::Done));
+        assert!(sessions.take_alerts(None).is_empty());
+        sessions.apply(state(SessionStatus::Running));
+        sessions.apply(state(SessionStatus::Waiting));
+        let alerts = sessions.take_alerts(None);
+        assert!(matches!(
+            alerts.as_slice(),
+            [Alert {
+                id: 2,
+                event: Event::Waiting,
+                ..
+            }]
+        ));
+        assert!(sessions.unread.contains(&2));
+        sessions.take_alerts(Some(2));
+        assert!(!sessions.unread.contains(&2));
+    }
 
     #[test]
     fn a_dragged_group_lands_in_the_gap_under_the_pointer() {

@@ -42,6 +42,34 @@ impl Command {
     }
 }
 
+// somewhere the palette can jump to, like a session, found by typing part of its name
+pub struct Destination {
+    pub id: u64,
+    pub title: String,
+    // a faint note on the right, like the project it belongs to
+    pub detail: String,
+    pub icon: char,
+}
+
+pub enum Choice {
+    Command(&'static str),
+    Destination(u64),
+}
+
+enum Row<'a> {
+    Command(&'a Command),
+    Destination(&'a Destination),
+}
+
+impl Row<'_> {
+    fn choice(&self) -> Choice {
+        match self {
+            Row::Command(c) => Choice::Command(c.id),
+            Row::Destination(d) => Choice::Destination(d.id),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CommandPalette {
     open: bool,
@@ -68,13 +96,18 @@ impl CommandPalette {
         if self.open { self.close() } else { self.open() }
     }
 
-    pub fn show(&mut self, ctx: &Context, commands: &[Command]) -> Option<&'static str> {
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        commands: &[Command],
+        destinations: &[Destination],
+    ) -> Option<Choice> {
         if ctx.input_mut(|i| i.consume_shortcut(&SHORTCUT)) {
             self.toggle();
         }
         if let Some(id) = dispatch_shortcuts(ctx, commands) {
             self.open = false;
-            return Some(id);
+            return Some(Choice::Command(id));
         }
 
         let id = Id::unique("mux-command-palette");
@@ -83,11 +116,20 @@ impl CommandPalette {
             return None;
         }
 
-        let matches: Vec<&Command> = commands
+        // with something typed, places come first since that's usually what's being looked for
+        let commands = commands
             .iter()
             .filter(|c| fuzzy_match(c.title, &self.query))
-            .take(MAX_ROWS)
-            .collect();
+            .map(Row::Command);
+        let places = destinations
+            .iter()
+            .filter(|d| fuzzy_match(&d.title, &self.query))
+            .map(Row::Destination);
+        let matches: Vec<Row> = if self.query.trim().is_empty() {
+            commands.chain(places).take(MAX_ROWS).collect()
+        } else {
+            places.chain(commands).take(MAX_ROWS).collect()
+        };
         self.selected = self.selected.min(matches.len().saturating_sub(1));
 
         let mut chosen = None;
@@ -103,7 +145,7 @@ impl CommandPalette {
                     self.selected = (self.selected + matches.len() - 1) % matches.len();
                 }
                 if i.consume_key(Modifiers::NONE, Key::Enter) {
-                    chosen = matches.get(self.selected).map(|c| c.id);
+                    chosen = matches.get(self.selected).map(Row::choice);
                 }
             });
         }
@@ -140,7 +182,7 @@ impl CommandPalette {
                         ui.set_width(WIDTH - space::XS * 2.0);
                         let input = ui.add(
                             TextEdit::singleline(&mut self.query)
-                                .hint_text("Type a command or search…")
+                                .hint_text("Type a command or a session's name…")
                                 .font(font::regular(text::LG))
                                 .frame(Frame::new().inner_margin(Margin::symmetric(10, 10)))
                                 .desired_width(f32::INFINITY),
@@ -154,9 +196,7 @@ impl CommandPalette {
 
                         if matches.is_empty() {
                             ui.add_space(space::SM);
-                            ui.label(
-                                egui::RichText::new("No matching commands").color(p.text_faint),
-                            );
+                            ui.label(egui::RichText::new("Nothing matches").color(p.text_faint));
                             ui.add_space(space::SM);
                             return;
                         }
@@ -165,7 +205,7 @@ impl CommandPalette {
                             .hline(sep.x_range(), sep.top(), Stroke::new(1.0, p.border));
                         ui.add_space(space::XS);
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        for (i, command) in matches.iter().enumerate() {
+                        for (i, row_item) in matches.iter().enumerate() {
                             let (rect, row) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), ROW_HEIGHT),
                                 Sense::click(),
@@ -174,7 +214,7 @@ impl CommandPalette {
                                 self.selected = i;
                             }
                             if row.clicked() {
-                                chosen = Some(command.id);
+                                chosen = Some(row_item.choice());
                             }
                             let sel = spring_bool(
                                 ui.ctx(),
@@ -187,8 +227,14 @@ impl CommandPalette {
                                 CornerRadius::same(radius::LG),
                                 p.accent.gamma_multiply(0.16 * sel),
                             );
+                            let (title, icon, shortcut, detail) = match row_item {
+                                Row::Command(c) => (c.title, c.icon, c.shortcut.as_ref(), ""),
+                                Row::Destination(d) => {
+                                    (d.title.as_str(), Some(d.icon), None, d.detail.as_str())
+                                }
+                            };
                             let mut text_x = rect.left() + 10.0;
-                            if let Some(icon) = command.icon {
+                            if let Some(icon) = icon {
                                 ui.painter().text(
                                     pos2(text_x, rect.center().y),
                                     Align2::LEFT_CENTER,
@@ -201,11 +247,20 @@ impl CommandPalette {
                             ui.painter().text(
                                 pos2(text_x, rect.center().y),
                                 Align2::LEFT_CENTER,
-                                command.title,
+                                title,
                                 font::regular(text::MD),
                                 p.text,
                             );
-                            if let Some(shortcut) = &command.shortcut {
+                            if !detail.is_empty() {
+                                ui.painter().text(
+                                    pos2(rect.right() - 10.0, rect.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    detail,
+                                    font::regular(text::SM + 1.0),
+                                    p.text_faint,
+                                );
+                            }
+                            if let Some(shortcut) = shortcut {
                                 let kbd = Rect::from_min_max(
                                     pos2(rect.right() - 120.0, rect.top()),
                                     pos2(rect.right() - 8.0, rect.bottom()),

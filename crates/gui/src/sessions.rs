@@ -274,6 +274,16 @@ impl Sessions {
                         })
                         .collect();
                     self.alerts.extend(alerts);
+                    // a shell left with exit closes like a terminal tab, while one that failed stays to show why
+                    let exited: Vec<u64> = self
+                        .infos()
+                        .filter(|s| s.kind == SessionKind::Shell && s.status == SessionStatus::Done)
+                        .filter(|s| before.get(&s.id) == Some(&SessionStatus::Running))
+                        .map(|s| s.id)
+                        .collect();
+                    for id in exited {
+                        self.remove(id);
+                    }
                 }
                 let ids: Vec<u64> = self.infos().map(|s| s.id).collect();
                 self.locals.retain(|id, _| ids.contains(id));

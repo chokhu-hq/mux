@@ -34,3 +34,9 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+# releases trade a slower build for a smaller, faster app, since one codegen unit and whole-program lto let the
+# compiler inline across every crate
+[profile.release]
+lto = "fat"
+codegen-units = 1

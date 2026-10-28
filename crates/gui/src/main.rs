@@ -33,6 +33,8 @@ mod notify;
 mod prefs;
 mod sessions;
 mod settings;
+#[cfg(unix)]
+mod shell_env;
 mod terminal;
 mod token_usage;
 mod update;
@@ -56,6 +58,9 @@ fn main() -> eframe::Result {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
+    // before anything spawns a thread, and before the server is started so it inherits the result
+    #[cfg(unix)]
+    shell_env::adopt_login_path();
     let mut viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
     if let Ok(icon) =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/mux-256.png"))

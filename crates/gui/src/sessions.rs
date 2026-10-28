@@ -1289,10 +1289,12 @@ mod tests {
 
     #[test]
     fn new_agents_start_with_the_defaults_from_settings() {
-        let mut sessions = Sessions::default();
-        sessions.agent_defaults = mux_core::protocol::AgentSettings {
-            provider: Provider::Claude,
-            model: Some("opus".into()),
+        let mut sessions = Sessions {
+            agent_defaults: mux_core::protocol::AgentSettings {
+                provider: Provider::Claude,
+                model: Some("opus".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         sessions.create("New agent", SessionKind::Agent);

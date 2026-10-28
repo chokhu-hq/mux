@@ -1,17 +1,11 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use egui::text::{ByteIndex, LayoutJob, LayoutSection, TextFormat};
+use egui::text::LayoutJob;
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Galley, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder,
-    pos2, vec2,
+    Align2, Color32, CornerRadius, Galley, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2,
+    vec2,
 };
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{
-    Color, FontStyle, ScopeSelectors, StyleModifier, Theme, ThemeItem, ThemeSettings,
-};
-use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
 
 use super::{IconButton, TooltipExt};
 use crate::icons;
@@ -318,7 +312,9 @@ impl FileView {
             );
             // colouring a whole file takes long enough to drop frames, so it happens off the ui thread
             std::thread::spawn(move || {
-                if let Some(job) = colorize(&text, &ext, &palette, dark, font::mono(size)) {
+                if let Some(job) =
+                    crate::highlight::colorize(&text, &ext, &palette, dark, font::mono(size))
+                {
                     if let Ok(mut slot) = slot.lock() {
                         *slot = Some((palette, job));
                     }
@@ -656,115 +652,6 @@ fn line_rows(galley: &Galley) -> Vec<usize> {
     starts
 }
 
-// code is coloured from the app theme's terminal colours, so it matches whichever theme is picked
-fn code_theme(p: &Palette, dark: bool) -> Theme {
-    // the bright terminal colours read better on dark backgrounds and the normal ones on light
-    let ansi = |i: usize| p.ansi[if dark { i + 8 } else { i }];
-    let color = |c: Color32| Color {
-        r: c.r(),
-        g: c.g(),
-        b: c.b(),
-        a: 255,
-    };
-    let rules: [(&str, Color32, FontStyle); 12] = [
-        (
-            "comment, punctuation.definition.comment",
-            p.text_faint,
-            FontStyle::ITALIC,
-        ),
-        (
-            "string, constant.character, markup.inline.raw, markup.raw",
-            ansi(2),
-            FontStyle::empty(),
-        ),
-        (
-            "constant.numeric, constant.language, constant.character.escape, constant.other",
-            ansi(6),
-            FontStyle::empty(),
-        ),
-        (
-            "keyword, storage, keyword.operator.new, keyword.operator.word, variable.language",
-            ansi(5),
-            FontStyle::empty(),
-        ),
-        (
-            "keyword.operator, punctuation",
-            p.text_muted,
-            FontStyle::empty(),
-        ),
-        (
-            "entity.name.function, support.function, meta.function-call variable.function, variable.function",
-            ansi(4),
-            FontStyle::empty(),
-        ),
-        (
-            "entity.name.type, entity.name.class, entity.other.inherited-class, support.type, support.class, storage.type.primitive",
-            ansi(3),
-            FontStyle::empty(),
-        ),
-        (
-            "entity.name.tag, support.type.property-name, meta.mapping.key string, entity.name.section",
-            ansi(1),
-            FontStyle::empty(),
-        ),
-        ("entity.other.attribute-name", ansi(3), FontStyle::empty()),
-        ("markup.heading", ansi(4), FontStyle::BOLD),
-        ("markup.bold", p.text, FontStyle::BOLD),
-        ("invalid, markup.deleted", p.danger, FontStyle::empty()),
-    ];
-    Theme {
-        settings: ThemeSettings {
-            foreground: Some(color(p.text)),
-            ..ThemeSettings::default()
-        },
-        scopes: rules
-            .into_iter()
-            .filter_map(|(scope, c, style)| {
-                Some(ThemeItem {
-                    scope: scope.parse::<ScopeSelectors>().ok()?,
-                    style: StyleModifier {
-                        foreground: Some(color(c)),
-                        background: None,
-                        font_style: Some(style),
-                    },
-                })
-            })
-            .collect(),
-        ..Theme::default()
-    }
-}
-
-// built here rather than with egui_extras so the work can run on another thread
-fn colorize(text: &str, ext: &str, p: &Palette, dark: bool, font: FontId) -> Option<LayoutJob> {
-    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
-    let syntaxes = SYNTAXES.get_or_init(two_face::syntax::extra_newlines);
-    let syntax = syntaxes.find_syntax_by_extension(ext)?;
-    let theme = code_theme(p, dark);
-    let mut highlighter = HighlightLines::new(syntax, &theme);
-    let mut job = LayoutJob {
-        text: text.to_owned(),
-        ..Default::default()
-    };
-    let base = text.as_ptr() as usize;
-    for line in LinesWithEndings::from(text) {
-        for (style, piece) in highlighter.highlight_line(line, syntaxes).ok()? {
-            let start = piece.as_ptr() as usize - base;
-            let fg = style.foreground;
-            job.sections.push(LayoutSection {
-                leading_space: 0.0,
-                byte_range: ByteIndex(start)..ByteIndex(start + piece.len()),
-                format: TextFormat {
-                    font_id: font.clone(),
-                    color: Color32::from_rgb(fg.r, fg.g, fg.b),
-                    italics: style.font_style.contains(FontStyle::ITALIC),
-                    ..Default::default()
-                },
-            });
-        }
-    }
-    Some(job)
-}
-
 fn read(path: &str) -> Result<String, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("Couldn't open this file: {e}"))?;
     if meta.is_dir() {
@@ -855,30 +742,7 @@ pub fn open_in_editor(path: &str, line: Option<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowKind, code_theme, colorize, link_target, parse_diff, split_lines};
-    use crate::theme::{DARK, font};
-
-    #[test]
-    fn typescript_is_coloured_from_the_theme() {
-        assert_eq!(code_theme(&DARK, true).scopes.len(), 12);
-        let job = colorize(
-            "const a: string = \"x\";\n",
-            "ts",
-            &DARK,
-            true,
-            font::mono(12.0),
-        )
-        .unwrap();
-        let keyword = job.sections.first().unwrap().format.color;
-        assert_eq!(keyword, DARK.ansi[13]);
-        assert!(job.sections.iter().any(|s| s.format.color == DARK.ansi[10]));
-        for ext in ["tsx", "toml", "rs", "py", "go", "md", "json", "yaml", "sh"] {
-            assert!(
-                colorize("x\n", ext, &DARK, true, font::mono(12.0)).is_some(),
-                "{ext}"
-            );
-        }
-    }
+    use super::{RowKind, link_target, parse_diff, split_lines};
 
     #[test]
     fn reads_a_unified_diff_into_numbered_rows() {

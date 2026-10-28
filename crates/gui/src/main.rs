@@ -684,23 +684,89 @@ impl App {
             .unwrap_or_default();
         let left =
             (window.min.x + sidebar_width + space::LG).max(controls.min_rect().right() + space::MD);
+        let area = Rect::from_min_max(
+            pos2(left, bar.top()),
+            pos2(
+                bar.right() - space::MD - window::titlebar_trailing_inset(),
+                bar.bottom(),
+            ),
+        );
+        // the status words give way first when the window is narrow, so the title keeps some room
+        let status_width = ui
+            .painter()
+            .layout_no_wrap(
+                info.status.clone(),
+                font::regular(text::SM + 1.0),
+                p.text_faint,
+            )
+            .size()
+            .x;
+        let show_status = area.width() - status_width > 520.0;
+        // the actions on the right are laid out first, so the crumbs are cut short before them instead of running under
+        let mut actions = ui.new_child(
+            UiBuilder::new()
+                .max_rect(area)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        actions.spacing_mut().item_spacing.x = space::SM;
+        if IconButton::new(icons::TERMINAL_WINDOW, "Terminal")
+            .selected(self.sessions.split.is_some())
+            .show(&mut actions)
+            .tip_with_shortcut("Terminal on the right", TERMINAL)
+            .clicked()
+        {
+            *run = Some("toggle-terminal");
+        }
+        if info.restartable
+            && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
+                .show(&mut actions)
+                .tip("Restart")
+                .clicked()
+        {
+            self.sessions
+                .outbox
+                .push(ClientMsg::Restart { id: info.id });
+        }
+        if show_status {
+            actions.label(
+                egui::RichText::new(&info.status)
+                    .font(font::regular(text::SM + 1.0))
+                    .color(p.text_faint),
+            );
+        }
+        if let (Some(provider), false) = (info.provider, usage.is_empty()) {
+            actions.add_space(space::SM);
+            UsageRing::new(&usage).provider(provider).show(&mut actions);
+        }
+        if let Some((files, added, removed)) = info.changes {
+            actions.add_space(space::SM);
+            if changes_button(&mut actions, added, removed)
+                .tip(format!(
+                    "{files} {} changed in this chat, click to review",
+                    if files == 1 { "file" } else { "files" }
+                ))
+                .clicked()
+            {
+                self.review = true;
+            }
+        }
+
+        let right = (actions.min_rect().left() - space::LG).max(area.left());
         let mut crumbs = ui.new_child(
             UiBuilder::new()
-                .max_rect(Rect::from_min_max(
-                    pos2(left, bar.top()),
-                    pos2(
-                        bar.right() - space::MD - window::titlebar_trailing_inset(),
-                        bar.bottom(),
-                    ),
-                ))
+                .max_rect(Rect::from_min_max(area.min, pos2(right, area.bottom())))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
+        crumbs.set_clip_rect(crumbs.max_rect().intersect(crumbs.clip_rect()));
         crumbs.spacing_mut().item_spacing.x = space::SM;
         if !info.project.is_empty() {
-            crumbs.label(
-                egui::RichText::new(&info.project)
-                    .font(font::medium(text::MD))
-                    .color(p.text_faint),
+            crumbs.add(
+                egui::Label::new(
+                    egui::RichText::new(&info.project)
+                        .font(font::medium(text::MD))
+                        .color(p.text_faint),
+                )
+                .truncate(),
             );
             crumbs.label(
                 egui::RichText::new("›")
@@ -719,12 +785,17 @@ impl App {
                 provider_color(provider, p.text_muted),
             );
         }
-        crumbs.label(
-            egui::RichText::new(&info.title)
-                .font(font::medium(text::MD))
-                .color(p.text),
+        crumbs.add(
+            egui::Label::new(
+                egui::RichText::new(&info.title)
+                    .font(font::medium(text::MD))
+                    .color(p.text),
+            )
+            .truncate(),
         );
-        if let Some(branch) = &info.branch {
+        if let Some(branch) = &info.branch
+            && crumbs.available_width() > 80.0
+        {
             crumbs.add_space(space::XS);
             crumbs.spacing_mut().item_spacing.x = space::XS;
             crumbs.label(
@@ -732,53 +803,15 @@ impl App {
                     .font(font::icon(icon::SM))
                     .color(p.text_faint),
             );
-            crumbs.label(
-                egui::RichText::new(branch)
-                    .font(font::regular(text::SM + 1.0))
-                    .color(p.text_faint),
+            crumbs.add(
+                egui::Label::new(
+                    egui::RichText::new(branch)
+                        .font(font::regular(text::SM + 1.0))
+                        .color(p.text_faint),
+                )
+                .truncate(),
             );
         }
-        crumbs.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if IconButton::new(icons::TERMINAL_WINDOW, "Terminal")
-                .selected(self.sessions.split.is_some())
-                .show(ui)
-                .tip_with_shortcut("Terminal on the right", TERMINAL)
-                .clicked()
-            {
-                *run = Some("toggle-terminal");
-            }
-            if info.restartable
-                && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
-                    .show(ui)
-                    .tip("Restart")
-                    .clicked()
-            {
-                self.sessions
-                    .outbox
-                    .push(ClientMsg::Restart { id: info.id });
-            }
-            ui.label(
-                egui::RichText::new(&info.status)
-                    .font(font::regular(text::SM + 1.0))
-                    .color(p.text_faint),
-            );
-            if let (Some(provider), false) = (info.provider, usage.is_empty()) {
-                ui.add_space(space::SM);
-                UsageRing::new(&usage).provider(provider).show(ui);
-            }
-            if let Some((files, added, removed)) = info.changes {
-                ui.add_space(space::SM);
-                if changes_button(ui, added, removed)
-                    .tip(format!(
-                        "{files} {} changed in this chat, click to review",
-                        if files == 1 { "file" } else { "files" }
-                    ))
-                    .clicked()
-                {
-                    self.review = true;
-                }
-            }
-        });
     }
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
@@ -795,6 +828,7 @@ impl App {
         let agents = *self.installed.get_or_insert_with(installed_agents);
         let mut prefs = self.prefs.clone();
         let distros = self.distros();
+        let previewed = self.themes.preview.take();
         let close = settings::Page {
             tab: &mut self.settings_tab,
             prefs: &mut prefs,
@@ -809,6 +843,10 @@ impl App {
         .show(ui);
         if close {
             self.settings_open = false;
+            self.themes.preview = None;
+        }
+        if self.themes.preview != previewed {
+            self.themes.apply(&ctx, &self.prefs);
         }
         if prefs != self.prefs {
             let moved = prefs.wsl != self.prefs.wsl;

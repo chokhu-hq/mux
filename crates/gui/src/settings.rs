@@ -423,7 +423,12 @@ fn theme_rows(ui: &mut egui::Ui, prefs: &mut Prefs, themes: &mut crate::themes::
                             if choice.custom {
                                 item = item.detail("Custom");
                             }
-                            if item.show(ui).clicked() {
+                            let response = item.show(ui);
+                            // hovering a theme shows it on the whole window until the pointer leaves it
+                            if response.hovered() {
+                                themes.preview = Some(choice.id.clone());
+                            }
+                            if response.clicked() {
                                 *picked = (choice.id != fallback).then(|| choice.id.clone());
                             }
                         }

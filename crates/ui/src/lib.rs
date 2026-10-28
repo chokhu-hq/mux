@@ -1,5 +1,6 @@
 pub mod capture;
 pub mod components;
+pub mod highlight;
 pub mod icons;
 pub mod motion;
 pub mod shortcut;

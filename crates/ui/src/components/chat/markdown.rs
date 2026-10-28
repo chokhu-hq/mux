@@ -646,6 +646,26 @@ fn image(ui: &mut Ui, path: &str) {
     }
 }
 
+// a block this long is shown plain, because colouring it would stall the frame it first appears in
+const MAX_COLORED: usize = 64 * 1024;
+
+#[derive(Default)]
+struct Colorizer;
+
+impl egui::cache::ComputerMut<(&str, &str, &Palette, bool), Option<egui::text::LayoutJob>>
+    for Colorizer
+{
+    fn compute(
+        &mut self,
+        (code, lang, p, dark): (&str, &str, &Palette, bool),
+    ) -> Option<egui::text::LayoutJob> {
+        crate::highlight::colorize(code, lang, p, dark, font::mono(text::MONO))
+    }
+}
+
+// coloured blocks are kept while they're on screen, so each is coloured once rather than every frame
+type ColoredCode = egui::cache::FrameCache<Option<egui::text::LayoutJob>, Colorizer>;
+
 fn code_block(ui: &mut Ui, lang: &str, code: &str) {
     let p = theme::palette(ui);
     Frame::new()
@@ -686,15 +706,29 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str) {
             Frame::new()
                 .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
-                    ScrollArea::horizontal().show(ui, |ui| {
-                        ui.add(
-                            Label::new(
-                                RichText::new(code)
-                                    .font(font::mono(text::MONO))
-                                    .color(p.text),
-                            )
-                            .extend(),
-                        );
+                    let dark = ui.visuals().dark_mode;
+                    let colored = (code.len() <= MAX_COLORED).then(|| {
+                        ui.memory_mut(|m| {
+                            m.caches
+                                .cache::<ColoredCode>()
+                                .get((code, lang, p, dark))
+                                .clone()
+                        })
+                    });
+                    ScrollArea::horizontal().show(ui, |ui| match colored.flatten() {
+                        Some(job) => {
+                            ui.add(Label::new(job).extend());
+                        }
+                        None => {
+                            ui.add(
+                                Label::new(
+                                    RichText::new(code)
+                                        .font(font::mono(text::MONO))
+                                        .color(p.text),
+                                )
+                                .extend(),
+                            );
+                        }
                     });
                 });
         });

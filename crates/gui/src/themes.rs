@@ -156,6 +156,8 @@ pub struct Themes {
     pub errors: Vec<(String, String)>,
     stamps: Vec<(PathBuf, SystemTime)>,
     checked: Instant,
+    // the theme under the pointer in a theme menu, shown in place of the picked one while it's there
+    pub preview: Option<String>,
 }
 
 pub fn dir() -> PathBuf {
@@ -170,6 +172,7 @@ impl Themes {
             errors: Vec::new(),
             stamps: Vec::new(),
             checked: Instant::now(),
+            preview: None,
         };
         themes.reload();
         themes
@@ -215,6 +218,13 @@ impl Themes {
         };
         let mut dark = pick(prefs.dark_theme.as_deref(), MUX_DARK, true);
         let mut light = pick(prefs.light_theme.as_deref(), MUX_LIGHT, false);
+        if let Some(c) = self.preview.as_deref().and_then(|id| self.find(id)) {
+            if c.dark {
+                dark = c.palette;
+            } else {
+                light = c.palette;
+            }
+        }
         // dev aid: MUX_SCREENSHOT_THEME can name any theme for a capture
         if let Some(c) = std::env::var("MUX_SCREENSHOT_THEME")
             .ok()

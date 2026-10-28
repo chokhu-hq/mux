@@ -96,7 +96,7 @@ pub mod control {
     pub const MD: f32 = 28.0;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Palette {
     pub bg: Color32,
     pub surface: Color32,

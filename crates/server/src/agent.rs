@@ -125,6 +125,8 @@ pub struct Agent {
     claude_waiting: VecDeque<String>,
     // claude is mid turn, whether answering a message or one it started itself, like a background subagent waking
     claude_turn: bool,
+    // a stop was sent this turn, so the error result claude ends it with is expected
+    claude_stopping: bool,
     // a subagent's own tool calls by id, as its card and the step within it
     sub_steps: HashMap<String, (usize, usize)>,
     // claude's subagent task ids and codex's subagent threads, each pointing at its card
@@ -216,6 +218,7 @@ impl Agent {
             busy_changed: false,
             claude_waiting: VecDeque::new(),
             claude_turn: false,
+            claude_stopping: false,
             sub_steps: HashMap::new(),
             tasks: HashMap::new(),
             child_threads: HashMap::new(),
@@ -680,6 +683,7 @@ impl Agent {
                     "request": { "subtype": "interrupt" }
                 }));
                 self.next_call += 1;
+                self.claude_stopping = true;
             }
             return;
         }
@@ -698,6 +702,7 @@ impl Agent {
 
     pub fn exited(&mut self) {
         self.process = None;
+        self.claude_stopping = false;
         if !self.queue.is_empty() {
             self.held = true;
             self.queue_changed = true;
@@ -1280,15 +1285,11 @@ impl Agent {
                 if let (Some(window), Some(context)) = (window, self.context) {
                     self.set_context(ContextUsage { window, ..context });
                 }
-                if msg["is_error"] == true || msg["subtype"] != "success" {
-                    let message = msg["result"]
-                        .as_str()
-                        .filter(|r| !r.is_empty())
-                        .unwrap_or("Claude stopped with an error.");
-                    self.push(AgentItem::Error {
-                        message: message.to_owned(),
-                    });
+                if let Some(message) = claude_failure(msg, self.claude_stopping) {
+                    log::warn!("claude turn failed: {msg}");
+                    self.push(AgentItem::Error { message });
                 }
+                self.claude_stopping = false;
                 self.live_text = None;
                 self.expire_approvals();
                 self.expire_questions();
@@ -1730,6 +1731,44 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>, at: Option<&str>
     args
 }
 
+// why a turn failed in words, or none when it didn't or when it only ended because it was stopped
+fn claude_failure(msg: &Value, stopping: bool) -> Option<String> {
+    if msg["is_error"] != true && msg["subtype"] == "success" {
+        return None;
+    }
+    // a stop ends the turn with an error result, but the stop is what was asked for
+    let aborted = msg["terminal_reason"]
+        .as_str()
+        .is_some_and(|r| r.starts_with("aborted"));
+    if stopping || aborted {
+        return None;
+    }
+    if let Some(result) = msg["result"].as_str().filter(|r| !r.trim().is_empty()) {
+        return Some(result.trim().to_owned());
+    }
+    let said = match msg["subtype"].as_str() {
+        Some("error_max_turns") => {
+            Some("Claude reached its turn limit before finishing.".to_owned())
+        }
+        Some("error_max_budget_usd") => {
+            Some("Claude reached its spending limit before finishing.".to_owned())
+        }
+        _ => None,
+    };
+    // claude adds its own diagnostic lines to the errors, which mean nothing to a person
+    let errors: Vec<&str> = msg["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|e| !e.starts_with('[') && !e.trim().is_empty())
+        .collect();
+    Some(said.unwrap_or_else(|| match errors.as_slice() {
+        [] => "Claude stopped with an error. The server log has what it sent.".to_owned(),
+        errors => format!("Claude stopped with an error: {}", errors.join(" ")),
+    }))
+}
+
 // always allow keeps claude's own suggestions but only for this session, so nothing lands in project settings
 fn claude_answer(decision: Decision, input: Value, suggestions: &Value) -> Value {
     match decision {
@@ -1851,6 +1890,44 @@ mod tests {
 
     fn agent() -> Agent {
         Agent::load(Path::new("/nonexistent/mux-agent.json"))
+    }
+
+    #[test]
+    fn a_stopped_claude_turn_is_not_an_error() {
+        let aborted = json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "result": null,
+            "errors": ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+            "terminal_reason": "aborted_tools",
+        });
+        assert_eq!(claude_failure(&aborted, false), None);
+        let mut unexplained = aborted.clone();
+        unexplained["terminal_reason"] = json!("completed");
+        assert_eq!(claude_failure(&unexplained, true), None);
+        assert!(
+            claude_failure(&unexplained, false)
+                .unwrap()
+                .contains("server log")
+        );
+        let login = json!({
+            "subtype": "success",
+            "is_error": true,
+            "result": "Invalid API key · Please run /login",
+        });
+        assert_eq!(
+            claude_failure(&login, false).as_deref(),
+            Some("Invalid API key · Please run /login")
+        );
+        let turns = json!({ "subtype": "error_max_turns", "is_error": true });
+        assert!(
+            claude_failure(&turns, false)
+                .unwrap()
+                .contains("turn limit")
+        );
+        let fine = json!({ "subtype": "success", "is_error": false, "result": "done" });
+        assert_eq!(claude_failure(&fine, false), None);
     }
 
     fn note(agent: &mut Agent, method: &str, params: Value) {

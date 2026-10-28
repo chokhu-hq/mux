@@ -12,9 +12,9 @@ use super::{TooltipExt, provider_color, provider_mark};
 use crate::icons;
 use crate::theme::{self, Palette, font, icon, radius, space, text};
 
-const SIZE: f32 = 12.0;
-const WIDTH: f32 = 240.0;
-const BAR: f32 = 6.0;
+pub(super) const SIZE: f32 = 12.0;
+pub(super) const WIDTH: f32 = 240.0;
+pub(super) const BAR: f32 = 6.0;
 
 // one small ring for all of a plan's limits, showing whichever is closest to running out
 pub struct UsageRing<'a> {
@@ -53,22 +53,7 @@ impl<'a> UsageRing<'a> {
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
 
         if ui.is_rect_visible(rect) {
-            let center = pos2(rect.left() + SIZE / 2.0, rect.center().y);
-            let radius = SIZE / 2.0 - 1.0;
-            ui.painter()
-                .circle_stroke(center, radius, Stroke::new(2.0, p.border_strong));
-            let color = level_color(p, used);
-            if used > 0.0 {
-                let steps = ((used * 48.0).ceil() as usize).max(2);
-                let points = (0..=steps)
-                    .map(|i| {
-                        let angle = -FRAC_PI_2 + TAU * used * i as f32 / steps as f32;
-                        center + Vec2::angled(angle) * radius
-                    })
-                    .collect();
-                ui.painter()
-                    .add(PathShape::line(points, Stroke::new(2.0, color)));
-            }
+            ring(ui, pos2(rect.left() + SIZE / 2.0, rect.center().y), used);
             ui.painter().galley(
                 pos2(
                     rect.left() + SIZE + space::XS,
@@ -153,20 +138,11 @@ fn details(ui: &mut Ui, provider: Option<Provider>, windows: &[UsageWindow]) {
             );
             let label_w = 30.0;
             let (row, _) = ui.allocate_exact_size(Vec2::new(WIDTH, BAR), Sense::hover());
-            let bar = Rect::from_min_max(row.min, pos2(row.right() - label_w, row.bottom()));
-            ui.painter()
-                .rect_filled(bar, CornerRadius::same(radius::FULL), theme::tint(p, 0.10));
-            if used > 0.0 {
-                let fill = Rect::from_min_size(
-                    bar.min,
-                    Vec2::new((bar.width() * used).max(BAR * 2.0), BAR),
-                );
-                ui.painter().rect_filled(
-                    fill,
-                    CornerRadius::same(radius::FULL),
-                    level_color(p, used),
-                );
-            }
+            bar(
+                ui,
+                Rect::from_min_max(row.min, pos2(row.right() - label_w, row.bottom())),
+                used,
+            );
             ui.painter().galley(
                 pos2(
                     row.right() - percent.size().x,
@@ -179,8 +155,46 @@ fn details(ui: &mut Ui, provider: Option<Provider>, windows: &[UsageWindow]) {
     }
 }
 
+// a thin ring that fills clockwise from the top as `used` goes from 0 to 1
+pub(super) fn ring(ui: &Ui, center: egui::Pos2, used: f32) {
+    let p = theme::palette(ui);
+    let radius = SIZE / 2.0 - 1.0;
+    ui.painter()
+        .circle_stroke(center, radius, Stroke::new(2.0, p.border_strong));
+    if used > 0.0 {
+        let steps = ((used * 48.0).ceil() as usize).max(2);
+        let points = (0..=steps)
+            .map(|i| {
+                let angle = -FRAC_PI_2 + TAU * used * i as f32 / steps as f32;
+                center + Vec2::angled(angle) * radius
+            })
+            .collect();
+        ui.painter().add(PathShape::line(
+            points,
+            Stroke::new(2.0, level_color(p, used)),
+        ));
+    }
+}
+
+pub(super) fn bar(ui: &Ui, rect: Rect, used: f32) {
+    let p = theme::palette(ui);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(radius::FULL), theme::tint(p, 0.10));
+    if used > 0.0 {
+        let fill = Rect::from_min_size(
+            rect.min,
+            Vec2::new(
+                (rect.width() * used).max(rect.height() * 2.0),
+                rect.height(),
+            ),
+        );
+        ui.painter()
+            .rect_filled(fill, CornerRadius::same(radius::FULL), level_color(p, used));
+    }
+}
+
 // close to the limit is worth noticing, so the colour warms up as it fills
-fn level_color(p: &Palette, used: f32) -> Color32 {
+pub(super) fn level_color(p: &Palette, used: f32) -> Color32 {
     if used >= 0.9 {
         p.danger
     } else if used >= 0.75 {

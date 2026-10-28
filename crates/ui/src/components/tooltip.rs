@@ -98,7 +98,11 @@ fn show_ui(response: Response, margin: Margin, delay: f64, add: impl FnOnce(&mut
     }
 
     let rect = response.rect;
-    let below = rect.bottom() + GAP + 32.0 < ctx.content_rect().bottom();
+    // last frame's size says whether a tall card still fits below, near the bottom of the window it goes above
+    let height = ctx
+        .memory(|m| m.area_rect(id.with("area")))
+        .map_or(32.0, |r| r.height());
+    let below = rect.bottom() + GAP + height + EDGE < ctx.content_rect().bottom();
     let slide = (1.0 - t) * 4.0;
     let (pivot, anchor) = if below {
         (

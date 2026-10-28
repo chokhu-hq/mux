@@ -3,7 +3,9 @@ use egui::{
     Stroke, TextEdit, Ui, vec2,
 };
 
-use crate::components::{IconButton, TooltipExt, hover_t, press_t};
+use mux_core::protocol::ContextUsage;
+
+use crate::components::{ContextRing, IconButton, TooltipExt, hover_t, press_t};
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
 use crate::theme::{self, font, icon, radius, space, text};
@@ -11,6 +13,7 @@ use crate::theme::{self, font, icon, radius, space, text};
 pub enum ComposerAction {
     Send(String),
     Stop,
+    Attach,
 }
 
 pub type Controls<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
@@ -20,6 +23,8 @@ pub struct Composer<'a> {
     running: bool,
     hint: &'a str,
     controls: Option<Controls<'a>>,
+    context: Option<ContextUsage>,
+    attachments: Option<&'a mut Vec<String>>,
 }
 
 impl<'a> Composer<'a> {
@@ -29,7 +34,21 @@ impl<'a> Composer<'a> {
             running: false,
             hint: "Ask the agent…",
             controls: None,
+            context: None,
+            attachments: None,
         }
+    }
+
+    // files waiting to go with the next message, shown above the text
+    pub fn attachments(mut self, attachments: &'a mut Vec<String>) -> Self {
+        self.attachments = Some(attachments);
+        self
+    }
+
+    // shown beside the send button once the agent has reported it
+    pub fn context(mut self, context: Option<ContextUsage>) -> Self {
+        self.context = context;
+        self
     }
 
     // extra controls beside the attach button, like model and speed pickers
@@ -52,6 +71,8 @@ impl<'a> Composer<'a> {
         let p = theme::palette(ui);
         let edit_id = ui.scope_id().with("mux-composer");
         let focused = ui.memory(|m| m.has_focus(edit_id));
+        // a message can be just the files, with nothing typed
+        let has_files = self.attachments.as_ref().is_some_and(|a| !a.is_empty());
         // enter sends and shift+enter falls through to the text edit as a newline
         let mut send = focused
             && !self.running
@@ -81,6 +102,15 @@ impl<'a> Composer<'a> {
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                if let Some(attachments) = self.attachments.as_deref_mut()
+                    && !attachments.is_empty()
+                {
+                    ui.add_space(2.0);
+                    if let Some(index) = super::attachments::pending(ui, attachments) {
+                        attachments.remove(index);
+                    }
+                    ui.add_space(space::SM);
+                }
                 ScrollArea::vertical()
                     .max_height(180.0)
                     .stick_to_bottom(true)
@@ -98,9 +128,13 @@ impl<'a> Composer<'a> {
                     });
                 ui.add_space(space::XS);
                 ui.horizontal(|ui| {
-                    IconButton::new(icons::PAPERCLIP, "Attach")
+                    if IconButton::new(icons::PAPERCLIP, "Attach")
                         .show(ui)
-                        .tip("Attach files");
+                        .tip("Attach files")
+                        .clicked()
+                    {
+                        action = Some(ComposerAction::Attach);
+                    }
                     if let Some(controls) = self.controls.take() {
                         controls(ui);
                     }
@@ -113,13 +147,17 @@ impl<'a> Composer<'a> {
                                 action = Some(ComposerAction::Stop);
                             }
                         } else {
-                            let ready = !self.draft.trim().is_empty();
+                            let ready = !self.draft.trim().is_empty() || has_files;
                             if round_button(ui, icons::ARROW_UP, ready, false)
                                 .tip("Send")
                                 .clicked()
                             {
                                 send = true;
                             }
+                        }
+                        if let Some(context) = self.context {
+                            ui.add_space(space::XS);
+                            ContextRing::new(context).show(ui);
                         }
                     });
                 });
@@ -129,7 +167,7 @@ impl<'a> Composer<'a> {
         if ui.memory(|m| m.focused().is_none()) {
             ui.memory_mut(|m| m.request_focus(edit_id));
         }
-        if send && !self.draft.trim().is_empty() {
+        if send && (!self.draft.trim().is_empty() || has_files) {
             let message = self.draft.trim().to_owned();
             self.draft.clear();
             action = Some(ComposerAction::Send(message));

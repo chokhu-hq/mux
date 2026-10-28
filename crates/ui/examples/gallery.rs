@@ -382,10 +382,14 @@ impl eframe::App for Gallery {
                                                     .show(ui);
                                                 match action {
                                                     Some(ChatAction::Send(text)) => {
-                                                        items.push(ChatItem::User(text));
+                                                        items.push(ChatItem::User {
+                                                            text,
+                                                            attachments: Vec::new(),
+                                                        });
                                                         self.thinking = true;
                                                         chat::set_thinking(items, true);
                                                     }
+                                                    Some(ChatAction::Attach) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;
                                                         chat::set_thinking(items, false);

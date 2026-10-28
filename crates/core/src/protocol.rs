@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -38,11 +38,25 @@ pub struct GroupInfo {
     pub sessions: Vec<SessionInfo>,
 }
 
+// the formats both agent clis can look at, everything else is passed along as a file
+pub fn is_image(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    )
+}
+
 // one entry in an agent conversation, shared by every agent backend
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AgentItem {
     User {
         text: String,
+        // absolute paths of the files and images sent along with the message
+        #[serde(default)]
+        attachments: Vec<String>,
     },
     Assistant {
         text: String,
@@ -99,6 +113,13 @@ pub struct AgentSettings {
     pub fast: bool,
     #[serde(default)]
     pub access: Access,
+}
+
+// how much of the model's context window the conversation fills, where a window of 0 means not known yet
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used: u64,
+    pub window: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +214,7 @@ pub enum ClientMsg {
     AgentSend {
         id: u64,
         text: String,
+        attachments: Vec<String>,
     },
     AgentDecide {
         id: u64,
@@ -234,6 +256,7 @@ pub enum ServerMsg {
         items: Vec<AgentItem>,
         busy: bool,
         settings: AgentSettings,
+        context: Option<ContextUsage>,
     },
     // sets the item at `index`, appending when it is one past the end
     AgentItem {
@@ -256,6 +279,10 @@ pub enum ServerMsg {
     AgentUsage {
         provider: Provider,
         windows: Vec<UsageWindow>,
+    },
+    AgentContext {
+        id: u64,
+        context: ContextUsage,
     },
 }
 

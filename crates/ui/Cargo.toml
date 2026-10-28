@@ -8,6 +8,8 @@ mux-core.workspace = true
 egui.workspace = true
 alacritty_terminal.workspace = true
 png.workspace = true
+egui_extras.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 eframe.workspace = true

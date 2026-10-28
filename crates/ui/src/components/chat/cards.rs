@@ -16,8 +16,14 @@ use crate::theme::{self, font, icon, radius, space, text};
 const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
 
-pub fn user_message(ui: &mut Ui, message: &str) {
+pub fn user_message(ui: &mut Ui, message: &str, attachments: &[String]) {
     let p = theme::palette(ui);
+    if !attachments.is_empty() {
+        super::attachments::sent(ui, attachments);
+    }
+    if message.is_empty() {
+        return;
+    }
     // lay the text out first so the bubble hugs short messages instead of filling the row
     let max = ui.available_width() * 0.8 - 24.0;
     let galley = ui.painter().layout(

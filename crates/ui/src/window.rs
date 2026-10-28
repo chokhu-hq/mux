@@ -35,7 +35,8 @@ pub const CLEAR_COLOR: [f32; 4] = [0.0; 4];
 pub struct WindowFrame<'a> {
     title: &'a str,
     sidebar: f32,
-    translucent: bool,
+    // how solid the sidebar and the content are, below 1 where the compositor blurs behind the window
+    opacity: (f32, f32),
 }
 
 impl<'a> WindowFrame<'a> {
@@ -43,7 +44,7 @@ impl<'a> WindowFrame<'a> {
         Self {
             title,
             sidebar: 0.0,
-            translucent: false,
+            opacity: (1.0, 1.0),
         }
     }
 
@@ -53,9 +54,8 @@ impl<'a> WindowFrame<'a> {
         self
     }
 
-    // leaves the sidebar see-through, for when the compositor blurs what's behind the window
-    pub fn translucent_sidebar(mut self, translucent: bool) -> Self {
-        self.translucent = translucent;
+    pub fn opacity(mut self, sidebar: f32, content: f32) -> Self {
+        self.opacity = (sidebar, content);
         self
     }
 
@@ -74,9 +74,10 @@ impl<'a> WindowFrame<'a> {
 
         let edge = rect.min.x + self.sidebar;
         let r = if rounded { radius::LG } else { 0 };
-        let see_through = self.translucent && self.sidebar > 0.5;
+        let (sidebar_opacity, content_opacity) = self.opacity;
+        let see_through = sidebar_opacity < 1.0 && self.sidebar > 0.5;
         if see_through {
-            // the opaque background stops at the sidebar so the blur behind it can show
+            // the background stops at the sidebar so the blur behind it isn't covered twice
             let content = Rect::from_min_max(pos2(edge, rect.min.y), rect.max);
             let corners = CornerRadius {
                 nw: 0,
@@ -84,9 +85,11 @@ impl<'a> WindowFrame<'a> {
                 ne: r,
                 se: r,
             };
-            ui.painter().rect_filled(content, corners, p.bg);
+            ui.painter()
+                .rect_filled(content, corners, p.bg.gamma_multiply(content_opacity));
         } else {
-            ui.painter().rect_filled(rect, corner, p.bg);
+            ui.painter()
+                .rect_filled(rect, corner, p.bg.gamma_multiply(content_opacity));
         }
         if self.sidebar > 0.5 {
             let side = Rect::from_min_max(rect.min, pos2(edge, rect.max.y));
@@ -96,11 +99,7 @@ impl<'a> WindowFrame<'a> {
                 ne: 0,
                 se: 0,
             };
-            let fill = if see_through {
-                p.sidebar.gamma_multiply(0.82)
-            } else {
-                p.sidebar
-            };
+            let fill = p.sidebar.gamma_multiply(sidebar_opacity);
             ui.painter().rect_filled(side, corners, fill);
             ui.painter()
                 .vline(edge - 0.5, rect.y_range(), Stroke::new(1.0, p.border));

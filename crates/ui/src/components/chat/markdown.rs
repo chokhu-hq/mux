@@ -42,6 +42,10 @@ pub fn markdown(ui: &mut Ui, source: &str) {
             {
                 flush(ui, &mut paragraph);
                 list_item(ui, &format!("{number}."), item);
+            } else if let Some(path) = image_path(trimmed) {
+                flush(ui, &mut paragraph);
+                ui.push_id(("image", blocks), |ui| image(ui, path));
+                blocks += 1;
             } else if trimmed.starts_with('#') {
                 flush(ui, &mut paragraph);
                 let heading = trimmed.trim_start_matches('#').trim();
@@ -57,6 +61,27 @@ pub fn markdown(ui: &mut Ui, source: &str) {
         }
         flush(ui, &mut paragraph);
     });
+}
+
+// a line that is just ![alt](path), pointing at a picture on this machine
+fn image_path(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("![")?;
+    let (_, rest) = rest.split_once("](")?;
+    let path = rest.strip_suffix(')')?.trim();
+    let path = path.strip_prefix("file://").unwrap_or(path);
+    (path.starts_with('/') && mux_core::protocol::is_image(path)).then_some(path)
+}
+
+fn image(ui: &mut Ui, path: &str) {
+    let size = super::attachments::fitted(ui, path, vec2(ui.available_width().min(480.0), 360.0));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    super::attachments::picture(ui, path, rect, false);
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .tip(mux_core::display_path(path));
+    if response.clicked() {
+        super::attachments::open(path);
+    }
 }
 
 fn flush(ui: &mut Ui, paragraph: &mut String) {

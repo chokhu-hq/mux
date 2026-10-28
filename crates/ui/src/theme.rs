@@ -218,6 +218,8 @@ pub fn palette(ui: &egui::Ui) -> &'static Palette {
 
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
+    // pictures in chat are read from disk by path
+    egui_extras::install_image_loaders(ctx);
     ctx.style_mut_of(Theme::Dark, |style| apply(style, &DARK, true));
     ctx.style_mut_of(Theme::Light, |style| apply(style, &LIGHT, false));
 }

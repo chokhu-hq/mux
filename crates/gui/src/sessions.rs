@@ -5,8 +5,8 @@ use eframe::egui::{
     UiBuilder, Vec2, pos2, vec2,
 };
 use mux_core::protocol::{
-    self as wire, AgentItem, AgentSettings, ClientMsg, GroupInfo, ItemStatus, ModelOption,
-    ServerMsg, SessionInfo, UsageWindow,
+    self as wire, AgentItem, AgentSettings, ClientMsg, ContextUsage, GroupInfo, ItemStatus,
+    ModelOption, ServerMsg, SessionInfo, UsageWindow,
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 use mux_ui::chat::{
@@ -35,6 +35,9 @@ pub struct Local {
     pub opened: bool,
     pub busy: bool,
     pub settings: AgentSettings,
+    pub context: Option<ContextUsage>,
+    // files picked or dropped for the next message
+    pub attachments: Vec<String>,
     transcript: Vec<AgentItem>,
     pub chat: Vec<ChatItem>,
     // which approval each chat item answers, so a click can be sent back to the right one
@@ -130,11 +133,13 @@ impl Sessions {
                 items,
                 busy,
                 settings,
+                context,
             } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.transcript = items;
                     local.busy = busy;
                     local.settings = settings;
+                    local.context = context;
                     local.rebuild();
                 }
             }
@@ -150,6 +155,11 @@ impl Sessions {
             ServerMsg::AgentSettings { id, settings } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.settings = settings;
+                }
+            }
+            ServerMsg::AgentContext { id, context } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.context = Some(context);
                 }
             }
             ServerMsg::AgentUsage { provider, windows } => {
@@ -524,6 +534,19 @@ impl Sessions {
 }
 
 // the native dialog blocks this frame, which is fine for a one-off pick and required on macos
+pub fn pick_files(start: Option<&str>) -> Vec<String> {
+    let mut dialog = rfd::FileDialog::new().set_title("Attach files");
+    if let Some(start) = start {
+        dialog = dialog.set_directory(start);
+    }
+    dialog
+        .pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn pick_folder(start: Option<&str>) -> Option<String> {
     let mut dialog = rfd::FileDialog::new().set_title("Choose a project folder");
     if let Some(start) = start {
@@ -566,7 +589,10 @@ fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Optio
     for entry in transcript {
         let mut approval = None;
         match entry {
-            AgentItem::User { text } => items.push(ChatItem::User(text.clone())),
+            AgentItem::User { text, attachments } => items.push(ChatItem::User {
+                text: text.clone(),
+                attachments: attachments.clone(),
+            }),
             // a reply that has started but not streamed any words yet shows as thinking instead
             AgentItem::Assistant { text } if text.trim().is_empty() => continue,
             AgentItem::Assistant { text } => items.push(ChatItem::Assistant(text.clone())),
@@ -708,7 +734,10 @@ mod tests {
     #[test]
     fn approvals_line_up_with_chat_items() {
         let transcript = vec![
-            AgentItem::User { text: "hi".into() },
+            AgentItem::User {
+                text: "hi".into(),
+                attachments: Vec::new(),
+            },
             AgentItem::FileChange {
                 changes: vec![
                     wire::FileChange {

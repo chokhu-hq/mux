@@ -34,7 +34,7 @@ pub struct Blur {
     queue: EventQueue<State>,
     compositor: WlCompositor,
     effect: ExtBackgroundEffectSurfaceV1,
-    // the sidebar width and window height the region was last set for
+    // the blurred width and window height the region was last set for
     shape: Option<(i32, i32)>,
 }
 
@@ -75,9 +75,9 @@ pub fn request(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Blu
 }
 
 impl Blur {
-    // blurs behind the sidebar only, leaving out the rounded corners so no square blur peeks past them
-    pub fn fit(&mut self, sidebar: f32, height: f32, corner: f32) {
-        let shape = (sidebar.round() as i32, height.round() as i32);
+    // blurs the left `width` of the window, leaving out the rounded corners so no square blur peeks past them
+    pub fn fit(&mut self, width: f32, height: f32, corner: f32) {
+        let shape = (width.round() as i32, height.round() as i32);
         if self.shape == Some(shape) {
             return;
         }

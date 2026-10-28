@@ -212,6 +212,7 @@ fn agents_refuse_to_start_without_a_project_folder() {
         ClientMsg::AgentSend {
             id,
             text: "delete everything".to_owned(),
+            attachments: Vec::new(),
         },
     );
 

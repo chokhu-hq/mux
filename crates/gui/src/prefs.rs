@@ -13,11 +13,33 @@ pub enum Appearance {
     Dark,
 }
 
+// how much of the blurred desktop shows through, where off keeps every surface solid
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Transparency {
+    Off,
+    #[default]
+    Subtle,
+    Full,
+}
+
+impl Transparency {
+    // how solid the sidebar and the content area are painted
+    pub fn opacity(self) -> (f32, f32) {
+        match self {
+            Self::Off => (1.0, 1.0),
+            Self::Subtle => (0.82, 0.94),
+            Self::Full => (0.7, 0.84),
+        }
+    }
+}
+
 // choices that belong to this window rather than the server, saved next to the server's data
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
     pub appearance: Appearance,
     pub reduced_motion: bool,
+    #[serde(default)]
+    pub transparency: Transparency,
 }
 
 impl Prefs {

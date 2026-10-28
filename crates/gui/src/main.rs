@@ -14,12 +14,14 @@ use link::Link;
 use mux_core::protocol::{self as wire, AgentSettings};
 use mux_core::{Access, Provider};
 use mux_ui::chat::{ChatAction, ChatView, Decision};
-use prefs::{Appearance, Prefs};
+use prefs::{Appearance, Prefs, Transparency};
 use sessions::{Models, Sessions};
 
 #[cfg(target_os = "linux")]
 mod blur;
 mod connection;
+#[cfg(target_os = "linux")]
+mod drop;
 mod link;
 mod prefs;
 mod sessions;
@@ -82,6 +84,13 @@ struct App {
     // asked for once on the first frame, and kept alive so the compositor keeps blurring
     #[cfg(target_os = "linux")]
     blur: Option<Result<blur::Blur, String>>,
+    // started on the first frame, since winit doesn't pass wayland drops on
+    #[cfg(target_os = "linux")]
+    drops: Option<Option<std::sync::mpsc::Receiver<drop::DropEvent>>>,
+    // files are being dragged over the window
+    dropping: bool,
+    // files dropped since the last frame, for the open agent to pick up
+    dropped: Vec<String>,
 }
 
 struct TitleBar {
@@ -106,6 +115,10 @@ impl App {
             open_settings: false,
             #[cfg(target_os = "linux")]
             blur: None,
+            #[cfg(target_os = "linux")]
+            drops: None,
+            dropping: false,
+            dropped: Vec::new(),
         };
         app.prefs.apply(ctx);
         app
@@ -140,6 +153,10 @@ impl App {
                 .max_rect(footer)
                 .layout(egui::Layout::left_to_right(egui::Align::Max)),
         );
+        #[cfg(target_os = "linux")]
+        let blur = matches!(self.blur, Some(Ok(_)));
+        #[cfg(not(target_os = "linux"))]
+        let blur = false;
         let gear = IconButton::new(icons::GEAR, "Settings")
             .show(&mut ui_footer)
             .tip_with_shortcut("Settings", SETTINGS);
@@ -151,7 +168,7 @@ impl App {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .align(egui::RectAlign::TOP_START)
             .gap(space::XS)
-            .show(|ui| settings_menu(ui, &mut changed));
+            .show(|ui| settings_menu(ui, &mut changed, blur));
         if changed != self.prefs {
             changed.apply(ui.ctx());
             changed.save();
@@ -248,8 +265,16 @@ impl App {
             let settings = local.settings.clone();
             let started = local.has_started();
             let mut configure = None;
+            for path in std::mem::take(&mut self.dropped) {
+                if !local.attachments.contains(&path) {
+                    local.attachments.push(path);
+                }
+            }
             let action = ChatView::new(&local.chat, &mut local.draft)
+                .attachments(&mut local.attachments)
+                .dropping(self.dropping)
                 .running(local.busy)
+                .context(local.context)
                 .controls(|ui| configure = agent_controls(ui, models, &settings, started))
                 .show(&mut body_ui);
             if let Some(settings) = configure {
@@ -257,7 +282,19 @@ impl App {
                 outbox.push(ClientMsg::AgentConfigure { id, settings });
             }
             match action {
-                Some(ChatAction::Send(text)) => outbox.push(ClientMsg::AgentSend { id, text }),
+                Some(ChatAction::Send(text)) => outbox.push(ClientMsg::AgentSend {
+                    id,
+                    text,
+                    attachments: std::mem::take(&mut local.attachments),
+                }),
+                Some(ChatAction::Attach) => {
+                    let folder = group.as_ref().and_then(|g| g.1.as_deref());
+                    for path in sessions::pick_files(folder) {
+                        if !local.attachments.contains(&path) {
+                            local.attachments.push(path);
+                        }
+                    }
+                }
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
                 Some(ChatAction::Decide(index, decision)) => {
                     if let Some(Some(approval)) = local.approvals.get(index) {
@@ -286,6 +323,8 @@ impl App {
             return;
         };
 
+        // terminal text needs a steady backdrop, so it never shows the blur behind the window
+        ui.painter().rect_filled(rect, 0.0, theme::palette(ui).bg);
         let body = rect.shrink2(vec2(space::MD, space::SM));
         let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
         let response = terminal.show(&mut body_ui, id, outbox);
@@ -449,7 +488,7 @@ impl App {
 
 const SHOWN_MODELS: usize = 5;
 
-fn settings_menu(ui: &mut egui::Ui, prefs: &mut Prefs) {
+fn settings_menu(ui: &mut egui::Ui, prefs: &mut Prefs, blur: bool) {
     let p = theme::palette(ui);
     ui.set_width(240.0);
     let caption = |ui: &mut egui::Ui, label: &str| {
@@ -485,6 +524,22 @@ fn settings_menu(ui: &mut egui::Ui, prefs: &mut Prefs) {
         )
         .show(ui);
     });
+    // only offered where the compositor can blur behind the window
+    if blur {
+        caption(ui, "Transparency");
+        ui.horizontal(|ui| {
+            ui.add_space(space::SM);
+            Segmented::new(
+                &mut prefs.transparency,
+                &[
+                    (Transparency::Off, "Off"),
+                    (Transparency::Subtle, "Subtle"),
+                    (Transparency::Full, "Full"),
+                ],
+            )
+            .show(ui);
+        });
+    }
     ui.add_space(space::XS);
 }
 
@@ -853,6 +908,44 @@ fn effort_label(effort: &str) -> String {
     }
 }
 
+impl App {
+    fn take_drops(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        // other platforms get drops through egui, wayland through our own listener
+        let (hovered, dropped) = ctx.input(|i| {
+            let dropped: Vec<String> = i
+                .raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path())
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            (!i.raw.hovered_files.is_empty(), dropped)
+        });
+        self.dropped.extend(dropped);
+        #[cfg(target_os = "linux")]
+        {
+            let drops = self.drops.get_or_insert_with(|| {
+                drop::listen(frame, ctx.clone())
+                    .inspect_err(|reason| eprintln!("mux: no file drops: {reason}"))
+                    .ok()
+            });
+            for event in drops.iter().flat_map(|rx| rx.try_iter()) {
+                match event {
+                    drop::DropEvent::Hovering(hovering) => self.dropping = hovering,
+                    drop::DropEvent::Files(files) => self.dropped.extend(files),
+                }
+            }
+            self.dropping |= hovered;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = frame;
+            self.dropping = hovered;
+        }
+    }
+}
+
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         window::CLEAR_COLOR
@@ -874,6 +967,7 @@ impl eframe::App for App {
             let _ = frame;
             false
         };
+        self.take_drops(&ctx, frame);
         let mut run = self.palette.show(&ctx, &COMMANDS);
         self.link.tick(&ctx, &mut self.sessions);
         mux_ui::capture::screenshot(&ctx);
@@ -883,6 +977,11 @@ impl eframe::App for App {
                 let window = ui.max_rect();
                 self.titlebar = None;
                 let sidebar_width = self.sidebar.animate(&ctx);
+                let opacity = if blurred {
+                    self.prefs.transparency.opacity()
+                } else {
+                    (1.0, 1.0)
+                };
                 #[cfg(target_os = "linux")]
                 if let Some(Ok(blur)) = &mut self.blur {
                     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -891,11 +990,17 @@ impl eframe::App for App {
                     } else {
                         f32::from(theme::radius::LG)
                     };
-                    blur.fit(sidebar_width, window.height(), corner);
+                    // the whole window is blurred once the content is see-through too
+                    let width = match opacity {
+                        (_, content) if content < 1.0 => window.width(),
+                        (sidebar, _) if sidebar < 1.0 => sidebar_width,
+                        _ => 0.0,
+                    };
+                    blur.fit(width, window.height(), corner);
                 }
                 WindowFrame::new("")
                     .sidebar(sidebar_width)
-                    .translucent_sidebar(blurred)
+                    .opacity(opacity.0, opacity.1)
                     .show(ui, |ui| {
                         let mut sidebar = std::mem::take(&mut self.sidebar);
                         let main = sidebar.show(ui, |ui| self.sidebar_contents(ui));

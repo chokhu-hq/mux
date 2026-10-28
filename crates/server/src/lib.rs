@@ -391,6 +391,7 @@ impl Server {
                     items: agent.items.clone(),
                     busy: agent.busy,
                     settings: agent.settings.clone(),
+                    context: agent.context,
                 };
                 self.send(client, msg);
                 for provider in Provider::ALL {
@@ -424,7 +425,11 @@ impl Server {
                 }
                 self.send_watchers(id, ServerMsg::AgentSettings { id, settings });
             }
-            ClientMsg::AgentSend { id, text } => self.agent_send(id, text),
+            ClientMsg::AgentSend {
+                id,
+                text,
+                attachments,
+            } => self.agent_send(id, text, attachments),
             ClientMsg::AgentDecide {
                 id,
                 approval,
@@ -480,7 +485,7 @@ impl Server {
         self.agents.entry(id).or_insert_with(|| Agent::load(&path))
     }
 
-    fn agent_send(&mut self, id: u64, text: String) {
+    fn agent_send(&mut self, id: u64, text: String, attachments: Vec<String>) {
         let Some(info) = self.store.session_mut(id) else {
             return;
         };
@@ -511,7 +516,7 @@ impl Server {
                     mux_core::display_path(&dir.to_string_lossy())
                 ));
             }
-            Some(dir) => agent.send(text, id, generation, dir, &events),
+            Some(dir) => agent.send(text, attachments, id, generation, dir, &events),
         }
         self.agent_changed(id);
         self.changed();
@@ -528,6 +533,7 @@ impl Server {
         let provider = agent.settings.provider;
         let label = provider.label();
         let usage = agent.usage.take();
+        let context = agent.take_context();
         // saved when a turn starts or ends rather than on every streamed word
         if (busy.is_some() || (!agent.busy && !items.is_empty()))
             && let Err(err) = agent.save(&path)
@@ -542,6 +548,9 @@ impl Server {
         }
         if let Some(windows) = usage {
             self.set_usage(provider, windows);
+        }
+        if let Some(context) = context {
+            self.send_watchers(id, ServerMsg::AgentContext { id, context });
         }
         if let Some(info) = self.store.session_mut(id)
             && info.status != status

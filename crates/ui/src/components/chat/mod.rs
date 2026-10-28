@@ -1,8 +1,10 @@
+mod attachments;
 mod cards;
 mod composer;
 mod markdown;
 
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
+use mux_core::protocol::ContextUsage;
 
 pub use cards::thinking;
 pub use composer::{Composer, ComposerAction, Controls};
@@ -10,12 +12,15 @@ pub use markdown::markdown;
 
 use crate::components::EmptyState;
 use crate::icons;
-use crate::theme::space;
+use crate::theme::{self, space};
 
 const MAX_WIDTH: f32 = 720.0;
 
 pub enum ChatItem {
-    User(String),
+    User {
+        text: String,
+        attachments: Vec<String>,
+    },
     Assistant(String),
     Tool(ToolCall),
     Diff(FileDiff),
@@ -77,6 +82,8 @@ pub enum Decision {
 
 pub enum ChatAction {
     Send(String),
+    // the attach button was clicked, so the app should offer a file picker
+    Attach,
     Stop,
     Decide(usize, Decision),
 }
@@ -86,6 +93,9 @@ pub struct ChatView<'a> {
     draft: &'a mut String,
     running: bool,
     controls: Option<Controls<'a>>,
+    context: Option<ContextUsage>,
+    attachments: Option<&'a mut Vec<String>>,
+    dropping: bool,
 }
 
 impl<'a> ChatView<'a> {
@@ -95,7 +105,26 @@ impl<'a> ChatView<'a> {
             draft,
             running: false,
             controls: None,
+            context: None,
+            attachments: None,
+            dropping: false,
         }
+    }
+
+    pub fn attachments(mut self, attachments: &'a mut Vec<String>) -> Self {
+        self.attachments = Some(attachments);
+        self
+    }
+
+    // files are being dragged over the window, so the chat shows where they'll go
+    pub fn dropping(mut self, dropping: bool) -> Self {
+        self.dropping = dropping;
+        self
+    }
+
+    pub fn context(mut self, context: Option<ContextUsage>) -> Self {
+        self.context = context;
+        self
     }
 
     pub fn controls(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
@@ -122,13 +151,19 @@ impl<'a> ChatView<'a> {
             pos2(left + width, rect.bottom() - space::MD),
         );
         let mut bottom = ui.new_child(UiBuilder::new().max_rect(composer));
-        let mut input = Composer::new(self.draft).running(self.running);
+        let mut input = Composer::new(self.draft)
+            .running(self.running)
+            .context(self.context);
+        if let Some(attachments) = self.attachments {
+            input = input.attachments(attachments);
+        }
         if let Some(controls) = self.controls {
             input = input.controls(controls);
         }
         if let Some(composer) = input.show(&mut bottom) {
             action = Some(match composer {
                 ComposerAction::Send(text) => ChatAction::Send(text),
+                ComposerAction::Attach => ChatAction::Attach,
                 ComposerAction::Stop => ChatAction::Stop,
             });
         }
@@ -141,6 +176,7 @@ impl<'a> ChatView<'a> {
 
         let mut list_ui = ui.new_child(UiBuilder::new().max_rect(list));
         list_ui.set_clip_rect(list.intersect(ui.clip_rect()));
+        drop_overlay(ui, rect, self.dropping);
         if self.items.is_empty() {
             empty(&mut list_ui);
             ui.allocate_rect(rect, Sense::hover());
@@ -176,7 +212,9 @@ impl<'a> ChatView<'a> {
                             let index = i;
                             i += 1;
                             ui.push_id(index, |ui| match item {
-                                ChatItem::User(text) => cards::user_message(ui, text),
+                                ChatItem::User { text, attachments } => {
+                                    cards::user_message(ui, text, attachments)
+                                }
                                 ChatItem::Assistant(text) => markdown(ui, text),
                                 ChatItem::Tool(tool) => cards::tool_call(ui, tool),
                                 ChatItem::Diff(diff) => cards::diff(ui, diff),
@@ -206,6 +244,48 @@ pub fn set_thinking(items: &mut Vec<ChatItem>, thinking: bool) {
     }
 }
 
+// a soft panel over the chat while files are dragged over the window
+fn drop_overlay(ui: &Ui, rect: Rect, dropping: bool) {
+    let t = crate::motion::spring_bool(
+        ui.ctx(),
+        ui.scope_id().with("dropping"),
+        dropping,
+        crate::motion::Spring::QUICK,
+    );
+    if t <= 0.01 {
+        return;
+    }
+    let p = theme::palette(ui);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        ui.scope_id().with("drop-overlay"),
+    ));
+    let area = rect.shrink(space::MD);
+    let rounding = egui::CornerRadius::same(theme::radius::XL);
+    painter.rect_filled(area, rounding, p.bg.gamma_multiply(0.85 * t));
+    painter.rect_stroke(
+        area,
+        rounding,
+        egui::Stroke::new(1.5, p.border_strong.gamma_multiply(t)),
+        egui::StrokeKind::Inside,
+    );
+    let center = area.center();
+    painter.text(
+        center - egui::vec2(0.0, 14.0),
+        egui::Align2::CENTER_CENTER,
+        icons::PAPERCLIP,
+        theme::font::icon(theme::icon::XL),
+        p.text_muted.gamma_multiply(t),
+    );
+    painter.text(
+        center + egui::vec2(0.0, 18.0),
+        egui::Align2::CENTER_CENTER,
+        "Drop files to attach them",
+        theme::font::medium(theme::text::MD),
+        p.text.gamma_multiply(t),
+    );
+}
+
 fn empty(ui: &mut Ui) {
     EmptyState::new(icons::CHAT_CIRCLE, "Start a conversation")
         .detail("Ask the agent to plan, change or explain something in this project.")
@@ -227,9 +307,10 @@ pub fn sample() -> Vec<ChatItem> {
         text: text.to_owned(),
     };
     vec![
-        ChatItem::User(
-            "Refactor the auth middleware to use the new session store, and add tests for expired sessions.".to_owned(),
-        ),
+        ChatItem::User {
+            text: "Refactor the auth middleware to use the new session store, and add tests for expired sessions.".to_owned(),
+            attachments: Vec::new(),
+        },
         ChatItem::Assistant(
             "I'll start by reading the current middleware and finding where sessions are loaded.".to_owned(),
         ),

@@ -4,7 +4,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use mux_core::protocol::{AgentItem, AgentSettings, Decision, FileChange, ItemStatus, UsageWindow};
+use base64::Engine;
+use mux_core::protocol::{
+    AgentItem, AgentSettings, ContextUsage, Decision, FileChange, ItemStatus, UsageWindow, is_image,
+};
 use mux_core::{Access, Provider, SessionStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,6 +29,8 @@ struct Saved {
     items: Vec<AgentItem>,
     #[serde(default)]
     settings: AgentSettings,
+    #[serde(default)]
+    context: Option<ContextUsage>,
 }
 
 enum Call {
@@ -59,6 +64,8 @@ pub struct Agent {
     pub settings: AgentSettings,
     // the latest rate limits the cli reported, taken by the server to pass on
     pub usage: Option<Vec<UsageWindow>>,
+    pub context: Option<ContextUsage>,
+    context_changed: bool,
     thread_id: Option<String>,
     thread_live: bool,
     turn_id: Option<String>,
@@ -69,7 +76,7 @@ pub struct Agent {
     live_text: Option<usize>,
     // the settings claude was launched with, since changing them means relaunching
     launched: Option<AgentSettings>,
-    queued: Vec<String>,
+    queued: Vec<(String, Vec<String>)>,
     next_call: u64,
     calls: HashMap<u64, Call>,
     by_codex_id: HashMap<String, usize>,
@@ -106,6 +113,8 @@ impl Agent {
             busy: false,
             settings: saved.settings,
             usage: None,
+            context: saved.context,
+            context_changed: false,
             thread_id: saved.thread_id,
             thread_live: false,
             turn_id: None,
@@ -125,6 +134,20 @@ impl Agent {
         }
     }
 
+    fn set_context(&mut self, context: ContextUsage) {
+        if self.context != Some(context) {
+            self.context = Some(context);
+            self.context_changed = true;
+        }
+    }
+
+    // the context usage when it changed since the last call, for the server to pass on
+    pub fn take_context(&mut self) -> Option<ContextUsage> {
+        std::mem::take(&mut self.context_changed)
+            .then_some(self.context)
+            .flatten()
+    }
+
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
@@ -134,6 +157,7 @@ impl Agent {
             session_id: self.session_id.clone(),
             items: self.items.clone(),
             settings: self.settings.clone(),
+            context: self.context,
         };
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
@@ -165,12 +189,16 @@ impl Agent {
     pub fn send(
         &mut self,
         text: String,
+        attachments: Vec<String>,
         session: u64,
         generation: u64,
         cwd: PathBuf,
         events: &UnboundedSender<Event>,
     ) {
-        self.push(AgentItem::User { text: text.clone() });
+        self.push(AgentItem::User {
+            text: text.clone(),
+            attachments: attachments.clone(),
+        });
         self.set_busy(true);
         let provider = self.settings.provider;
         // claude bakes model, effort and speed in at launch, so new settings mean relaunching with --resume
@@ -193,13 +221,13 @@ impl Agent {
         if provider == Provider::Claude {
             let line = json!({
                 "type": "user",
-                "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
+                "message": { "role": "user", "content": claude_content(&text, &attachments) }
             });
             self.write(line);
         } else if self.thread_live {
-            self.start_turn(text);
+            self.start_turn(text, attachments);
         } else {
-            self.queued.push(text);
+            self.queued.push((text, attachments));
         }
     }
 
@@ -389,7 +417,8 @@ impl Agent {
                     self.thread_live = true;
                     let queued = std::mem::take(&mut self.queued);
                     if !queued.is_empty() {
-                        self.start_turn(queued.join("\n\n"));
+                        let (texts, files): (Vec<_>, Vec<_>) = queued.into_iter().unzip();
+                        self.start_turn(texts.join("\n\n"), files.concat());
                     }
                 }
             },
@@ -480,6 +509,17 @@ impl Agent {
                 self.push(AgentItem::Error {
                     message: message.to_owned(),
                 });
+            }
+            // the last request's tokens are what the conversation currently fills
+            "thread/tokenUsage/updated" => {
+                let usage = &params["tokenUsage"];
+                let window = usage["modelContextWindow"]
+                    .as_u64()
+                    .or(self.context.map(|c| c.window))
+                    .unwrap_or(0);
+                if let Some(used) = usage["last"]["totalTokens"].as_u64() {
+                    self.set_context(ContextUsage { used, window });
+                }
             }
             "account/rateLimits/updated" => {
                 self.usage = Some(usage::codex(&params["rateLimits"]));
@@ -589,6 +629,10 @@ impl Agent {
                 }
             }
             Some("assistant") => {
+                if let Some(used) = claude_context(&msg["message"]["usage"]) {
+                    let window = self.context.map_or(0, |c| c.window);
+                    self.set_context(ContextUsage { used, window });
+                }
                 for block in msg["message"]["content"].as_array().into_iter().flatten() {
                     match block["type"].as_str() {
                         Some("text") => {
@@ -621,6 +665,16 @@ impl Agent {
                 self.usage = Some(usage::claude(&msg["rate_limit_info"]));
             }
             Some("result") => {
+                // only the result says how big the model's window is
+                let window = msg["modelUsage"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|models| models.values())
+                    .filter_map(|m| m["contextWindow"].as_u64())
+                    .max();
+                if let (Some(window), Some(context)) = (window, self.context) {
+                    self.set_context(ContextUsage { window, ..context });
+                }
                 if msg["is_error"] == true || msg["subtype"] != "success" {
                     let message = msg["result"]
                         .as_str()
@@ -758,11 +812,11 @@ impl Agent {
         }
     }
 
-    fn start_turn(&mut self, text: String) {
+    fn start_turn(&mut self, text: String, attachments: Vec<String>) {
         let Some(thread) = self.thread_id.clone() else {
             return;
         };
-        let params = turn_params(&thread, &text, &self.settings);
+        let params = turn_params(&thread, &text, &attachments, &self.settings);
         self.call(Call::StartTurn, "turn/start", params);
     }
 
@@ -816,8 +870,78 @@ impl Agent {
 }
 
 // sent on every turn, so a change in the picker applies to the very next message
-fn turn_params(thread: &str, text: &str, settings: &AgentSettings) -> Value {
-    let mut params = json!({ "threadId": thread, "input": [{ "type": "text", "text": text }] });
+// claude gets images inline, and other files as paths its read tool can open
+fn claude_content(text: &str, attachments: &[String]) -> Value {
+    let (images, files): (Vec<&String>, Vec<&String>) =
+        attachments.iter().partition(|p| is_image(p));
+    let mut text = text.to_owned();
+    if !files.is_empty() {
+        text.push_str("\n\nAttached files:");
+        for path in files {
+            text.push_str(&format!("\n- {path}"));
+        }
+    }
+    let mut content = Vec::new();
+    for path in images {
+        match fs::read(path) {
+            Ok(bytes) => content.push(json!({ "type": "image", "source": {
+                "type": "base64",
+                "media_type": media_type(path),
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            } })),
+            Err(err) => text.push_str(&format!("\n\n(Couldn't attach {path}: {err})")),
+        }
+    }
+    content.push(json!({ "type": "text", "text": text }));
+    Value::Array(content)
+}
+
+fn media_type(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+// everything claude sent with a request counts toward the window, cached or not
+fn claude_context(usage: &Value) -> Option<u64> {
+    let input = usage["input_tokens"].as_u64()?;
+    Some(
+        input
+            + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+            + usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
+            + usage["output_tokens"].as_u64().unwrap_or(0),
+    )
+}
+
+// codex reads images itself and gets other files as mentions it can open
+fn turn_params(
+    thread: &str,
+    text: &str,
+    attachments: &[String],
+    settings: &AgentSettings,
+) -> Value {
+    let mut input = vec![json!({ "type": "text", "text": text })];
+    for path in attachments {
+        input.push(if is_image(path) {
+            json!({ "type": "localImage", "path": path })
+        } else {
+            json!({ "type": "mention", "name": file_name(path), "path": path })
+        });
+    }
+    let mut params = json!({ "threadId": thread, "input": input });
     if let Some(model) = &settings.model {
         params["model"] = json!(model);
     }
@@ -1140,7 +1264,7 @@ mod tests {
 
     #[test]
     fn turns_carry_the_chosen_model_effort_and_speed() {
-        let defaults = turn_params("t", "hi", &AgentSettings::default());
+        let defaults = turn_params("t", "hi", &[], &AgentSettings::default());
         assert!(defaults.get("model").is_none() && defaults.get("effort").is_none());
         assert_eq!(defaults["serviceTierForTurn"], "default");
 
@@ -1150,7 +1274,7 @@ mod tests {
             fast: true,
             ..Default::default()
         };
-        let params = turn_params("t", "hi", &chosen);
+        let params = turn_params("t", "hi", &[], &chosen);
         assert_eq!(params["model"], "gpt-5.6-luna");
         assert_eq!(params["effort"], "high");
         assert_eq!(params["serviceTierForTurn"], "priority");
@@ -1158,8 +1282,37 @@ mod tests {
     }
 
     #[test]
+    fn attachments_go_to_codex_as_images_and_mentions() {
+        let files = ["/p/shot.PNG".to_owned(), "/p/notes.md".to_owned()];
+        let input = &turn_params("t", "look", &files, &AgentSettings::default())["input"];
+        assert_eq!(input[0]["text"], "look");
+        assert_eq!(
+            input[1],
+            json!({ "type": "localImage", "path": "/p/shot.PNG" })
+        );
+        assert_eq!(
+            input[2],
+            json!({ "type": "mention", "name": "notes.md", "path": "/p/notes.md" })
+        );
+    }
+
+    #[test]
+    fn attachments_go_to_claude_inline_or_as_paths() {
+        let dir = std::env::temp_dir().join(format!("mux-attach-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("dot.png");
+        fs::write(&image, b"png").unwrap();
+        let image = image.to_string_lossy().into_owned();
+        let content = claude_content("look", &[image, "/p/notes.md".to_owned()]);
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "cG5n");
+        assert_eq!(content[1]["text"], "look\n\nAttached files:\n- /p/notes.md");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn turns_carry_the_access_mode() {
-        let defaults = turn_params("t", "hi", &AgentSettings::default());
+        let defaults = turn_params("t", "hi", &[], &AgentSettings::default());
         assert_eq!(defaults["approvalPolicy"], "on-request");
         assert_eq!(defaults["sandboxPolicy"]["type"], "workspaceWrite");
 
@@ -1167,7 +1320,7 @@ mod tests {
             access: Access::Full,
             ..Default::default()
         };
-        let params = turn_params("t", "hi", &full);
+        let params = turn_params("t", "hi", &[], &full);
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandboxPolicy"]["type"], "dangerFullAccess");
 
@@ -1176,7 +1329,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            turn_params("t", "hi", &supervised)["approvalPolicy"],
+            turn_params("t", "hi", &[], &supervised)["approvalPolicy"],
             "untrusted"
         );
     }
@@ -1185,6 +1338,39 @@ mod tests {
         let mut agent = agent();
         agent.settings.provider = Provider::Claude;
         agent
+    }
+
+    #[test]
+    fn tracks_how_full_the_context_window_is() {
+        let mut agent = agent();
+        agent.handle(json!({ "method": "thread/tokenUsage/updated", "params": { "tokenUsage": {
+            "last": { "totalTokens": 24000 }, "total": { "totalTokens": 90000 }, "modelContextWindow": 272000
+        } } }));
+        assert_eq!(
+            agent.take_context(),
+            Some(ContextUsage {
+                used: 24000,
+                window: 272000
+            })
+        );
+        assert_eq!(agent.take_context(), None);
+
+        // the numbers are what claude 2.1.312 reported for a one word haiku reply
+        let mut claude = claude_agent();
+        claude.handle(json!({ "type": "assistant", "message": { "content": [], "usage": {
+            "input_tokens": 2, "cache_creation_input_tokens": 12223, "cache_read_input_tokens": 11383, "output_tokens": 4
+        } } }));
+        claude.handle(
+            json!({ "type": "result", "subtype": "success", "result": "ok",
+            "modelUsage": { "claude-haiku-5-5": { "contextWindow": 1000000 } } }),
+        );
+        assert_eq!(
+            claude.take_context(),
+            Some(ContextUsage {
+                used: 23612,
+                window: 1000000
+            })
+        );
     }
 
     // the frame order below is what claude 2.1.312 sent for a turn whose bash call was denied

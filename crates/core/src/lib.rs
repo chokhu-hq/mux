@@ -1,13 +1,53 @@
 use serde::{Deserialize, Serialize};
 
+pub mod logging;
 pub mod protocol;
+pub mod transport;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub fn home_dir() -> std::path::PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(Into::into)
+        .unwrap_or_default()
+}
+
+// a program to run, found the way a shell would and kept from opening a console window on windows
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = std::process::Command::new(resolve(program.as_ref()));
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    std::process::Command::new(program)
+}
+
+// windows only looks for .exe on PATH, but npm installs clis like codex as .cmd scripts
+#[cfg(windows)]
+fn resolve(program: &std::ffi::OsStr) -> std::ffi::OsString {
+    let path = std::path::Path::new(program);
+    if path.extension().is_some() || path.components().count() > 1 {
+        return program.to_owned();
+    }
+    let dirs = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&dirs) {
+        for ext in ["exe", "cmd", "bat"] {
+            let candidate = dir.join(path).with_extension(ext);
+            if candidate.is_file() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+    program.to_owned()
+}
+
 // shortens the home folder to ~ the way shells show paths
 pub fn display_path(path: &str) -> String {
-    let home =
-        std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+    let home = home_dir().to_string_lossy().into_owned();
     match path.strip_prefix(&home) {
         Some(rest)
             if !home.is_empty()

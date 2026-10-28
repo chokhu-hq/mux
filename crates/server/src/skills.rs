@@ -10,9 +10,7 @@ use tokio::process::Command;
 
 // claude's skills and custom commands live as markdown files, personal ones first and then the project's
 pub fn claude(project: &Path) -> Vec<Skill> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = mux_core::home_dir();
     let config =
         std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
     let mut skills = Vec::new();
@@ -152,7 +150,7 @@ fn unquote(value: &str) -> String {
 // codex lists its skills for a folder through a short lived app-server
 pub async fn codex(project: &Path) -> io::Result<Vec<Skill>> {
     let list = async {
-        let mut child = Command::new("codex")
+        let mut child = Command::from(mux_core::command("codex"))
             .arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

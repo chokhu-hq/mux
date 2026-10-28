@@ -13,16 +13,18 @@ pub enum Tab {
     #[default]
     General,
     Usage,
+    Logs,
     About,
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::General, Tab::Usage, Tab::About];
+    const ALL: [Tab; 4] = [Tab::General, Tab::Usage, Tab::Logs, Tab::About];
 
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
             Tab::Usage => "Usage",
+            Tab::Logs => "Logs",
             Tab::About => "About",
         }
     }
@@ -31,6 +33,7 @@ impl Tab {
         match self {
             Tab::General => icons::GEAR,
             Tab::Usage => icons::CHART_BAR,
+            Tab::Logs => icons::SCROLL,
             Tab::About => icons::INFO,
         }
     }
@@ -106,6 +109,7 @@ impl Page<'_> {
                         crate::token_usage::show(ui, self.tokens.as_ref());
                         usage(ui, &self.usage);
                     }
+                    Tab::Logs => crate::logs::show(ui, &self.agents),
                     Tab::About => about(ui),
                 }
             });
@@ -281,7 +285,7 @@ fn about(ui: &mut egui::Ui) {
 }
 
 // a captioned card holding a group of settings
-fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     let p = theme::palette(ui);
     ui.label(
         egui::RichText::new(title)
@@ -302,17 +306,31 @@ fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 // one setting, named and explained on the left with its control on the right
-fn setting(ui: &mut egui::Ui, title: &str, detail: &str, control: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn setting(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    control: impl FnOnce(&mut egui::Ui),
+) {
     let p = theme::palette(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
-    let title = ui
-        .painter()
-        .layout_no_wrap(title.to_owned(), font::medium(text::MD), p.text);
-    let detail = ui.painter().layout_no_wrap(
-        detail.to_owned(),
-        font::regular(text::SM + 1.0),
-        p.text_faint,
+    // the control goes first, so the text knows how much room is left beside it
+    let mut controls = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
+    control(&mut controls);
+    let used = controls.min_rect().width();
+    let room = (rect.width() - used - space::LG).max(0.0);
+    // a line too long for the room is cut short rather than running under the control
+    let line = |text: &str, font, color| {
+        let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+        ui.painter().layout_job(job)
+    };
+    let title = line(title, font::medium(text::MD), p.text);
+    let detail = line(detail, font::regular(text::SM + 1.0), p.text_faint);
     // the two lines are centred as a block, level with the control beside them
     let gap = 3.0;
     let top = rect.center().y - (title.size().y + gap + detail.size().y) / 2.0;
@@ -320,15 +338,9 @@ fn setting(ui: &mut egui::Ui, title: &str, detail: &str, control: impl FnOnce(&m
     ui.painter().galley(pos2(rect.left(), top), title, p.text);
     ui.painter()
         .galley(pos2(rect.left(), below), detail, p.text_faint);
-    let mut controls = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-    );
-    control(&mut controls);
 }
 
-fn divider(ui: &mut egui::Ui) {
+pub(crate) fn divider(ui: &mut egui::Ui) {
     let p = theme::palette(ui);
     let rect = ui.available_rect_before_wrap();
     ui.painter()

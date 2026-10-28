@@ -1,3 +1,6 @@
+// release builds on windows are a windowed app, so no console window opens behind them
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Rect, UiBuilder, pos2, vec2};
 use mux_core::protocol::{ClientMsg, PROTOCOL};
 use mux_core::{SessionKind, SessionStatus};
@@ -24,22 +27,33 @@ mod connection;
 #[cfg(target_os = "linux")]
 mod drop;
 mod link;
-#[cfg(target_os = "linux")]
+mod logs;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod notify;
 mod prefs;
 mod sessions;
 mod settings;
 mod terminal;
 mod token_usage;
+mod update;
 
 fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--server") {
         if let Err(err) = mux_server::run() {
+            log::error!("{err}");
             eprintln!("mux: {err}");
             std::process::exit(1);
         }
         return Ok(());
     }
+    mux_core::logging::init("app.log");
+    log::info!(
+        "mux {} ({}) on {} {}",
+        mux_core::VERSION,
+        update::build(),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     let mut viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
     if let Ok(icon) =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/mux-256.png"))
@@ -141,6 +155,9 @@ struct App {
     review: bool,
     // sessions whose desktop notification was clicked, sent from the threads waiting on them
     opened: (std::sync::mpsc::Sender<u64>, std::sync::mpsc::Receiver<u64>),
+    // a newer release, once the check at launch finds one
+    update: Option<update::Update>,
+    updates: std::sync::mpsc::Receiver<update::Update>,
 }
 
 struct TitleBar {
@@ -184,6 +201,8 @@ impl App {
             diff_index: 0,
             review: false,
             opened: std::sync::mpsc::channel(),
+            update: None,
+            updates: update::check(ctx),
         };
         app.prefs.apply(ctx);
         app
@@ -210,7 +229,15 @@ impl App {
     fn sidebar_contents(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(ui);
         let rect = ui.max_rect().shrink(space::SM);
-        let footer_height = FOOTER_ROW + space::SM + 1.0;
+        if let Ok(update) = self.updates.try_recv() {
+            self.update = Some(update);
+        }
+        let update_height = if self.update.is_some() {
+            FOOTER_ROW
+        } else {
+            0.0
+        };
+        let footer_height = FOOTER_ROW + update_height + space::SM + 1.0;
         let list = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - footer_height));
         let footer = Rect::from_min_max(pos2(rect.min.x, list.max.y), rect.max);
 
@@ -237,6 +264,11 @@ impl App {
             .painter()
             .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
         ui_footer.add_space(space::SM + 1.0);
+        if let Some(update) = &self.update
+            && update_row(&mut ui_footer, update).clicked()
+        {
+            mux_ui::chat::open_externally(&update.url);
+        }
         // only shown when something is wrong, a working connection needs no badge
         let status = match &self.link {
             Link::Up(_) => None,
@@ -957,7 +989,7 @@ fn file_diff(path: &str, fallback: &str) -> String {
     let file = std::path::Path::new(path);
     let dir = file.parent().unwrap_or(file);
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
+        mux_core::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1438,6 +1470,46 @@ fn slash_commands(
 
 const FOOTER_ROW: f32 = 32.0;
 
+// a quiet row above settings, there only while a newer release is out
+fn update_row(ui: &mut egui::Ui, update: &update::Update) -> egui::Response {
+    let p = theme::palette(ui);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_ROW), egui::Sense::click());
+    let hover = motion::spring_bool(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        Spring::QUICK,
+    );
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same(theme::radius::LG),
+        theme::tint(p, 0.05 * hover),
+    );
+    let y = rect.center().y;
+    let x = rect.left() + space::MD;
+    ui.painter().text(
+        pos2(x + icon::MD / 2.0, y),
+        egui::Align2::CENTER_CENTER,
+        icons::ARROW_CIRCLE_UP,
+        font::icon(icon::MD),
+        p.accent,
+    );
+    ui.painter().text(
+        pos2(x + icon::MD + space::SM, y),
+        egui::Align2::LEFT_CENTER,
+        "Update available",
+        font::medium(text::MD),
+        p.text_muted.lerp_to_gamma(p.text, hover),
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .tip(format!(
+            "{} is out. Open the release page to download it.",
+            update.version
+        ))
+}
+
 // the sidebar's last row: settings, with plan usage at its end, or the connection when it isn't up
 fn settings_row(
     ui: &mut egui::Ui,
@@ -1752,7 +1824,7 @@ impl App {
                 sessions::Event::Waiting => "Needs your approval to continue",
                 sessions::Event::Failed => "Stopped with an error",
             };
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             notify::send(
                 &alert.title,
                 body,
@@ -1760,8 +1832,8 @@ impl App {
                 self.opened.0.clone(),
                 ctx.clone(),
             );
-            // only linux has desktop notifications so far
-            #[cfg(not(target_os = "linux"))]
+            // windows has no desktop notifications yet
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let _ = (body, &alert.title);
         }
         for id in self.opened.1.try_iter() {
@@ -1800,7 +1872,7 @@ impl App {
         {
             let drops = self.drops.get_or_insert_with(|| {
                 let (drops, clipboard) = drop::listen(frame, ctx.clone())
-                    .inspect_err(|reason| eprintln!("mux: no file drops or pastes: {reason}"))
+                    .inspect_err(|reason| log::warn!("no file drops or pastes: {reason}"))
                     .ok()?;
                 self.clipboard = Some(clipboard);
                 Some(drops)
@@ -1853,7 +1925,7 @@ impl eframe::App for App {
             let first = self.blur.is_none();
             let blur = self.blur.get_or_insert_with(|| blur::request(frame));
             if first && let Err(reason) = blur {
-                eprintln!("mux: no background blur: {reason}");
+                log::info!("no background blur: {reason}");
             }
             blur.is_ok()
         };

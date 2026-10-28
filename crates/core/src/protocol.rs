@@ -542,6 +542,10 @@ pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("MUX_SOCKET") {
         return path.into();
     }
+    // windows has no unix sockets, so this file says which port the server listens on instead
+    if cfg!(windows) {
+        return data_dir().join("server.address");
+    }
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(dir) => PathBuf::from(dir).join("mux.sock"),
         None => std::env::temp_dir().join(format!("mux-{}.sock", user())),
@@ -552,8 +556,13 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("MUX_DATA_DIR") {
         return dir.into();
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    if cfg!(target_os = "macos") {
+    let home = crate::home_dir();
+    if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+            .join("mux")
+    } else if cfg!(target_os = "macos") {
         home.join("Library/Application Support/mux")
     } else {
         std::env::var_os("XDG_DATA_HOME")

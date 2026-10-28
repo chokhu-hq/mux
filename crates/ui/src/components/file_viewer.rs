@@ -762,15 +762,15 @@ pub fn open_in_editor(path: &str, line: Option<usize>) {
             .is_some_and(|dirs| std::env::split_paths(&dirs).any(|d| d.join(program).is_file()))
     };
     let mut command = if on_path("zed") {
-        let mut c = std::process::Command::new("zed");
+        let mut c = mux_core::command("zed");
         c.arg(&at);
         c
     } else if on_path("code") {
-        let mut c = std::process::Command::new("code");
+        let mut c = mux_core::command("code");
         c.args(["-g", &at]);
         c
     } else {
-        let mut c = std::process::Command::new(if cfg!(target_os = "macos") {
+        let mut c = mux_core::command(if cfg!(target_os = "macos") {
             "open"
         } else {
             "xdg-open"

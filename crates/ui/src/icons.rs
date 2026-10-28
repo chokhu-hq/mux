@@ -1,5 +1,6 @@
 // phosphor icons v2.1.2, the regular and fill fonts share these codepoints
 pub const ARROWS_IN_LINE_VERTICAL: char = '\u{e532}';
+pub const ARROW_CIRCLE_UP: char = '\u{e030}';
 pub const ARROW_CLOCKWISE: char = '\u{e036}';
 pub const ARROW_SQUARE_OUT: char = '\u{e5de}';
 pub const ARROW_UP: char = '\u{e08e}';
@@ -46,6 +47,7 @@ pub const PENCIL_SIMPLE_LINE: char = '\u{ebc6}';
 pub const PLAY: char = '\u{e3d0}';
 pub const PLUS: char = '\u{e3d4}';
 pub const ROBOT: char = '\u{e762}';
+pub const SCROLL: char = '\u{eb7a}';
 pub const SHIELD_CHECK: char = '\u{e40c}';
 pub const SIDEBAR_SIMPLE: char = '\u{ec24}';
 pub const SLIDERS_HORIZONTAL: char = '\u{e434}';
@@ -61,11 +63,12 @@ pub const WARNING_CIRCLE: char = '\u{e4e2}';
 pub const X: char = '\u{e4f6}';
 pub const X_CIRCLE: char = '\u{e4f8}';
 
-pub const ALL: [(&str, char); 61] = [
+pub const ALL: [(&str, char); 63] = [
     ("arrows-in-line-vertical", ARROWS_IN_LINE_VERTICAL),
     ("arrow-clockwise", ARROW_CLOCKWISE),
     ("arrow-square-out", ARROW_SQUARE_OUT),
     ("arrow-up", ARROW_UP),
+    ("arrow-circle-up", ARROW_CIRCLE_UP),
     ("arrow-u-down-left", ARROW_U_DOWN_LEFT),
     ("calendar-blank", CALENDAR_BLANK),
     ("caret-down", CARET_DOWN),
@@ -109,6 +112,7 @@ pub const ALL: [(&str, char); 61] = [
     ("play", PLAY),
     ("plus", PLUS),
     ("robot", ROBOT),
+    ("scroll", SCROLL),
     ("shield-check", SHIELD_CHECK),
     ("sidebar-simple", SIDEBAR_SIMPLE),
     ("sliders-horizontal", SLIDERS_HORIZONTAL),

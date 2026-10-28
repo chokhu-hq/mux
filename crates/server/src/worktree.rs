@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use mux_core::protocol;
 
@@ -16,7 +15,7 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
     );
     let dir = root.join(name).join(format!("{slug}-{id}"));
     let branch = format!("mux/{slug}-{id}");
-    let output = Command::new("git")
+    let output = mux_core::command("git")
         .arg("-C")
         .arg(repo)
         .args(["worktree", "add", "-b", &branch])
@@ -44,7 +43,7 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
 // git refuses to remove a checkout with uncommitted work, which is the point, and the branch always stays
 pub fn remove(path: String) {
     std::thread::spawn(move || {
-        let _ = Command::new("git")
+        let _ = mux_core::command("git")
             .arg("-C")
             .arg(&path)
             .args(["worktree", "remove"])
@@ -97,7 +96,7 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            mux_core::command("git")
                 .arg("-C")
                 .arg(&repo)
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])

@@ -11,10 +11,11 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mux_core::protocol::{self, ClientMsg, ModelOption, PROTOCOL, ServerMsg, UsageWindow};
+use mux_core::protocol::{
+    self, AgentItem, ClientMsg, ModelOption, PROTOCOL, ServerMsg, UsageWindow,
+};
 use mux_core::{Provider, SessionStatus};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use agent::Agent;
@@ -52,6 +53,7 @@ pub enum Event {
 
 // blocks until ctrl+c or a client asks the server to shut down
 pub fn run() -> io::Result<()> {
+    mux_core::logging::init("server.log");
     run_at(
         protocol::socket_path(),
         protocol::data_dir().join("state.json"),
@@ -64,9 +66,11 @@ pub fn run_at(socket: PathBuf, state: PathBuf) -> io::Result<()> {
 
 async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     let listener = bind(&socket)?;
-    println!(
-        "mux server {} listening on {}",
+    log::info!(
+        "mux server {} on {} {} listening on {}",
         mux_core::VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
         socket.display()
     );
 
@@ -97,9 +101,8 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
                 next_client += 1;
-                tokio::spawn(connection(stream, next_client, events.clone()));
+                listener.serve(accepted?, next_client, events.clone());
             }
             _ = tokio::signal::ctrl_c() => break,
             _ = stopped.recv() => break,
@@ -109,7 +112,87 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     Ok(())
 }
 
-fn bind(path: &Path) -> io::Result<UnixListener> {
+#[cfg(unix)]
+struct Listener(tokio::net::UnixListener);
+
+#[cfg(unix)]
+impl Listener {
+    async fn accept(&self) -> io::Result<tokio::net::UnixStream> {
+        Ok(self.0.accept().await?.0)
+    }
+
+    fn serve(&self, stream: tokio::net::UnixStream, id: u64, events: UnboundedSender<Event>) {
+        tokio::spawn(connection(stream, id, events));
+    }
+}
+
+// windows listens on a loopback port, and a client has to open with the secret from the address file
+#[cfg(windows)]
+struct Listener {
+    tcp: tokio::net::TcpListener,
+    secret: std::sync::Arc<String>,
+}
+
+#[cfg(windows)]
+impl Listener {
+    async fn accept(&self) -> io::Result<tokio::net::TcpStream> {
+        Ok(self.tcp.accept().await?.0)
+    }
+
+    fn serve(&self, mut stream: tokio::net::TcpStream, id: u64, events: UnboundedSender<Event>) {
+        let secret = self.secret.clone();
+        tokio::spawn(async move {
+            let proven =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_secret(&mut stream))
+                    .await;
+            if matches!(proven, Ok(Some(given)) if given == *secret) {
+                connection(stream, id, events).await;
+            }
+        });
+    }
+}
+
+// the first line a windows client sends, read a byte at a time so nothing after it is swallowed
+#[cfg(windows)]
+async fn read_secret(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut line = Vec::new();
+    loop {
+        let byte = stream.read_u8().await.ok()?;
+        if byte == b'\n' {
+            return String::from_utf8(line).ok();
+        }
+        if line.len() > 128 {
+            return None;
+        }
+        line.push(byte);
+    }
+}
+
+#[cfg(windows)]
+fn bind(path: &Path) -> io::Result<Listener> {
+    if mux_core::transport::connect(path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "a mux server is already running, as {} says",
+                path.display()
+            ),
+        ));
+    }
+    let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    std_listener.set_nonblocking(true)?;
+    let port = std_listener.local_addr()?.port();
+    let secret = mux_core::transport::secret();
+    // the data folder sits under the user's own profile, which other accounts can't read
+    mux_core::transport::write_address(path, port, &secret)?;
+    Ok(Listener {
+        tcp: tokio::net::TcpListener::from_std(std_listener)?,
+        secret: std::sync::Arc::new(secret),
+    })
+}
+
+#[cfg(unix)]
+fn bind(path: &Path) -> io::Result<Listener> {
     if path.exists() {
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
             return Err(io::Error::new(
@@ -123,15 +206,18 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let listener = UnixListener::bind(path)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
     use std::os::unix::fs::PermissionsExt;
     // the socket gives full control of the user's shells, so only the owner may connect
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+    Ok(Listener(listener))
 }
 
-async fn connection(stream: UnixStream, id: u64, events: UnboundedSender<Event>) {
-    let (mut reader, mut writer) = stream.into_split();
+async fn connection<S>(stream: S, id: u64, events: UnboundedSender<Event>)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let (tx, mut outbox) = mpsc::unbounded_channel::<ServerMsg>();
     if events.send(Event::Connected(id, tx)).is_err() {
         return;
@@ -166,7 +252,7 @@ async fn connection(stream: UnixStream, id: u64, events: UnboundedSender<Event>)
                 }
             }
             Err(err) => {
-                eprintln!("mux: dropping client {id}, bad message: {err}");
+                log::warn!("dropping client {id}, bad message: {err}");
                 break;
             }
         }
@@ -208,6 +294,7 @@ impl Server {
     fn handle(&mut self, event: Event) {
         match event {
             Event::Connected(client, tx) => {
+                log::info!("client {client} connected");
                 let _ = tx.send(ServerMsg::Welcome { protocol: PROTOCOL });
                 let _ = tx.send(self.state_msg());
                 for (provider, models) in &self.models {
@@ -225,6 +312,7 @@ impl Server {
                 self.clients.insert(client, tx);
             }
             Event::Disconnected(client) => {
+                log::info!("client {client} disconnected");
                 self.clients.remove(&client);
                 for watchers in self.attached.values_mut() {
                     watchers.remove(&client);
@@ -304,6 +392,11 @@ impl Server {
                 self.fetching_models.remove(&provider);
                 match result {
                     Ok(catalog) => {
+                        log::info!(
+                            "listed {} {} models",
+                            catalog.models.len(),
+                            provider.label()
+                        );
                         for tx in self.clients.values() {
                             let _ = tx.send(ServerMsg::AgentModels {
                                 provider,
@@ -315,7 +408,7 @@ impl Server {
                             self.set_usage(provider, windows);
                         }
                     }
-                    Err(err) => eprintln!("mux: could not list {} models: {err}", provider.label()),
+                    Err(err) => log::error!("could not list {} models: {err}", provider.label()),
                 }
             }
             Event::AgentExited {
@@ -325,6 +418,15 @@ impl Server {
                 if let Some(agent) = self.agents.get_mut(&session)
                     && agent.generation == generation
                 {
+                    log::info!(
+                        "session {session}: {} exited{}",
+                        agent.settings.provider.label(),
+                        if agent.busy {
+                            " in the middle of a turn"
+                        } else {
+                            ""
+                        }
+                    );
                     agent.exited();
                     self.agent_changed(session);
                 }
@@ -463,7 +565,7 @@ impl Server {
                 }
                 agent.settings = settings.clone();
                 if let Err(err) = agent.save(&path) {
-                    eprintln!("mux: could not save {}: {err}", path.display());
+                    log::error!("could not save {}: {err}", path.display());
                 }
                 let summary = agent.summary();
                 // the other agent has its own skills, so the menu needs them instead
@@ -527,7 +629,7 @@ impl Server {
                 let agent = self.agent(id);
                 if agent.rewind(message) {
                     if let Err(err) = agent.save(&path) {
-                        eprintln!("mux: could not save {}: {err}", path.display());
+                        log::error!("could not save {}: {err}", path.display());
                     }
                     // the transcript got shorter, which item by item updates can't say, so it's sent whole
                     let msg = ServerMsg::AgentTranscript {
@@ -683,7 +785,10 @@ impl Server {
                 Provider::Claude => tokio::task::spawn_blocking(move || skills::claude(&folder))
                     .await
                     .unwrap_or_default(),
-                Provider::Codex => skills::codex(&folder).await.unwrap_or_default(),
+                Provider::Codex => skills::codex(&folder).await.unwrap_or_else(|err| {
+                    log::warn!("could not list codex skills: {err}");
+                    Vec::new()
+                }),
                 // opencode lists its commands itself once its session opens
                 Provider::OpenCode => return,
             };
@@ -736,10 +841,14 @@ impl Server {
         // saved when a turn starts or ends rather than on every streamed word, and the sidebar's summary with it
         let settled = busy.is_some() || (!agent.busy && !items.is_empty());
         if settled && let Err(err) = agent.save(&path) {
-            eprintln!("mux: could not save {}: {err}", path.display());
+            log::error!("could not save {}: {err}", path.display());
         }
         let summary = settled.then(|| agent.summary());
         for (index, item) in items {
+            // whatever the agent showed as an error is worth having when someone sends their log
+            if let AgentItem::Error { message } = &item {
+                log::warn!("session {id}: {label} error: {message}");
+            }
             self.send_watchers(id, ServerMsg::AgentItem { id, index, item });
         }
         if let Some(busy) = busy {
@@ -759,7 +868,7 @@ impl Server {
             if let Some(agent) = self.agents.get(&id)
                 && let Err(err) = agent.save(&path)
             {
-                eprintln!("mux: could not save {}: {err}", path.display());
+                log::error!("could not save {}: {err}", path.display());
             }
             self.send_watchers(id, ServerMsg::AgentQueue { id, queue, held });
         }
@@ -815,7 +924,7 @@ impl Server {
             }
         }
         if let Err(err) = self.store.save(&self.state) {
-            eprintln!("mux: could not save {}: {err}", self.state.display());
+            log::error!("could not save {}: {err}", self.state.display());
         }
         self.broadcast_state();
     }

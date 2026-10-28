@@ -10,6 +10,11 @@ on:
 permissions:
   contents: write
 
+# stamped into the app so its update check compares against the right release
+env:
+  MUX_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'experimental' }}
+  MUX_COMMIT: ${{ github.sha }}
+
 # a newer push makes an older experimental build pointless
 concurrency:
   group: release-${{ github.ref }}
@@ -108,8 +113,28 @@ jobs:
           name: mux-macos-universal
           path: mux-macos-universal.zip
 
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p mux-gui
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory mux-windows-x86_64 | Out-Null
+          Copy-Item target/release/mux-gui.exe mux-windows-x86_64/Mux.exe
+          Copy-Item LICENSE, README.md mux-windows-x86_64/
+          Compress-Archive -Path mux-windows-x86_64 -DestinationPath mux-windows-x86_64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mux-windows-x86_64
+          path: mux-windows-x86_64.zip
+
   publish:
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}

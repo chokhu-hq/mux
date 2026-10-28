@@ -1,7 +1,6 @@
 use std::fs::OpenOptions;
 use std::io;
-use std::os::unix::net::UnixStream;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -10,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use mux_core::protocol::{self, ClientMsg, PROTOCOL, ServerMsg};
+use mux_core::transport::{self, Stream};
 
 pub struct Connection {
-    stream: UnixStream,
+    stream: Stream,
     inbox: Receiver<ServerMsg>,
     closed: Arc<AtomicBool>,
     unreadable: Arc<AtomicBool>,
@@ -22,13 +22,13 @@ impl Connection {
     // connects to the running server, starting one in the background when there is none
     pub fn open(ctx: &egui::Context) -> io::Result<Self> {
         let path = protocol::socket_path();
-        let stream = match UnixStream::connect(&path) {
+        let stream = match transport::connect(&path) {
             Ok(stream) => stream,
             Err(_) => {
                 start_server()?;
                 let deadline = Instant::now() + Duration::from_secs(3);
                 loop {
-                    match UnixStream::connect(&path) {
+                    match transport::connect(&path) {
                         Ok(stream) => break stream,
                         Err(_) if Instant::now() < deadline => {
                             thread::sleep(Duration::from_millis(25))
@@ -108,12 +108,15 @@ impl Connection {
 fn start_server() -> io::Result<()> {
     let log_dir = protocol::data_dir();
     std::fs::create_dir_all(&log_dir)?;
+    log::info!("starting a server");
+    // the server writes its own log, and this only catches what it prints if it dies before it can
     let log = OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(log_dir.join("server.log"))?;
+        .write(true)
+        .truncate(true)
+        .open(log_dir.join("server-output.log"))?;
 
-    let mut cmd = Command::new(std::env::current_exe()?);
+    let mut cmd = mux_core::command(std::env::current_exe()?);
     cmd.arg("--server")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)

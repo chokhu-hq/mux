@@ -37,11 +37,14 @@ impl Agent {
             (Some("session/request_permission"), Some(id)) => {
                 self.opencode_permission(id, &msg["params"])
             }
-            (Some(method), Some(id)) => self.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("{method} is not supported by mux") },
-            })),
+            (Some(method), Some(id)) => {
+                log::warn!("opencode asked for {method}, which mux doesn't support yet");
+                self.write(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32601, "message": format!("{method} is not supported by mux") },
+                }));
+            }
             (Some("session/update"), None) => self.opencode_update(&msg["params"]["update"]),
             (Some(_), None) => {}
             (None, Some(id)) => self.opencode_response(id, msg),

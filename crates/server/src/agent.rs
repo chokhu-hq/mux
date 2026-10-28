@@ -25,6 +25,8 @@ mod subagent;
 
 // long command output is cut down to its tail, which is the part people read
 const OUTPUT_LIMIT: usize = 32 * 1024;
+// how much of an agent cli's stderr makes it into the log for each launch
+const STDERR_LINES: usize = 200;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
@@ -720,11 +722,11 @@ impl Agent {
         let claude = self.settings.provider == Provider::Claude;
         let opencode = self.settings.provider == Provider::OpenCode;
         let mut command = if opencode {
-            let mut command = Command::new("opencode");
+            let mut command = Command::from(mux_core::command("opencode"));
             command.arg("acp");
             command
         } else if claude {
-            let mut command = Command::new("claude");
+            let mut command = Command::from(mux_core::command("claude"));
             command.args(claude_args(
                 &self.settings,
                 self.session_id.as_deref(),
@@ -732,17 +734,34 @@ impl Agent {
             ));
             command
         } else {
-            let mut command = Command::new("codex");
+            let mut command = Command::from(mux_core::command("codex"));
             command.arg("app-server");
             command
         };
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .current_dir(&cwd);
         let mut child = command.spawn()?;
+        let provider = self.settings.provider.label();
+        log::info!("session {session}: started {provider} in {}", cwd.display());
+        // what the cli says on stderr is often the only clue when it fails, so the start of it is kept in the log
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                let mut kept = 0;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if kept < STDERR_LINES {
+                        log::info!(target: "mux::agent", "session {session}: {provider}: {line}");
+                    } else if kept == STDERR_LINES {
+                        log::info!(target: "mux::agent", "session {session}: {provider}: more output left out");
+                    }
+                    kept += 1;
+                }
+            });
+        }
         let stdout = child
             .stdout
             .take()
@@ -920,6 +939,7 @@ impl Agent {
                 ("Apply file changes?", paths)
             }
             _ => {
+                log::warn!("codex asked for {method}, which mux doesn't support yet");
                 // anything mux can't show yet is refused so codex never waits forever
                 self.write(json!({
                     "id": id,
@@ -1372,6 +1392,10 @@ impl Agent {
         let request = &msg["request"];
         let id = msg["request_id"].clone();
         if request["subtype"] != "can_use_tool" {
+            log::warn!(
+                "claude sent a {} request, which mux doesn't support yet",
+                request["subtype"]
+            );
             // anything mux can't show yet is refused so claude never waits forever
             self.write(json!({
                 "type": "control_response",

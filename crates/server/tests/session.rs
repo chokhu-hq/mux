@@ -1,3 +1,6 @@
+// these talk to the server over its unix socket
+#![cfg(unix)]
+
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 

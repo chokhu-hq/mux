@@ -20,8 +20,8 @@ impl Store {
                 Err(err) => {
                     // keep the unreadable file around instead of overwriting someone's sessions
                     let backup = path.with_extension("json.bad");
-                    eprintln!(
-                        "mux: {} is unreadable ({err}), moved it to {}",
+                    log::error!(
+                        "{} is unreadable ({err}), moved it to {}",
                         path.display(),
                         backup.display()
                     );

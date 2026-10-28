@@ -44,9 +44,12 @@ impl Link {
 
     pub fn tick(&mut self, ctx: &egui::Context, sessions: &mut Sessions) {
         let now = ctx.input(|i| i.time);
-        let down = |error: String| Link::Down {
-            error,
-            retry_at: now + RETRY_SECONDS,
+        let down = |error: String| {
+            failed(&error);
+            Link::Down {
+                error,
+                retry_at: now + RETRY_SECONDS,
+            }
         };
         let placeholder = Link::Down {
             error: String::new(),
@@ -55,6 +58,8 @@ impl Link {
         *self = match std::mem::replace(self, placeholder) {
             Link::Connecting { result, since } => match result.try_recv() {
                 Ok(Ok(connection)) => {
+                    log::info!("connected to the server");
+                    failed("");
                     // a new connection replays every terminal, so drop the stale local copies
                     sessions.reset_terminals();
                     Link::Up(connection)
@@ -83,6 +88,10 @@ impl Link {
                     outdated = Some(None);
                 }
                 if let Some(protocol) = outdated {
+                    log::warn!(
+                        "the server speaks protocol {}, and this app speaks {PROTOCOL}",
+                        protocol.map_or("unknown".to_owned(), |p| p.to_string())
+                    );
                     sessions.outbox.clear();
                     Link::Outdated {
                         connection,
@@ -156,5 +165,19 @@ impl Link {
             }
             other => other,
         };
+    }
+}
+
+// retrying while the server is down fails the same way every few seconds, so only a new reason is logged
+fn failed(error: &str) {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let Ok(mut last) = LAST.lock() else {
+        return;
+    };
+    if *last != error {
+        if !error.is_empty() {
+            log::warn!("server connection: {error}");
+        }
+        *last = error.to_owned();
     }
 }

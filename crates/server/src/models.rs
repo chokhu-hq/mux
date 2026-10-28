@@ -34,7 +34,7 @@ pub async fn fetch(provider: Provider) -> io::Result<Catalog> {
 }
 
 async fn list() -> io::Result<Catalog> {
-    let mut child = Command::new("codex")
+    let mut child = Command::from(mux_core::command("codex"))
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -99,7 +99,7 @@ async fn list() -> io::Result<Catalog> {
 
 // opencode's background service lists every model it can reach, with the efforts each one takes
 async fn list_opencode() -> io::Result<Catalog> {
-    let output = Command::new("opencode")
+    let output = Command::from(mux_core::command("opencode"))
         .args(["api", "GET", "/api/model"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -157,7 +157,7 @@ fn parse_opencode(list: &Value) -> Vec<ModelOption> {
 
 // claude reports its models in the reply to the initialize control request, before any prompt is sent
 async fn list_claude() -> io::Result<Catalog> {
-    let mut child = Command::new("claude")
+    let mut child = Command::from(mux_core::command("claude"))
         .args([
             "-p",
             "--input-format",

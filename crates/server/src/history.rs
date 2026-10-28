@@ -112,9 +112,7 @@ struct Record {
 }
 
 fn roots() -> Vec<(Provider, PathBuf)> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = mux_core::home_dir();
     let codex = std::env::var_os("CODEX_HOME").map_or_else(|| home.join(".codex"), PathBuf::from);
     let claude =
         std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
@@ -246,6 +244,7 @@ fn now() -> i64 {
 }
 
 // the local calendar day a moment falls on, using the offset in force at that moment so summer time is right
+#[cfg(unix)]
 fn local_day(at: i64) -> i64 {
     let time: libc::time_t = at as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -256,6 +255,21 @@ fn local_day(at: i64) -> i64 {
         tm.tm_gmtoff as i64
     };
     (at + offset).div_euclid(86_400)
+}
+
+// windows' tm has no offset field, so the local date it gives is counted from 1970 directly
+#[cfg(windows)]
+fn local_day(at: i64) -> i64 {
+    let time: libc::time_t = at as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_s(&mut tm, &time) } != 0 {
+        return at.div_euclid(86_400);
+    }
+    days_from_civil(
+        tm.tm_year as i64 + 1900,
+        tm.tm_mon as i64 + 1,
+        tm.tm_mday as i64,
+    )
 }
 
 #[cfg(test)]

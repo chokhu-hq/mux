@@ -305,7 +305,7 @@ pub fn open_externally(path: &str) {
     let program = "open";
     #[cfg(target_os = "windows")]
     let program = "explorer";
-    let _ = std::process::Command::new(program).arg(path).spawn();
+    let _ = mux_core::command(program).arg(path).spawn();
 }
 
 #[cfg(test)]

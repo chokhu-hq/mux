@@ -194,15 +194,24 @@ impl CommandPalette {
                             self.selected = 0;
                         }
 
-                        if matches.is_empty() {
-                            ui.add_space(space::SM);
-                            ui.label(egui::RichText::new("Nothing matches").color(p.text_faint));
-                            ui.add_space(space::SM);
-                            return;
-                        }
                         let sep = ui.available_rect_before_wrap();
                         ui.painter()
                             .hline(sep.x_range(), sep.top(), Stroke::new(1.0, p.border));
+                        if matches.is_empty() {
+                            // lines up with the typed text and takes a row's height, so the panel doesn't jump
+                            let (row, _) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), ROW_HEIGHT + space::SM),
+                                Sense::hover(),
+                            );
+                            ui.painter().text(
+                                pos2(row.left() + 10.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                format!("No commands or sessions match “{}”", self.query.trim()),
+                                font::regular(text::MD),
+                                p.text_faint,
+                            );
+                            return;
+                        }
                         ui.add_space(space::XS);
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for (i, row_item) in matches.iter().enumerate() {

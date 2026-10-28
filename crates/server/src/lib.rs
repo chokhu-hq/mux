@@ -506,6 +506,14 @@ impl Server {
                 self.agent_changed(id);
             }
             ClientMsg::AgentCompact { id } => self.agent_compact(id),
+            ClientMsg::AgentAnswer {
+                id,
+                question,
+                answers,
+            } => {
+                self.agent(id).answer(question, answers);
+                self.agent_changed(id);
+            }
         }
     }
 
@@ -595,6 +603,13 @@ impl Server {
                 None => {}
             }
         }
+        // plan mode needs codex's model named, so the default stands in when none was picked
+        let default_model = self
+            .models
+            .get(&Provider::Codex)
+            .and_then(|list| list.iter().find(|m| m.is_default))
+            .map(|m| m.id.clone());
+        self.agent(id).default_model = default_model;
         let folder = self.store.session_path(id).map(PathBuf::from);
         self.generation += 1;
         let (generation, events) = (self.generation, self.events.clone());

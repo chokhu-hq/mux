@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{Event, usage};
 
+mod interaction;
 mod subagent;
 
 // long command output is cut down to its tail, which is the part people read
@@ -106,6 +107,12 @@ pub struct Agent {
     // claude's subagent task ids and codex's subagent threads, each pointing at its card
     tasks: HashMap<String, usize>,
     child_threads: HashMap<String, usize>,
+    // questions the agent is waiting on an answer to, by the id shown in the chat
+    questions: HashMap<u64, interaction::Asked>,
+    // this turn's checklist, updated in place as the agent works through it
+    todos: Option<usize>,
+    // codex's default model, which plan mode needs named when none was picked
+    pub default_model: Option<String>,
     // the compaction item still running, whether asked for or started by the agent itself
     compacting: Option<usize>,
     compact_queued: bool,
@@ -133,6 +140,9 @@ impl Agent {
                     *decision = Some(Decision::Deny)
                 }
                 AgentItem::User { queued, .. } => *queued = false,
+                AgentItem::Question { answers, .. } if answers.is_none() => {
+                    *answers = Some(Vec::new())
+                }
                 _ => {}
             }
         }
@@ -168,6 +178,9 @@ impl Agent {
             sub_steps: HashMap::new(),
             tasks: HashMap::new(),
             child_threads: HashMap::new(),
+            questions: HashMap::new(),
+            todos: None,
+            default_model: None,
             compacting: None,
             compact_queued: false,
         }
@@ -294,7 +307,7 @@ impl Agent {
     }
 
     pub fn status(&self) -> SessionStatus {
-        if !self.approvals.is_empty() {
+        if !self.approvals.is_empty() || !self.questions.is_empty() {
             SessionStatus::Waiting
         } else if self.busy {
             SessionStatus::Running
@@ -325,6 +338,8 @@ impl Agent {
         events: &UnboundedSender<Event>,
     ) {
         let was_busy = self.busy;
+        // a new message starts a new checklist
+        self.todos = None;
         // claude runs a message sent mid turn after the current one, and codex waits for its thread to open
         let claude = self.settings.provider == Provider::Claude;
         let queued = if claude {
@@ -536,6 +551,7 @@ impl Agent {
             });
         }
         self.expire_approvals();
+        self.expire_questions();
         self.turn_id = None;
         self.live_text = None;
         self.launched = None;
@@ -626,7 +642,11 @@ impl Agent {
         self.call(
             Call::Initialize,
             "initialize",
-            json!({ "clientInfo": { "name": "mux", "title": "Mux", "version": mux_core::VERSION } }),
+            // plan mode is still one of codex's experimental fields
+            json!({
+                "clientInfo": { "name": "mux", "title": "Mux", "version": mux_core::VERSION },
+                "capabilities": { "experimentalApi": true },
+            }),
         );
         Ok(())
     }
@@ -700,6 +720,10 @@ impl Agent {
     }
 
     fn request(&mut self, method: &str, id: Value, params: &Value) {
+        if method == "item/tool/requestUserInput" {
+            self.codex_question(id, params);
+            return;
+        }
         let target = params["itemId"]
             .as_str()
             .and_then(|item| self.by_codex_id.get(item))
@@ -772,6 +796,7 @@ impl Agent {
                 }
                 self.turn_id = None;
                 self.expire_approvals();
+                self.expire_questions();
                 self.finish_compaction(ItemStatus::Failed);
                 self.set_busy(false);
             }
@@ -794,6 +819,7 @@ impl Agent {
                     self.set_context(ContextUsage { used, window });
                 }
             }
+            "turn/plan/updated" => self.codex_todos(params),
             "account/rateLimits/updated" => {
                 self.usage = Some(usage::codex(&params["rateLimits"]));
             }
@@ -836,6 +862,9 @@ impl Agent {
                 self.codex_collab(item);
                 return;
             }
+            Some("plan") => AgentItem::Plan {
+                text: item["text"].as_str().unwrap_or_default().to_owned(),
+            },
             // a compaction mux asked for already has its item, and one codex started itself gets one
             Some("contextCompaction") => match self.compacting {
                 Some(index) => {
@@ -887,6 +916,9 @@ impl Agent {
             Some(AgentItem::FileChange { changes, status: s }) => {
                 *changes = file_changes(item);
                 *s = status;
+            }
+            Some(AgentItem::Plan { text }) => {
+                *text = item["text"].as_str().unwrap_or_default().to_owned();
             }
             // the compaction item has no status, so finishing it is what says it worked
             Some(AgentItem::Compaction { status: s }) => {
@@ -1033,6 +1065,7 @@ impl Agent {
                 }
                 self.live_text = None;
                 self.expire_approvals();
+                self.expire_questions();
                 self.finish_compaction(ItemStatus::Failed);
                 self.claude_turn = false;
                 // messages it hasn't echoed yet will start a turn of their own
@@ -1087,6 +1120,11 @@ impl Agent {
         let name = block["name"].as_str().unwrap_or_default();
         if name == "Agent" || name == "Task" {
             self.claude_subagent(id, input);
+            return;
+        }
+        // the checklist is shown as one card that updates, not as a tool call each time
+        if name == "TodoWrite" {
+            self.claude_todos(input);
             return;
         }
         let entry = match name {
@@ -1162,6 +1200,11 @@ impl Agent {
         }
         let tool = request["tool_name"].as_str().unwrap_or_default();
         let input = request["input"].clone();
+        match tool {
+            "AskUserQuestion" => return self.claude_question(id, input),
+            "ExitPlanMode" => return self.claude_plan(id, &input),
+            _ => {}
+        }
         let (title, detail) = match tool {
             "Bash" => (
                 "Run a command?".to_owned(),
@@ -1212,6 +1255,15 @@ impl Agent {
         };
         let mut params = turn_params(&thread, &text, &attachments, &self.settings);
         add_skills(&mut params, &text, &self.skills());
+        // both modes are always named, so turning plan mode off reaches codex too
+        if let Some(model) = self.settings.model.clone().or(self.default_model.clone()) {
+            let mode = if self.settings.plan {
+                "plan"
+            } else {
+                "default"
+            };
+            params["collaborationMode"] = json!({ "mode": mode, "settings": { "model": model } });
+        }
         self.call(Call::StartTurn, "turn/start", params);
     }
 
@@ -1396,7 +1448,9 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>) -> Vec<String> {
         "--permission-prompt-tool",
         "stdio",
         "--permission-mode",
+        // plan mode stands in for the access level until the plan is accepted
         match settings.access {
+            _ if settings.plan => "plan",
             Access::Supervised => "manual",
             Access::AutoEdits => "acceptEdits",
             Access::Auto => "auto",
@@ -1406,7 +1460,7 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>) -> Vec<String> {
     .map(str::to_owned)
     .into();
     // claude refuses to bypass permissions unless it is explicitly allowed to
-    if settings.access == Access::Full {
+    if settings.access == Access::Full && !settings.plan {
         args.push("--allow-dangerously-skip-permissions".to_owned());
     }
     if let Some(model) = &settings.model {
@@ -1544,6 +1598,7 @@ fn trim_front(output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mux_core::protocol::TodoStatus;
 
     fn agent() -> Agent {
         Agent::load(Path::new("/nonexistent/mux-agent.json"))
@@ -1787,6 +1842,95 @@ mod tests {
         );
     }
 
+    // shapes from codex's request_user_input schema and claude's AskUserQuestion tool
+    #[test]
+    fn questions_wait_for_an_answer_from_either_agent() {
+        let mut agent = agent();
+        agent.handle(json!({ "id": 4, "method": "item/tool/requestUserInput", "params": {
+            "itemId": "i", "threadId": "t", "turnId": "u", "isBlocking": true,
+            "questions": [{ "id": "q1", "header": "Approach", "question": "Which way?",
+                "options": [{ "label": "Fast", "description": "Skip tests" }, { "label": "Safe", "description": "Run tests" }] }]
+        } }));
+        assert_eq!(agent.status(), SessionStatus::Waiting);
+        let AgentItem::Question {
+            id,
+            questions,
+            answers: None,
+        } = agent.items[0].clone()
+        else {
+            panic!("expected an open question");
+        };
+        assert_eq!(questions[0].options[1].label, "Safe");
+        agent.answer(id, vec![vec!["Safe".into()]]);
+        assert!(
+            matches!(&agent.items[0], AgentItem::Question { answers: Some(a), .. } if a[0] == ["Safe"])
+        );
+        assert_ne!(agent.status(), SessionStatus::Waiting);
+
+        let mut claude = claude_agent();
+        claude.handle(json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": { "questions": [
+                { "question": "Which files?", "header": "Scope", "multiSelect": true,
+                  "options": [{ "label": "src", "description": "" }, { "label": "tests", "description": "" }] }
+            ] } } }));
+        assert!(
+            matches!(&claude.items[0], AgentItem::Question { questions, .. } if questions[0].multiple)
+        );
+        // a turn that ends without an answer leaves the question marked unanswered
+        claude.handle(json!({ "type": "result", "subtype": "success", "result": "ok" }));
+        assert!(
+            matches!(&claude.items[0], AgentItem::Question { answers: Some(a), .. } if a.is_empty())
+        );
+    }
+
+    #[test]
+    fn plans_are_caught_and_checklists_update_in_place() {
+        let mut claude = claude_agent();
+        claude.handle(json!({ "type": "control_request", "request_id": "r2", "request": {
+            "subtype": "can_use_tool", "tool_name": "ExitPlanMode", "input": { "plan": "1. Read\n2. Fix" } } }));
+        assert_eq!(
+            claude.items,
+            [AgentItem::Plan {
+                text: "1. Read\n2. Fix".into()
+            }]
+        );
+        assert!(
+            claude.approvals.is_empty(),
+            "a plan isn't a permission prompt"
+        );
+
+        let todos = |status: &str| {
+            json!({ "type": "assistant", "message": { "content": [{
+            "type": "tool_use", "id": format!("t-{status}"), "name": "TodoWrite", "input": { "todos": [
+                { "content": "Read", "status": "completed", "activeForm": "Reading" },
+                { "content": "Fix", "status": status, "activeForm": "Fixing" }
+            ] } }] } })
+        };
+        claude.handle(todos("in_progress"));
+        claude.handle(todos("completed"));
+        let lists: Vec<_> = claude
+            .items
+            .iter()
+            .filter(|i| matches!(i, AgentItem::Todos { .. }))
+            .collect();
+        assert_eq!(lists.len(), 1, "one checklist per turn");
+        assert!(
+            matches!(lists[0], AgentItem::Todos { steps } if steps[1].status == TodoStatus::Done)
+        );
+
+        let mut codex = agent();
+        note(
+            &mut codex,
+            "turn/plan/updated",
+            json!({ "threadId": "t", "turnId": "u", "plan": [
+            { "step": "Read", "status": "inProgress" }, { "step": "Fix", "status": "pending" }
+        ] }),
+        );
+        assert!(
+            matches!(&codex.items[0], AgentItem::Todos { steps } if steps[0].status == TodoStatus::Active)
+        );
+    }
+
     #[test]
     fn claude_messages_sent_mid_turn_wait_their_turn() {
         let mut agent = claude_agent();
@@ -1945,7 +2089,7 @@ mod tests {
             }
         ));
 
-        agent.handle(json!({ "id": 7, "method": "item/tool/requestUserInput", "params": {} }));
+        agent.handle(json!({ "id": 7, "method": "mcpServer/elicitation/request", "params": {} }));
         assert_eq!(
             agent.items.len(),
             1,
@@ -2156,6 +2300,7 @@ mod tests {
             fast: true,
             access: Access::AutoEdits,
             worktree: false,
+            plan: false,
         };
         let args = claude_args(&settings, Some("s1")).join(" ");
         assert!(args.contains("--permission-prompt-tool stdio"));

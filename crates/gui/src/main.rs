@@ -12,7 +12,7 @@ use mux_ui::{
 };
 
 use link::Link;
-use mux_core::protocol::{self as wire, AgentSettings};
+use mux_core::protocol::{self as wire, AgentSettings, UsageWindow};
 use mux_core::{Access, Provider};
 use mux_ui::chat::{ChatAction, ChatItem, ChatView, Decision};
 use prefs::Prefs;
@@ -210,7 +210,7 @@ impl App {
     fn sidebar_contents(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(ui);
         let rect = ui.max_rect().shrink(space::SM);
-        let footer_height = 32.0;
+        let footer_height = FOOTER_ROW + space::SM + 1.0;
         let list = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - footer_height));
         let footer = Rect::from_min_max(pos2(rect.min.x, list.max.y), rect.max);
 
@@ -230,19 +230,13 @@ impl App {
             .auto_shrink(false)
             .show(&mut ui_list, |ui| self.sessions.show(ui));
 
-        let mut ui_footer = ui.new_child(
-            UiBuilder::new()
-                .max_rect(footer)
-                .layout(egui::Layout::left_to_right(egui::Align::Max)),
-        );
-        if IconButton::new(icons::GEAR, "Settings")
-            .selected(self.settings_open)
-            .show(&mut ui_footer)
-            .tip_with_shortcut("Settings", SETTINGS)
-            .clicked()
-        {
-            self.settings_open = !self.settings_open;
-        }
+        let mut ui_footer = ui.new_child(UiBuilder::new().max_rect(footer));
+        ui_footer.spacing_mut().item_spacing.y = 0.0;
+        let line = ui_footer.available_rect_before_wrap();
+        ui_footer
+            .painter()
+            .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
+        ui_footer.add_space(space::SM + 1.0);
         // only shown when something is wrong, a working connection needs no badge
         let status = match &self.link {
             Link::Up(_) => None,
@@ -250,22 +244,17 @@ impl App {
             Link::Down { .. } => Some((p.danger, "Offline")),
             Link::Outdated { .. } => Some((p.warning, "Server outdated")),
         };
-        if let Some((color, label)) = status {
-            ui_footer.add_space(space::XS);
-            // centred on the gear button rather than the footer's bottom edge
-            ui_footer.allocate_ui_with_layout(
-                vec2(160.0, 24.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(dot.center(), 3.5, color);
-                    ui.label(
-                        egui::RichText::new(label)
-                            .font(font::regular(text::SM))
-                            .color(p.text_muted),
-                    );
-                },
-            );
+        // the agent closest to its limit stands in for both, with the details a hover away
+        let usage = Provider::ALL
+            .into_iter()
+            .map(|provider| (provider, self.sessions.usage(provider)))
+            .filter(|(_, windows)| !windows.is_empty())
+            .max_by(|a, b| {
+                let most = |w: &[UsageWindow]| w.iter().map(|w| w.used).fold(0.0, f32::max);
+                most(a.1).total_cmp(&most(b.1))
+            });
+        if settings_row(&mut ui_footer, self.settings_open, status, usage).clicked() {
+            self.settings_open = !self.settings_open;
         }
     }
 
@@ -408,6 +397,13 @@ impl App {
                     "compact" => Some(ChatAction::Compact),
                     "review" => first_diff.map(ChatAction::OpenDiff),
                     "stop" => Some(ChatAction::Stop),
+                    "plan" => {
+                        let mut settings = local.settings.clone();
+                        settings.plan = !settings.plan;
+                        local.settings = settings.clone();
+                        outbox.push(ClientMsg::AgentConfigure { id, settings });
+                        None
+                    }
                     "new" => {
                         *run = Some("new-agent");
                         None
@@ -467,6 +463,27 @@ impl App {
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
                 // already turned into one of the actions above
                 Some(ChatAction::Command(_)) => {}
+                Some(ChatAction::Answer(index, answers)) => {
+                    if let Some(Some(question)) = local.approvals.get(index) {
+                        outbox.push(ClientMsg::AgentAnswer {
+                            id,
+                            question: *question,
+                            answers,
+                        });
+                    }
+                }
+                // carrying out a plan leaves plan mode first, so the agent is free to make the changes
+                Some(ChatAction::ImplementPlan) => {
+                    let mut settings = local.settings.clone();
+                    settings.plan = false;
+                    local.settings = settings.clone();
+                    outbox.push(ClientMsg::AgentConfigure { id, settings });
+                    outbox.push(ClientMsg::AgentSend {
+                        id,
+                        text: "Go ahead and carry out the plan.".to_owned(),
+                        attachments: Vec::new(),
+                    });
+                }
                 Some(ChatAction::Compact) => outbox.push(ClientMsg::AgentCompact { id }),
                 Some(ChatAction::Decide(index, decision)) => {
                     if let Some(Some(approval)) = local.approvals.get(index) {
@@ -1339,6 +1356,21 @@ fn agent_controls(
         });
     }
 
+    // plan mode has the agent plan first and wait, rather than change things straight away
+    let plan = IconButton::new(icons::LIST_CHECKS, "Plan mode")
+        .selected(settings.plan)
+        .show(ui)
+        .tip(if settings.plan {
+            "Plan mode is on: the agent plans and waits for you before changing anything"
+        } else {
+            "Plan mode: have the agent plan first and wait for you"
+        });
+    if plan.clicked() {
+        let mut changed = settings.clone();
+        changed.plan = !changed.plan;
+        next = Some(changed);
+    }
+
     if let Some(detail) = &current.fast {
         let fast = IconButton::new(icons::LIGHTNING, "Fast mode")
             .selected(settings.fast)
@@ -1367,6 +1399,7 @@ fn slash_commands(
     };
     let mut commands = vec![
         builtin("compact", "Summarise older messages to free up context"),
+        builtin("plan", "Turn plan mode on or off"),
         builtin("new", "Start a new agent in this project"),
     ];
     if changed {
@@ -1389,6 +1422,72 @@ fn slash_commands(
         builtin: false,
     }));
     commands
+}
+
+const FOOTER_ROW: f32 = 32.0;
+
+// the sidebar's last row: settings, with plan usage at its end, or the connection when it isn't up
+fn settings_row(
+    ui: &mut egui::Ui,
+    open: bool,
+    status: Option<(egui::Color32, &str)>,
+    usage: Option<(Provider, &[UsageWindow])>,
+) -> egui::Response {
+    let p = theme::palette(ui);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_ROW), egui::Sense::click());
+    let hover = motion::spring_bool(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        Spring::QUICK,
+    );
+    let shown = if open { 1.0 } else { 0.0 };
+    let fill = egui::Color32::TRANSPARENT
+        .lerp_to_gamma(theme::tint(p, 0.05), hover)
+        .lerp_to_gamma(theme::tint(p, 0.10), shown);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(theme::radius::LG), fill);
+    let y = rect.center().y;
+    let x = rect.left() + space::MD;
+    let color = p.text_muted.lerp_to_gamma(p.text, hover.max(shown));
+    ui.painter().text(
+        pos2(x + icon::MD / 2.0, y),
+        egui::Align2::CENTER_CENTER,
+        icons::GEAR,
+        font::icon(icon::MD),
+        color,
+    );
+    ui.painter().text(
+        pos2(x + icon::MD + space::SM, y),
+        egui::Align2::LEFT_CENTER,
+        "Settings",
+        font::medium(text::MD),
+        color,
+    );
+    let right = rect.right() - space::SM;
+    if let Some((dot, label)) = status {
+        let label = ui.painter().text(
+            pos2(right - space::XS, y),
+            egui::Align2::RIGHT_CENTER,
+            label,
+            font::regular(text::SM + 1.0),
+            p.text_muted,
+        );
+        ui.painter()
+            .circle_filled(pos2(label.left() - space::SM, y), 3.5, dot);
+    } else if let Some((provider, windows)) = usage {
+        let slot = Rect::from_min_max(pos2(right - 64.0, rect.top()), pos2(right, rect.bottom()));
+        let mut ring = ui.new_child(
+            UiBuilder::new()
+                .max_rect(slot)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        UsageRing::new(windows).provider(provider).show(&mut ring);
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .tip_with_shortcut("Settings", SETTINGS)
 }
 
 // the chat's added and removed lines as a quiet button that opens them for review

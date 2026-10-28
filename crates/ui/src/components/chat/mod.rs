@@ -1,3 +1,4 @@
+mod asks;
 mod attachments;
 mod cards;
 mod composer;
@@ -34,6 +35,16 @@ pub enum ChatItem {
     Subagent(Subagent),
     // how many files a finished turn changed, opening the first of them for review
     Changes(Changes),
+    Question {
+        questions: Vec<mux_core::protocol::Question>,
+        answers: Option<Vec<Vec<String>>>,
+    },
+    // a proposed plan, and whether it's the one still waiting to be carried out
+    Plan {
+        text: String,
+        actionable: bool,
+    },
+    Todos(Vec<mux_core::protocol::TodoStep>),
     Thinking,
 }
 
@@ -124,6 +135,9 @@ pub enum ChatAction {
     OpenDiff(usize),
     // one of mux's own slash commands, by name
     Command(String),
+    // the question at this index was answered, one list of picks per question
+    Answer(usize, Vec<Vec<String>>),
+    ImplementPlan,
     Decide(usize, Decision),
 }
 
@@ -289,6 +303,25 @@ impl<'a> ChatView<'a> {
                                     }
                                 }
                                 ChatItem::Compaction(status) => cards::compaction(ui, *status),
+                                ChatItem::Question { questions, answers } => {
+                                    if let Some(sent) =
+                                        asks::question(ui, questions, answers.as_deref())
+                                    {
+                                        action = Some(ChatAction::Answer(index, sent));
+                                    }
+                                }
+                                ChatItem::Plan { text, actionable } => {
+                                    match asks::plan(ui, text, *actionable) {
+                                        Some(asks::PlanAction::Implement) => {
+                                            action = Some(ChatAction::ImplementPlan)
+                                        }
+                                        Some(asks::PlanAction::Link(target)) => {
+                                            action = Some(ChatAction::OpenLink(target))
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                ChatItem::Todos(steps) => asks::todos(ui, steps),
                                 ChatItem::Changes(changes) => {
                                     if cards::changes(ui, changes) {
                                         action = Some(ChatAction::OpenDiff(changes.first));

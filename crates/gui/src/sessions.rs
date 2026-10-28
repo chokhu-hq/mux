@@ -1002,7 +1002,7 @@ fn chat_items(
 ) -> (Vec<ChatItem>, Vec<Option<u64>>) {
     let mut items = Vec::new();
     let mut approvals = Vec::new();
-    for entry in transcript {
+    for (position, entry) in transcript.iter().enumerate() {
         let mut approval = None;
         match entry {
             AgentItem::User {
@@ -1106,6 +1106,28 @@ fn chat_items(
             AgentItem::Compaction { status } => {
                 items.push(ChatItem::Compaction(tool_status(*status)))
             }
+            AgentItem::Question {
+                id,
+                questions,
+                answers,
+            } => {
+                approval = Some(*id);
+                items.push(ChatItem::Question {
+                    questions: questions.clone(),
+                    answers: answers.clone(),
+                });
+            }
+            AgentItem::Plan { text } => {
+                // only the latest plan, not yet replied to, can still be carried out
+                let replied = transcript[position + 1..]
+                    .iter()
+                    .any(|i| matches!(i, AgentItem::User { .. } | AgentItem::Plan { .. }));
+                items.push(ChatItem::Plan {
+                    text: text.clone(),
+                    actionable: !replied && !busy,
+                });
+            }
+            AgentItem::Todos { steps } => items.push(ChatItem::Todos(steps.clone())),
             AgentItem::Error { message } => {
                 items.push(ChatItem::Assistant(format!("**Error:** {message}")))
             }

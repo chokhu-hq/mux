@@ -395,7 +395,9 @@ impl eframe::App for Gallery {
                                                         | ChatAction::OpenLink(_)
                                                         | ChatAction::Compact
                                                         | ChatAction::OpenDiff(_)
-                                                        | ChatAction::Command(_),
+                                                        | ChatAction::Command(_)
+                                                        | ChatAction::Answer(..)
+                                                        | ChatAction::ImplementPlan,
                                                     ) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;

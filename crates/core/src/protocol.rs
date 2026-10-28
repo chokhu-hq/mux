@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 19;
+pub const PROTOCOL: u32 = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -131,6 +131,51 @@ pub enum AgentItem {
         result: String,
         tokens: u64,
     },
+    // the agent stopped to ask something, answered with one list of picks per question
+    Question {
+        id: u64,
+        questions: Vec<Question>,
+        answers: Option<Vec<Vec<String>>>,
+    },
+    // a plan proposed in plan mode, waiting to be carried out
+    Plan {
+        text: String,
+    },
+    // the agent's running checklist for the turn
+    Todos {
+        steps: Vec<TodoStep>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub id: String,
+    // a short label for what's being asked, like `Approach`
+    pub header: String,
+    pub question: String,
+    pub options: Vec<QuestionOption>,
+    pub multiple: bool,
+    // whether a typed answer is allowed besides the options
+    pub other: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TodoStatus {
+    Pending,
+    Active,
+    Done,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TodoStep {
+    pub text: String,
+    pub status: TodoStatus,
 }
 
 // one tool call a subagent made
@@ -168,6 +213,9 @@ pub struct AgentSettings {
     // start in a new git worktree on its own branch rather than the project folder itself
     #[serde(default)]
     pub worktree: bool,
+    // plan before changing anything, and wait for the plan to be accepted
+    #[serde(default)]
+    pub plan: bool,
 }
 
 // how much of the model's context window the conversation fills, where a window of 0 means not known yet
@@ -338,6 +386,12 @@ pub enum ClientMsg {
     MoveGroup {
         id: u64,
         index: usize,
+    },
+    // answers an agent's question, one list of picks or typed text per question asked
+    AgentAnswer {
+        id: u64,
+        question: u64,
+        answers: Vec<Vec<String>>,
     },
 }
 

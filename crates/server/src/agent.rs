@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use mux_core::SessionStatus;
-use mux_core::protocol::{AgentItem, Decision, FileChange, ItemStatus};
+use mux_core::protocol::{AgentItem, AgentSettings, Decision, FileChange, ItemStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -21,6 +21,8 @@ const OUTPUT_LIMIT: usize = 32 * 1024;
 struct Saved {
     thread_id: Option<String>,
     items: Vec<AgentItem>,
+    #[serde(default)]
+    settings: AgentSettings,
 }
 
 enum Call {
@@ -42,6 +44,7 @@ pub struct Agent {
     pub generation: u64,
     pub items: Vec<AgentItem>,
     pub busy: bool,
+    pub settings: AgentSettings,
     thread_id: Option<String>,
     thread_live: bool,
     turn_id: Option<String>,
@@ -82,6 +85,7 @@ impl Agent {
             generation: 0,
             items,
             busy: false,
+            settings: saved.settings,
             thread_id: saved.thread_id,
             thread_live: false,
             turn_id: None,
@@ -105,6 +109,7 @@ impl Agent {
         let saved = Saved {
             thread_id: self.thread_id.clone(),
             items: self.items.clone(),
+            settings: self.settings.clone(),
         };
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
@@ -486,11 +491,8 @@ impl Agent {
         let Some(thread) = self.thread_id.clone() else {
             return;
         };
-        self.call(
-            Call::StartTurn,
-            "turn/start",
-            json!({ "threadId": thread, "input": [{ "type": "text", "text": text }] }),
-        );
+        let params = turn_params(&thread, &text, &self.settings);
+        self.call(Call::StartTurn, "turn/start", params);
     }
 
     fn fail(&mut self, message: String) {
@@ -540,6 +542,20 @@ impl Agent {
         self.changed.insert(index);
         self.items.get_mut(index)
     }
+}
+
+// sent on every turn, so a change in the picker applies to the very next message
+fn turn_params(thread: &str, text: &str, settings: &AgentSettings) -> Value {
+    let mut params = json!({ "threadId": thread, "input": [{ "type": "text", "text": text }] });
+    if let Some(model) = &settings.model {
+        params["model"] = json!(model);
+    }
+    if let Some(effort) = &settings.effort {
+        params["effort"] = json!(effort);
+    }
+    // "priority" is codex's fast tier, and "default" turns it back off explicitly
+    params["serviceTierForTurn"] = json!(if settings.fast { "priority" } else { "default" });
+    params
 }
 
 fn item_status(item: &Value) -> ItemStatus {
@@ -715,6 +731,24 @@ mod tests {
             1,
             "unsupported requests must not show up as approvals"
         );
+    }
+
+    #[test]
+    fn turns_carry_the_chosen_model_effort_and_speed() {
+        let defaults = turn_params("t", "hi", &AgentSettings::default());
+        assert!(defaults.get("model").is_none() && defaults.get("effort").is_none());
+        assert_eq!(defaults["serviceTierForTurn"], "default");
+
+        let chosen = AgentSettings {
+            model: Some("gpt-5.6-luna".into()),
+            effort: Some("high".into()),
+            fast: true,
+        };
+        let params = turn_params("t", "hi", &chosen);
+        assert_eq!(params["model"], "gpt-5.6-luna");
+        assert_eq!(params["effort"], "high");
+        assert_eq!(params["serviceTierForTurn"], "priority");
+        assert_eq!(params["input"][0]["text"], "hi");
     }
 
     #[test]

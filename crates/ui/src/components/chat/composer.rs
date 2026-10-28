@@ -13,10 +13,13 @@ pub enum ComposerAction {
     Stop,
 }
 
+pub type Controls<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
+
 pub struct Composer<'a> {
     draft: &'a mut String,
     running: bool,
     hint: &'a str,
+    controls: Option<Controls<'a>>,
 }
 
 impl<'a> Composer<'a> {
@@ -25,7 +28,14 @@ impl<'a> Composer<'a> {
             draft,
             running: false,
             hint: "Ask the agent…",
+            controls: None,
         }
+    }
+
+    // extra controls beside the attach button, like model and speed pickers
+    pub fn controls(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
+        self.controls = Some(Box::new(add));
+        self
     }
 
     pub fn running(mut self, running: bool) -> Self {
@@ -38,7 +48,7 @@ impl<'a> Composer<'a> {
         self
     }
 
-    pub fn show(self, ui: &mut Ui) -> Option<ComposerAction> {
+    pub fn show(mut self, ui: &mut Ui) -> Option<ComposerAction> {
         let p = theme::palette(ui);
         let edit_id = ui.scope_id().with("mux-composer");
         let focused = ui.memory(|m| m.has_focus(edit_id));
@@ -91,6 +101,9 @@ impl<'a> Composer<'a> {
                     IconButton::new(icons::PAPERCLIP, "Attach")
                         .show(ui)
                         .tip("Attach files");
+                    if let Some(controls) = self.controls.take() {
+                        controls(ui);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.running {
                             if round_button(ui, icons::STOP, true, true)

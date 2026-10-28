@@ -384,26 +384,26 @@ pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> 
 
 const SHIMMER_SECONDS: f32 = 1.6;
 
-// a soft light sweeps across the label while a dot breathes beside it, the way ai apps show work in progress
+// three dots ripple while a soft light sweeps across the label
 pub fn thinking(ui: &mut Ui) {
     let p = theme::palette(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let time = ui.input(|i| i.time) as f32;
     let still = motion::reduced(ui.ctx());
 
-    let breath = if still {
-        1.0
-    } else {
-        0.5 + 0.5 * (time * TAU / SHIMMER_SECONDS).sin()
-    };
-    let dot = pos2(rect.left() + 5.0, rect.center().y);
-    ui.painter().circle_filled(
-        dot,
-        4.0 + 3.5 * breath,
-        p.accent.gamma_multiply(0.28 * breath),
-    );
-    ui.painter()
-        .circle_filled(dot, 3.5, p.accent.gamma_multiply(0.6 + 0.4 * breath));
+    for i in 0..3 {
+        // each dot brightens slightly after the one before it, so the light ripples across
+        let wave = if still {
+            1.0
+        } else {
+            0.5 + 0.5 * (time * 4.0 - i as f32 * 0.7).sin()
+        };
+        ui.painter().circle_filled(
+            pos2(rect.left() + 4.0 + i as f32 * 9.0, rect.center().y),
+            2.5,
+            p.text_muted.gamma_multiply(0.35 + 0.65 * wave),
+        );
+    }
 
     let label = "Thinking";
     let count = label.chars().count() as f32;
@@ -429,7 +429,7 @@ pub fn thinking(ui: &mut Ui) {
         );
     }
     let galley = ui.painter().layout_job(job);
-    let pos = pos2(rect.left() + 18.0, rect.center().y - galley.size().y / 2.0);
+    let pos = pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(pos, galley, p.text_faint);
 
     if !still {

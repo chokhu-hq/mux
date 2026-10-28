@@ -26,10 +26,10 @@ impl Store {
                         backup.display()
                     );
                     let _ = fs::rename(path, backup);
-                    Store::seed()
+                    Store::default()
                 }
             },
-            Err(_) => Store::seed(),
+            Err(_) => Store::default(),
         };
         // processes never outlive the server, so anything that was live starts fresh
         for session in store.sessions_mut() {
@@ -54,16 +54,6 @@ impl Store {
             serde_json::to_vec_pretty(self).map_err(io::Error::other)?,
         )?;
         fs::rename(tmp, path)
-    }
-
-    fn seed() -> Self {
-        let mut store = Store::default();
-        let mux = store.create_group("mux", None);
-        store.create_session(Some(mux), "Refactor auth middleware", SessionKind::Agent);
-        store.create_session(Some(mux), "cargo test", SessionKind::Task);
-        let web = store.create_group("web", None);
-        store.create_session(Some(web), "Shell", SessionKind::Shell);
-        store
     }
 
     fn next_id(&mut self) -> u64 {

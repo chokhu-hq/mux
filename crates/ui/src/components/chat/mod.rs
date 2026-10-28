@@ -5,7 +5,7 @@ mod markdown;
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
 
 pub use cards::thinking;
-pub use composer::{Composer, ComposerAction};
+pub use composer::{Composer, ComposerAction, Controls};
 pub use markdown::markdown;
 
 use crate::components::EmptyState;
@@ -85,6 +85,7 @@ pub struct ChatView<'a> {
     items: &'a [ChatItem],
     draft: &'a mut String,
     running: bool,
+    controls: Option<Controls<'a>>,
 }
 
 impl<'a> ChatView<'a> {
@@ -93,7 +94,13 @@ impl<'a> ChatView<'a> {
             items,
             draft,
             running: false,
+            controls: None,
         }
+    }
+
+    pub fn controls(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
+        self.controls = Some(Box::new(add));
+        self
     }
 
     pub fn running(mut self, running: bool) -> Self {
@@ -115,10 +122,11 @@ impl<'a> ChatView<'a> {
             pos2(left + width, rect.bottom() - space::MD),
         );
         let mut bottom = ui.new_child(UiBuilder::new().max_rect(composer));
-        if let Some(composer) = Composer::new(self.draft)
-            .running(self.running)
-            .show(&mut bottom)
-        {
+        let mut input = Composer::new(self.draft).running(self.running);
+        if let Some(controls) = self.controls {
+            input = input.controls(controls);
+        }
+        if let Some(composer) = input.show(&mut bottom) {
             action = Some(match composer {
                 ComposerAction::Send(text) => ChatAction::Send(text),
                 ComposerAction::Stop => ChatAction::Stop,

@@ -8,7 +8,7 @@ use crate::{SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -72,6 +72,26 @@ pub enum ItemStatus {
     Done,
     Failed,
     Declined,
+}
+
+// unset fields mean the agent's own default, so a user's codex config still applies
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub efforts: Vec<String>,
+    pub default_effort: String,
+    pub is_default: bool,
+    // the description of the model's fast tier, when it has one
+    pub fast: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +173,10 @@ pub enum ClientMsg {
     AgentStop {
         id: u64,
     },
+    AgentConfigure {
+        id: u64,
+        settings: AgentSettings,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,6 +204,7 @@ pub enum ServerMsg {
         id: u64,
         items: Vec<AgentItem>,
         busy: bool,
+        settings: AgentSettings,
     },
     // sets the item at `index`, appending when it is one past the end
     AgentItem {
@@ -190,6 +215,13 @@ pub enum ServerMsg {
     AgentBusy {
         id: u64,
         busy: bool,
+    },
+    AgentSettings {
+        id: u64,
+        settings: AgentSettings,
+    },
+    AgentModels {
+        models: Vec<ModelOption>,
     },
 }
 

@@ -1,4 +1,5 @@
 mod agent;
+mod models;
 mod process;
 mod store;
 
@@ -7,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use mux_core::SessionStatus;
-use mux_core::protocol::{self, ClientMsg, PROTOCOL, ServerMsg};
+use mux_core::protocol::{self, ClientMsg, ModelOption, PROTOCOL, ServerMsg};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -39,6 +40,7 @@ pub enum Event {
         session: u64,
         generation: u64,
     },
+    Models(Result<Vec<ModelOption>, String>),
 }
 
 // blocks until ctrl+c or a client asks the server to shut down
@@ -64,7 +66,6 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     let (events, inbox) = mpsc::unbounded_channel();
     let (stop, mut stopped) = mpsc::unbounded_channel::<()>();
     let store = Store::load(&state);
-    // write right away so a fresh install has its seeded sessions on disk
     store.save(&state)?;
     let server = Server {
         store,
@@ -72,6 +73,8 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         clients: HashMap::new(),
         processes: HashMap::new(),
         agents: HashMap::new(),
+        models: None,
+        fetching_models: false,
         attached: HashMap::new(),
         generation: 0,
         events: events.clone(),
@@ -167,6 +170,9 @@ struct Server {
     clients: HashMap<u64, UnboundedSender<ServerMsg>>,
     processes: HashMap<u64, Process>,
     agents: HashMap<u64, Agent>,
+    // what codex can run, fetched once the first agent is opened
+    models: Option<Vec<ModelOption>>,
+    fetching_models: bool,
     // which clients are watching each session's terminal
     attached: HashMap<u64, HashSet<u64>>,
     // bumped per spawn so output from a killed process can't leak into its replacement
@@ -187,6 +193,11 @@ impl Server {
             Event::Connected(client, tx) => {
                 let _ = tx.send(ServerMsg::Welcome { protocol: PROTOCOL });
                 let _ = tx.send(self.state_msg());
+                if let Some(models) = &self.models {
+                    let _ = tx.send(ServerMsg::AgentModels {
+                        models: models.clone(),
+                    });
+                }
                 self.clients.insert(client, tx);
             }
             Event::Disconnected(client) => {
@@ -245,6 +256,20 @@ impl Server {
                 {
                     agent.handle(msg);
                     self.agent_changed(session);
+                }
+            }
+            Event::Models(result) => {
+                self.fetching_models = false;
+                match result {
+                    Ok(models) => {
+                        for tx in self.clients.values() {
+                            let _ = tx.send(ServerMsg::AgentModels {
+                                models: models.clone(),
+                            });
+                        }
+                        self.models = Some(models);
+                    }
+                    Err(err) => eprintln!("mux: could not list codex models: {err}"),
                 }
             }
             Event::CodexExited {
@@ -346,8 +371,26 @@ impl Server {
                     id,
                     items: agent.items.clone(),
                     busy: agent.busy,
+                    settings: agent.settings.clone(),
                 };
                 self.send(client, msg);
+                if self.models.is_none() && !self.fetching_models {
+                    self.fetching_models = true;
+                    let events = self.events.clone();
+                    tokio::spawn(async move {
+                        let result = models::fetch().await.map_err(|e| e.to_string());
+                        let _ = events.send(Event::Models(result));
+                    });
+                }
+            }
+            ClientMsg::AgentConfigure { id, settings } => {
+                let path = self.agent_path(id);
+                let agent = self.agent(id);
+                agent.settings = settings.clone();
+                if let Err(err) = agent.save(&path) {
+                    eprintln!("mux: could not save {}: {err}", path.display());
+                }
+                self.send_watchers(id, ServerMsg::AgentSettings { id, settings });
             }
             ClientMsg::AgentSend { id, text } => self.agent_send(id, text),
             ClientMsg::AgentDecide {

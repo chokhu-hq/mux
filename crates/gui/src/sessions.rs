@@ -6,7 +6,8 @@ use eframe::egui::{
 };
 use mux_core::SessionKind;
 use mux_core::protocol::{
-    self as wire, AgentItem, ClientMsg, GroupInfo, ItemStatus, ServerMsg, SessionInfo,
+    self as wire, AgentItem, AgentSettings, ClientMsg, GroupInfo, ItemStatus, ModelOption,
+    ServerMsg, SessionInfo,
 };
 use mux_ui::chat::{
     self, ChatItem, Decision, DiffKind, DiffLine, FileDiff, PermissionRequest, ToolCall, ToolKind,
@@ -30,6 +31,7 @@ pub struct Local {
     // agent sessions: the server's transcript, and the chat items built from it
     pub opened: bool,
     pub busy: bool,
+    pub settings: AgentSettings,
     transcript: Vec<AgentItem>,
     pub chat: Vec<ChatItem>,
     // which approval each chat item answers, so a click can be sent back to the right one
@@ -76,6 +78,8 @@ pub struct Sessions {
     loaded: bool,
     // the group whose name is being edited inline, with the draft name
     renaming: Option<(u64, String)>,
+    // the models codex offers, sent by the server once it has asked
+    models: Vec<ModelOption>,
     pub outbox: Vec<ClientMsg>,
 }
 
@@ -111,10 +115,16 @@ impl Sessions {
                     terminal.feed(&data);
                 }
             }
-            ServerMsg::AgentTranscript { id, items, busy } => {
+            ServerMsg::AgentTranscript {
+                id,
+                items,
+                busy,
+                settings,
+            } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.transcript = items;
                     local.busy = busy;
+                    local.settings = settings;
                     local.rebuild();
                 }
             }
@@ -127,6 +137,12 @@ impl Sessions {
                     local.rebuild();
                 }
             }
+            ServerMsg::AgentSettings { id, settings } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.settings = settings;
+                }
+            }
+            ServerMsg::AgentModels { models } => self.models = models,
             ServerMsg::AgentBusy { id, busy } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.busy = busy;
@@ -149,7 +165,18 @@ impl Sessions {
         self.loaded
     }
 
-    pub fn selected(&mut self) -> Option<(&SessionInfo, &mut Local, &mut Vec<ClientMsg>)> {
+    pub fn has_groups(&self) -> bool {
+        !self.groups.is_empty()
+    }
+
+    pub fn selected(
+        &mut self,
+    ) -> Option<(
+        &SessionInfo,
+        &mut Local,
+        &mut Vec<ClientMsg>,
+        &[ModelOption],
+    )> {
         let id = self.selected?;
         let info = self
             .groups
@@ -157,7 +184,7 @@ impl Sessions {
             .flat_map(|g| &g.sessions)
             .find(|s| s.id == id)?;
         let local = self.locals.entry(id).or_default();
-        Some((info, local, &mut self.outbox))
+        Some((info, local, &mut self.outbox, &self.models))
     }
 
     // the id and folder of the group holding the selected session

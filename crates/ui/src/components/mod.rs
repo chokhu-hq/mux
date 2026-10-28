@@ -1,6 +1,7 @@
 mod badge;
 mod button;
 pub mod chat;
+mod chip;
 mod command_palette;
 mod empty_state;
 mod group_header;
@@ -18,6 +19,7 @@ mod tooltip;
 
 pub use badge::{Badge, Tone};
 pub use button::{Button, Size, Variant};
+pub use chip::Chip;
 pub use command_palette::{Command, CommandPalette, SHORTCUT as PALETTE_SHORTCUT};
 pub use empty_state::EmptyState;
 pub use group_header::GroupHeader;

@@ -5,12 +5,12 @@ use mux_ui::shortcut;
 use mux_ui::theme::{self, font, space, text};
 use mux_ui::window::{self, TITLEBAR_HEIGHT, WindowFrame};
 use mux_ui::{
-    Badge, Command, CommandPalette, EmptyState, IconButton, SIDEBAR_SHORTCUT, Sidebar, TooltipExt,
-    icons,
+    Badge, Chip, Command, CommandPalette, EmptyState, IconButton, MenuItem, SIDEBAR_SHORTCUT,
+    Sidebar, TooltipExt, icons,
 };
 
 use link::Link;
-use mux_core::protocol as wire;
+use mux_core::protocol::{self as wire, AgentSettings, ModelOption};
 use mux_ui::chat::{ChatAction, ChatView, Decision};
 use sessions::Sessions;
 
@@ -179,7 +179,17 @@ impl App {
         if !self.sessions.is_loaded() {
             return;
         }
-        let Some((session, local, outbox)) = self.sessions.selected() else {
+        if !self.sessions.has_groups() {
+            if EmptyState::new(icons::FOLDER_OPEN, "Add your first project")
+                .detail("A project is a folder on your computer. Agents, shells and tasks you start in it work inside that folder.")
+                .action("Add project folder…")
+                .show(ui)
+            {
+                *run = Some("new-group");
+            }
+            return;
+        }
+        let Some((session, local, outbox, models)) = self.sessions.selected() else {
             if EmptyState::new(icons::TERMINAL_WINDOW, "No session selected")
                 .detail("Pick a session from the sidebar, or start a new one.")
                 .action("New agent session")
@@ -249,9 +259,16 @@ impl App {
             }
             let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), rect.max);
             let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
+            let settings = local.settings.clone();
+            let mut configure = None;
             let action = ChatView::new(&local.chat, &mut local.draft)
                 .running(local.busy)
+                .controls(|ui| configure = agent_controls(ui, models, &settings))
                 .show(&mut body_ui);
+            if let Some(settings) = configure {
+                local.settings = settings.clone();
+                outbox.push(ClientMsg::AgentConfigure { id, settings });
+            }
             match action {
                 Some(ChatAction::Send(text)) => outbox.push(ClientMsg::AgentSend { id, text }),
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
@@ -336,6 +353,99 @@ impl App {
                 Link::Outdated { .. } => self.link.restart_server(),
                 _ => self.link.reconnect_now(ui.ctx()),
             }
+        }
+    }
+}
+
+// the model, effort and speed pickers in the composer, returning new settings when one changes
+fn agent_controls(
+    ui: &mut egui::Ui,
+    models: &[ModelOption],
+    settings: &AgentSettings,
+) -> Option<AgentSettings> {
+    let current = settings
+        .model
+        .as_deref()
+        .and_then(|id| models.iter().find(|m| m.id == id))
+        .or_else(|| models.iter().find(|m| m.is_default))
+        .or(models.first())?;
+    let mut next = None;
+    let menu = |response: &egui::Response| {
+        egui::Popup::menu(response)
+            .align(egui::RectAlign::TOP_START)
+            .gap(space::XS)
+    };
+
+    let chip = Chip::new(&current.name).show(ui).tip("Model");
+    menu(&chip).show(|ui| {
+        for model in models {
+            let item = MenuItem::new(&model.name)
+                .checked(model.id == current.id)
+                .show(ui)
+                .tip(&model.description);
+            if item.clicked() {
+                let mut changed = settings.clone();
+                changed.model = Some(model.id.clone());
+                // keep choices the new model supports, and fall back to its defaults otherwise
+                if changed
+                    .effort
+                    .as_ref()
+                    .is_some_and(|e| !model.efforts.contains(e))
+                {
+                    changed.effort = None;
+                }
+                changed.fast &= model.fast.is_some();
+                next = Some(changed);
+                ui.close();
+            }
+        }
+    });
+
+    let effort = settings
+        .effort
+        .clone()
+        .unwrap_or_else(|| current.default_effort.clone());
+    let chip = Chip::new(&effort_label(&effort))
+        .show(ui)
+        .tip("Reasoning effort");
+    menu(&chip).show(|ui| {
+        for option in &current.efforts {
+            if MenuItem::new(&effort_label(option))
+                .checked(*option == effort)
+                .show(ui)
+                .clicked()
+            {
+                let mut changed = settings.clone();
+                changed.effort = Some(option.clone());
+                next = Some(changed);
+                ui.close();
+            }
+        }
+    });
+
+    if let Some(detail) = &current.fast {
+        let fast = IconButton::new(icons::LIGHTNING, "Fast mode")
+            .selected(settings.fast)
+            .show(ui)
+            .tip(format!("Fast mode: {detail}"));
+        if fast.clicked() {
+            let mut changed = settings.clone();
+            changed.fast = !changed.fast;
+            next = Some(changed);
+        }
+    }
+    next
+}
+
+fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra high".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
         }
     }
 }

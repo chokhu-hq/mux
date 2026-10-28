@@ -1,6 +1,7 @@
 use egui::{Align2, CornerRadius, Response, Sense, Ui, Vec2, WidgetInfo, pos2};
 
 use super::hover_t;
+use crate::icons;
 use crate::theme::{self, control, font, icon, radius, space, text};
 
 const MIN_WIDTH: f32 = 180.0;
@@ -9,6 +10,7 @@ pub struct MenuItem<'a> {
     icon: Option<char>,
     label: &'a str,
     danger: bool,
+    checked: bool,
 }
 
 impl<'a> MenuItem<'a> {
@@ -17,11 +19,18 @@ impl<'a> MenuItem<'a> {
             icon: None,
             label,
             danger: false,
+            checked: false,
         }
     }
 
     pub fn icon(mut self, icon: char) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    // marks the current choice in a picker
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
         self
     }
 
@@ -42,7 +51,12 @@ impl<'a> MenuItem<'a> {
             .layout_no_wrap(self.label.to_owned(), font::regular(text::MD), p.text)
             .size()
             .x;
-        let natural = MIN_WIDTH.max(space::SM * 3.0 + icon_w + label_w);
+        let check_w = if self.checked {
+            icon::MD + space::SM
+        } else {
+            0.0
+        };
+        let natural = MIN_WIDTH.max(space::SM * 3.0 + icon_w + label_w + check_w);
         // menus measure on a sizing pass first, then every row fills the settled width
         let width = if ui.is_sizing_pass() {
             natural
@@ -83,6 +97,15 @@ impl<'a> MenuItem<'a> {
                 font::regular(text::MD),
                 fg,
             );
+            if self.checked {
+                ui.painter().text(
+                    pos2(rect.right() - space::SM, rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    icons::CHECK,
+                    font::icon(icon::MD),
+                    p.accent,
+                );
+            }
         }
 
         response

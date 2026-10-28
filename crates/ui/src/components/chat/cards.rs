@@ -204,7 +204,9 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
     let p = theme::palette(ui);
     let id = ui.make_persistent_id("tool");
     let mut open = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
-    let expandable = tool.output.is_some();
+    let (preview, more) = one_line(&tool.target);
+    // a command over several lines can always be opened, so the rest of it is never out of reach
+    let expandable = tool.output.is_some() || more > 0;
 
     let sense = if expandable {
         Sense::click()
@@ -252,9 +254,10 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
     );
     let target_x = verb.right() + space::SM;
     let caret_space = if expandable { 28.0 } else { space::SM };
-    let target =
-        ui.painter()
-            .layout_no_wrap(tool.target.clone(), font::mono(text::MONO_SM), p.text_faint);
+    // the row is one line tall, so a longer command is run together onto it and cut off at the edge
+    let target = ui
+        .painter()
+        .layout_no_wrap(preview, font::mono(text::MONO_SM), p.text_faint);
     let clip = Rect::from_min_max(
         pos2(target_x, rect.top()),
         pos2(rect.right() - caret_space, rect.bottom()),
@@ -277,7 +280,7 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
         response.on_hover_cursor(CursorIcon::PointingHand);
     }
 
-    if let Some(output) = &tool.output {
+    if expandable {
         reveal(ui, id.with("output"), open, |ui| {
             ui.add_space(space::XS);
             Frame::new()
@@ -288,15 +291,44 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
                 .show(ui, |ui| {
                     ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(
-                            RichText::new(output)
-                                .font(font::mono(text::MONO_SM))
-                                .color(p.text_muted),
-                        );
+                        if more > 0 {
+                            ui.label(
+                                RichText::new(tool.target.trim())
+                                    .font(font::mono(text::MONO_SM))
+                                    .color(p.text),
+                            );
+                        }
+                        if let Some(output) = &tool.output {
+                            if more > 0 {
+                                ui.add_space(space::SM);
+                                let line = ui.available_rect_before_wrap();
+                                ui.painter().hline(
+                                    line.x_range(),
+                                    line.top(),
+                                    Stroke::new(1.0, p.border),
+                                );
+                                ui.add_space(space::SM);
+                            }
+                            ui.label(
+                                RichText::new(output)
+                                    .font(font::mono(text::MONO_SM))
+                                    .color(p.text_muted),
+                            );
+                        }
                     });
                 });
         });
     }
+}
+
+// the text's lines run together with single spaces, and how many lines there were beyond the first
+fn one_line(text: &str) -> (String, usize) {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    (lines.join(" "), lines.len().saturating_sub(1))
 }
 
 // a run of tool calls folds into one summary line, so routine work doesn't crowd the conversation
@@ -1114,4 +1146,23 @@ fn caret(ui: &Ui, center: Pos2, turn: f32, color: Color32) {
         turn * FRAC_PI_2,
         color,
     );
+}
+
+#[cfg(test)]
+mod tool_row_tests {
+    use super::one_line;
+
+    #[test]
+    fn long_commands_run_together_onto_one_line() {
+        let script = "bun -e '\n  import { loadKnowledge } from \"./src/knowledge.ts\";\n\n  console.log(k.docs.size);\n'";
+        assert_eq!(
+            one_line(script),
+            (
+                "bun -e ' import { loadKnowledge } from \"./src/knowledge.ts\"; console.log(k.docs.size); '".to_owned(),
+                3
+            )
+        );
+        assert_eq!(one_line("cargo test"), ("cargo test".to_owned(), 0));
+        assert_eq!(one_line("\n  ls -la  \n"), ("ls -la".to_owned(), 0));
+    }
 }

@@ -82,6 +82,7 @@ impl Store {
             id,
             name: name.to_owned(),
             path,
+            branch: None,
             open: true,
             sessions: Vec::new(),
         });
@@ -148,6 +149,8 @@ impl Store {
             kind,
             status: SessionStatus::Idle,
             meta,
+            updated: now(),
+            provider: Default::default(),
         });
         id
     }
@@ -186,6 +189,13 @@ impl Store {
             .sessions
             .insert(index.min(target.sessions.len()), session);
     }
+}
+
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

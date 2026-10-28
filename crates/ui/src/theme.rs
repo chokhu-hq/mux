@@ -95,6 +95,8 @@ pub mod control {
 pub struct Palette {
     pub bg: Color32,
     pub surface: Color32,
+    // the sidebar sits a shade apart from the content so the window reads as two areas
+    pub sidebar: Color32,
     pub elevated: Color32,
     pub hover: Color32,
     pub active: Color32,
@@ -122,6 +124,7 @@ const fn hex(rgb: u32) -> Color32 {
 pub const DARK: Palette = Palette {
     bg: hex(0x0E0E10),
     surface: hex(0x161618),
+    sidebar: hex(0x151518),
     elevated: hex(0x1C1C1F),
     hover: hex(0x232326),
     active: hex(0x2C2C30),
@@ -162,9 +165,10 @@ pub const DARK: Palette = Palette {
 pub const LIGHT: Palette = Palette {
     bg: hex(0xF5F5F7),
     surface: hex(0xFFFFFF),
+    sidebar: hex(0xEBEBEE),
     elevated: hex(0xFFFFFF),
-    hover: hex(0xEBEBED),
-    active: hex(0xE1E1E5),
+    hover: hex(0xE3E3E7),
+    active: hex(0xDADADF),
     border: hex(0xE3E3E8),
     border_strong: hex(0xCFCFD4),
     text: hex(0x1D1D1F),
@@ -198,6 +202,11 @@ pub const LIGHT: Palette = Palette {
         hex(0xD1D1D6),
     ],
 };
+
+// a wash of the text colour, which reads the same on solid and see-through backgrounds
+pub fn tint(p: &Palette, amount: f32) -> Color32 {
+    p.text.gamma_multiply(amount)
+}
 
 pub fn palette(ui: &egui::Ui) -> &'static Palette {
     if ui.visuals().dark_mode {

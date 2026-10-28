@@ -157,15 +157,32 @@ impl<'a> ChatView<'a> {
                         ui.set_width(width);
                         ui.spacing_mut().item_spacing.y = space::MD;
                         ui.add_space(space::LG);
-                        for (i, item) in self.items.iter().enumerate() {
-                            ui.push_id(i, |ui| match item {
+                        let mut i = 0;
+                        while i < self.items.len() {
+                            // consecutive tool calls are shown together as one activity group
+                            let tools: Vec<&ToolCall> = self.items[i..]
+                                .iter()
+                                .map_while(|item| match item {
+                                    ChatItem::Tool(tool) => Some(tool),
+                                    _ => None,
+                                })
+                                .collect();
+                            if tools.len() > 1 {
+                                ui.push_id(i, |ui| cards::activity(ui, &tools));
+                                i += tools.len();
+                                continue;
+                            }
+                            let item = &self.items[i];
+                            let index = i;
+                            i += 1;
+                            ui.push_id(index, |ui| match item {
                                 ChatItem::User(text) => cards::user_message(ui, text),
                                 ChatItem::Assistant(text) => markdown(ui, text),
                                 ChatItem::Tool(tool) => cards::tool_call(ui, tool),
                                 ChatItem::Diff(diff) => cards::diff(ui, diff),
                                 ChatItem::Permission(request) => {
                                     if let Some(decision) = cards::permission(ui, request) {
-                                        action = Some(ChatAction::Decide(i, decision));
+                                        action = Some(ChatAction::Decide(index, decision));
                                     }
                                 }
                                 ChatItem::Thinking => cards::thinking(ui),

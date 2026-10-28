@@ -1,5 +1,5 @@
 use egui::{
-    Align2, CornerRadius, Frame, Id, KeyboardShortcut, Margin, Order, Response, Shadow, Stroke,
+    Align2, CornerRadius, Frame, Id, KeyboardShortcut, Margin, Order, Response, Shadow, Stroke, Ui,
     pos2,
 };
 
@@ -8,13 +8,18 @@ use crate::motion::{Spring, spring_bool};
 use crate::theme::{self, font, radius, text};
 
 const DELAY: f64 = 0.5;
+// cards hold information you hovered on purpose to read, so they skip most of the wait
+const CARD_DELAY: f64 = 0.12;
 // moving between neighbouring controls shows the next tooltip right away, like macos
 const GRACE: f64 = 0.4;
 const GAP: f32 = 6.0;
+// keeps tooltips off the window's rounded edge
+const EDGE: f32 = 8.0;
 
 pub trait TooltipExt {
     fn tip(self, text: impl Into<String>) -> Self;
     fn tip_with_shortcut(self, text: impl Into<String>, shortcut: KeyboardShortcut) -> Self;
+    fn tip_ui(self, add: impl FnOnce(&mut Ui)) -> Self;
 }
 
 impl TooltipExt for Response {
@@ -25,6 +30,10 @@ impl TooltipExt for Response {
     fn tip_with_shortcut(self, text: impl Into<String>, shortcut: KeyboardShortcut) -> Self {
         show(self, text.into(), Some(shortcut))
     }
+
+    fn tip_ui(self, add: impl FnOnce(&mut Ui)) -> Self {
+        show_ui(self, Margin::same(12), CARD_DELAY, add)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -34,6 +43,22 @@ struct HoverState {
 }
 
 fn show(response: Response, label: String, shortcut: Option<KeyboardShortcut>) -> Response {
+    show_ui(response, Margin::symmetric(8, 5), DELAY, |ui| {
+        let p = theme::palette(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(&label)
+                    .font(font::regular(text::SM))
+                    .color(p.text),
+            );
+            if let Some(shortcut) = &shortcut {
+                Kbd::shortcut(ui, shortcut);
+            }
+        });
+    })
+}
+
+fn show_ui(response: Response, margin: Margin, delay: f64, add: impl FnOnce(&mut Ui)) -> Response {
     let ctx = response.ctx.clone();
     let id = response.id.with("tip");
     let last_shown_id = Id::unique("mux-tip-last-shown");
@@ -55,8 +80,8 @@ fn show(response: Response, label: String, shortcut: Option<KeyboardShortcut>) -
         let instant = now - last_shown < GRACE;
         let since = *state
             .since
-            .get_or_insert(if instant { now - DELAY } else { now });
-        let wait = since + DELAY - now;
+            .get_or_insert(if instant { now - delay } else { now });
+        let wait = since + delay - now;
         if wait > 0.0 {
             ctx.request_repaint_after_secs(wait as f32);
         }
@@ -91,6 +116,7 @@ fn show(response: Response, label: String, shortcut: Option<KeyboardShortcut>) -
         .order(Order::Tooltip)
         .pivot(pivot)
         .fixed_pos(anchor)
+        .constrain_to(ctx.content_rect().shrink(EDGE))
         .interactable(false)
         .show(&ctx, |ui| {
             let p = theme::palette(ui);
@@ -105,19 +131,8 @@ fn show(response: Response, label: String, shortcut: Option<KeyboardShortcut>) -
                     spread: 0,
                     color: ui.visuals().popup_shadow.color,
                 })
-                .inner_margin(Margin::symmetric(8, 5))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&label)
-                                .font(font::regular(text::SM))
-                                .color(p.text),
-                        );
-                        if let Some(shortcut) = &shortcut {
-                            Kbd::shortcut(ui, shortcut);
-                        }
-                    });
-                });
+                .inner_margin(margin)
+                .show(ui, add);
         });
     response
 }

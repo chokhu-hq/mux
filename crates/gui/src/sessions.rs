@@ -4,11 +4,11 @@ use eframe::egui::{
     self, CornerRadius, CursorIcon, Frame, Id, Key, Modifiers, Order, Rect, Sense, Stroke,
     UiBuilder, Vec2, pos2, vec2,
 };
-use mux_core::SessionKind;
 use mux_core::protocol::{
     self as wire, AgentItem, AgentSettings, ClientMsg, GroupInfo, ItemStatus, ModelOption,
-    ServerMsg, SessionInfo,
+    ServerMsg, SessionInfo, UsageWindow,
 };
+use mux_core::{Provider, SessionKind, SessionStatus};
 use mux_ui::chat::{
     self, ChatItem, Decision, DiffKind, DiffLine, FileDiff, PermissionRequest, ToolCall, ToolKind,
     ToolStatus,
@@ -18,6 +18,9 @@ use mux_ui::theme::{self, radius};
 use mux_ui::{GroupHeader, MenuItem, SessionRow, TextInput, TooltipExt, icons};
 
 use crate::terminal::Terminal;
+
+// the models each agent cli offers
+pub type Models = HashMap<Provider, Vec<ModelOption>>;
 
 const ROW_GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 6.0;
@@ -39,6 +42,11 @@ pub struct Local {
 }
 
 impl Local {
+    // an agent can only switch cli before its first message, since neither can pick up the other's history
+    pub fn has_started(&self) -> bool {
+        !self.transcript.is_empty()
+    }
+
     // rebuilt only when the transcript changes, not every frame
     fn rebuild(&mut self) {
         (self.chat, self.approvals) = chat_items(&self.transcript, self.busy);
@@ -67,6 +75,7 @@ enum Action {
     Select(u64),
     Remove(u64),
     StartDrag(Drag),
+    NewAgent(u64),
 }
 
 #[derive(Default)]
@@ -78,8 +87,9 @@ pub struct Sessions {
     loaded: bool,
     // the group whose name is being edited inline, with the draft name
     renaming: Option<(u64, String)>,
-    // the models codex offers, sent by the server once it has asked
-    models: Vec<ModelOption>,
+    // the models each agent cli offers, sent by the server once it has asked
+    models: Models,
+    usage: HashMap<Provider, Vec<UsageWindow>>,
     pub outbox: Vec<ClientMsg>,
 }
 
@@ -142,7 +152,12 @@ impl Sessions {
                     local.settings = settings;
                 }
             }
-            ServerMsg::AgentModels { models } => self.models = models,
+            ServerMsg::AgentUsage { provider, windows } => {
+                self.usage.insert(provider, windows);
+            }
+            ServerMsg::AgentModels { provider, models } => {
+                self.models.insert(provider, models);
+            }
             ServerMsg::AgentBusy { id, busy } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.busy = busy;
@@ -165,18 +180,15 @@ impl Sessions {
         self.loaded
     }
 
+    pub fn usage(&self, provider: Provider) -> &[UsageWindow] {
+        self.usage.get(&provider).map_or(&[], Vec::as_slice)
+    }
+
     pub fn has_groups(&self) -> bool {
         !self.groups.is_empty()
     }
 
-    pub fn selected(
-        &mut self,
-    ) -> Option<(
-        &SessionInfo,
-        &mut Local,
-        &mut Vec<ClientMsg>,
-        &[ModelOption],
-    )> {
+    pub fn selected(&mut self) -> Option<(&SessionInfo, &mut Local, &mut Vec<ClientMsg>, &Models)> {
         let id = self.selected?;
         let info = self
             .groups
@@ -187,11 +199,11 @@ impl Sessions {
         Some((info, local, &mut self.outbox, &self.models))
     }
 
-    // the id and folder of the group holding the selected session
-    pub fn selected_group(&self) -> Option<(u64, Option<String>)> {
+    // the id, folder and name of the group holding the selected session
+    pub fn selected_group(&self) -> Option<(u64, Option<String>, String)> {
         let (g, _) = self.locate(self.selected?)?;
         let group = &self.groups[g];
-        Some((group.id, group.path.clone()))
+        Some((group.id, group.path.clone(), group.name.clone()))
     }
 
     pub fn set_group_folder(&mut self, id: u64) {
@@ -294,20 +306,28 @@ impl Sessions {
                     actions.push(Action::EndRename);
                 }
             } else {
-                let header = ui
+                let shown = ui
                     .push_id(group.id, |ui| {
-                        GroupHeader::new(&group.name, group.sessions.len())
+                        GroupHeader::new(&group.name)
+                            .detail(if group.path.is_some() {
+                                ""
+                            } else {
+                                "no folder"
+                            })
                             .open(group.open)
                             .drop_target(dragging.is_some())
                             .show(ui)
                     })
                     .inner;
+                if shown.add.tip("New agent in this project").clicked() {
+                    actions.push(Action::NewAgent(group.id));
+                }
                 let folder = group
                     .path
                     .as_deref()
                     .map(mux_core::display_path)
-                    .unwrap_or_else(|| "~ (no folder set)".to_owned());
-                let header = header.tip(folder);
+                    .unwrap_or_else(|| "No folder yet, right-click to choose one".to_owned());
+                let header = shown.response.tip(folder);
                 if header.clicked() {
                     actions.push(Action::Toggle(group.id));
                 }
@@ -370,10 +390,17 @@ impl Sessions {
                             if is_dragged {
                                 ui.multiply_opacity(0.35);
                             }
-                            SessionRow::new(&session.title, session.kind, session.status)
-                                .meta(&session.meta)
-                                .selected(self.selected == Some(session.id))
-                                .show(ui)
+                            let (context, time) = (row_context(session), ago(session.updated));
+                            let mut row =
+                                SessionRow::new(&session.title, session.kind, session.status)
+                                    .context(&context)
+                                    .time(&time)
+                                    .branch(group.branch.as_deref().unwrap_or_default())
+                                    .selected(self.selected == Some(session.id));
+                            if session.kind == SessionKind::Agent {
+                                row = row.provider(session.provider);
+                            }
+                            row.show(ui)
                         })
                         .inner;
                     if row.clicked() {
@@ -449,6 +476,11 @@ impl Sessions {
         for action in actions {
             match action {
                 Action::Toggle(id) => self.outbox.push(ClientMsg::ToggleGroup { id }),
+                Action::NewAgent(group) => self.outbox.push(ClientMsg::CreateSession {
+                    group: Some(group),
+                    title: "New agent".to_owned(),
+                    kind: SessionKind::Agent,
+                }),
                 Action::StartRename(id, name) => self.renaming = Some((id, name)),
                 Action::Rename(id, name) => self.outbox.push(ClientMsg::RenameGroup { id, name }),
                 Action::EndRename => self.renaming = None,
@@ -483,7 +515,8 @@ impl Sessions {
                     .show(ui, |ui| {
                         ui.set_width(drag.width);
                         SessionRow::new(&session.title, session.kind, session.status)
-                            .meta(&session.meta)
+                            .context(&row_context(session))
+                            .time(&ago(session.updated))
                             .show(ui);
                     });
             });
@@ -497,6 +530,34 @@ fn pick_folder(start: Option<&str>) -> Option<String> {
         dialog = dialog.set_directory(start);
     }
     Some(dialog.pick_folder()?.to_string_lossy().into_owned())
+}
+
+// the line above a row's title: what needs attention first, otherwise where it is
+fn row_context(session: &SessionInfo) -> String {
+    match (session.status, session.kind) {
+        (SessionStatus::Waiting, _) => "Needs your input".to_owned(),
+        (SessionStatus::Idle, _) => "Not started".to_owned(),
+        (SessionStatus::Running, SessionKind::Agent) => "Working…".to_owned(),
+        (SessionStatus::Done, SessionKind::Agent) => "Finished".to_owned(),
+        (SessionStatus::Failed, _) if session.meta.is_empty() => "Failed".to_owned(),
+        _ => session.meta.clone(),
+    }
+}
+
+fn ago(updated: u64) -> String {
+    if updated == 0 {
+        return String::new();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(updated);
+    match now.saturating_sub(updated) {
+        s if s < 60 => "now".to_owned(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
 }
 
 fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Option<u64>>) {
@@ -547,6 +608,25 @@ fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Optio
                     }),
                 }));
             }
+            AgentItem::Tool {
+                name,
+                detail,
+                output,
+                status,
+            } => items.push(ChatItem::Tool(ToolCall {
+                kind: match name.as_str() {
+                    "Read" | "NotebookRead" => ToolKind::Read,
+                    "Grep" | "Glob" | "WebSearch" | "WebFetch" | "LS" => ToolKind::Search,
+                    _ => ToolKind::Run,
+                },
+                target: if detail.is_empty() {
+                    name.clone()
+                } else {
+                    detail.clone()
+                },
+                status: tool_status(*status),
+                output: (!output.is_empty()).then(|| output.clone()),
+            })),
             AgentItem::Error { message } => {
                 items.push(ChatItem::Assistant(format!("**Error:** {message}")))
             }

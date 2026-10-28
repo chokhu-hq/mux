@@ -34,11 +34,29 @@ pub const CLEAR_COLOR: [f32; 4] = [0.0; 4];
 
 pub struct WindowFrame<'a> {
     title: &'a str,
+    sidebar: f32,
+    translucent: bool,
 }
 
 impl<'a> WindowFrame<'a> {
     pub fn new(title: &'a str) -> Self {
-        Self { title }
+        Self {
+            title,
+            sidebar: 0.0,
+            translucent: false,
+        }
+    }
+
+    // paints a sidebar of this width from the top edge down, behind the traffic lights like macos
+    pub fn sidebar(mut self, width: f32) -> Self {
+        self.sidebar = width;
+        self
+    }
+
+    // leaves the sidebar see-through, for when the compositor blurs what's behind the window
+    pub fn translucent_sidebar(mut self, translucent: bool) -> Self {
+        self.translucent = translucent;
+        self
     }
 
     pub fn show<R>(self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
@@ -54,7 +72,39 @@ impl<'a> WindowFrame<'a> {
         let rounded = custom && !maximized;
         let corner = CornerRadius::same(if rounded { radius::LG } else { 0 });
 
-        ui.painter().rect_filled(rect, corner, p.bg);
+        let edge = rect.min.x + self.sidebar;
+        let r = if rounded { radius::LG } else { 0 };
+        let see_through = self.translucent && self.sidebar > 0.5;
+        if see_through {
+            // the opaque background stops at the sidebar so the blur behind it can show
+            let content = Rect::from_min_max(pos2(edge, rect.min.y), rect.max);
+            let corners = CornerRadius {
+                nw: 0,
+                sw: 0,
+                ne: r,
+                se: r,
+            };
+            ui.painter().rect_filled(content, corners, p.bg);
+        } else {
+            ui.painter().rect_filled(rect, corner, p.bg);
+        }
+        if self.sidebar > 0.5 {
+            let side = Rect::from_min_max(rect.min, pos2(edge, rect.max.y));
+            let corners = CornerRadius {
+                nw: r,
+                sw: r,
+                ne: 0,
+                se: 0,
+            };
+            let fill = if see_through {
+                p.sidebar.gamma_multiply(0.82)
+            } else {
+                p.sidebar
+            };
+            ui.painter().rect_filled(side, corners, fill);
+            ui.painter()
+                .vline(edge - 0.5, rect.y_range(), Stroke::new(1.0, p.border));
+        }
 
         let bar = Rect::from_min_size(rect.min, vec2(rect.width(), TITLEBAR_HEIGHT));
         let bar_response = ui.interact(
@@ -68,15 +118,18 @@ impl<'a> WindowFrame<'a> {
         } else if bar_response.drag_started() {
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
         }
+        let content_x = edge.max(bar.min.x)..=bar.max.x;
         ui.painter()
-            .hline(bar.x_range(), bar.max.y - 0.5, Stroke::new(1.0, p.border));
-        ui.painter().text(
-            bar.center(),
-            egui::Align2::CENTER_CENTER,
-            self.title,
-            font::medium(text::MD),
-            if focused { p.text_muted } else { p.text_faint },
-        );
+            .hline(content_x, bar.max.y - 0.5, Stroke::new(1.0, p.border));
+        if !self.title.is_empty() {
+            ui.painter().text(
+                bar.center(),
+                egui::Align2::CENTER_CENTER,
+                self.title,
+                font::medium(text::MD),
+                if focused { p.text_muted } else { p.text_faint },
+            );
+        }
         if custom {
             traffic_lights(ui, bar, maximized, focused);
         }

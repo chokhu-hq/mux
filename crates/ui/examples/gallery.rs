@@ -343,7 +343,9 @@ impl eframe::App for Gallery {
                                                 SESSIONS.iter().enumerate()
                                             {
                                                 let row = SessionRow::new(title, *kind, *status)
-                                                    .meta(meta)
+                                                    .context(meta)
+                                                    .time("2m")
+                                                    .branch("main")
                                                     .selected(self.selected == i);
                                                 if row.show(ui).clicked() {
                                                     self.selected = i;

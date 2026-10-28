@@ -63,8 +63,8 @@ impl<'a> Composer<'a> {
             .fill(p.surface)
             .stroke(Stroke::new(
                 1.0,
-                p.border_strong
-                    .lerp_to_gamma(p.accent.gamma_multiply(0.7), focus),
+                // focus firms the border a little rather than lighting it up in accent blue
+                p.border.lerp_to_gamma(p.border_strong, focus),
             ))
             .corner_radius(radius::XL)
             .inner_margin(Margin {

@@ -2,13 +2,14 @@ mod agent;
 mod models;
 mod process;
 mod store;
+mod usage;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mux_core::SessionStatus;
-use mux_core::protocol::{self, ClientMsg, ModelOption, PROTOCOL, ServerMsg};
+use mux_core::protocol::{self, ClientMsg, ModelOption, PROTOCOL, ServerMsg, UsageWindow};
+use mux_core::{Provider, SessionStatus};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -31,16 +32,16 @@ pub enum Event {
         generation: u64,
         code: Option<i32>,
     },
-    Codex {
+    Agent {
         session: u64,
         generation: u64,
         msg: serde_json::Value,
     },
-    CodexExited {
+    AgentExited {
         session: u64,
         generation: u64,
     },
-    Models(Result<Vec<ModelOption>, String>),
+    Models(Provider, Result<models::Catalog, String>),
 }
 
 // blocks until ctrl+c or a client asks the server to shut down
@@ -65,7 +66,8 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
 
     let (events, inbox) = mpsc::unbounded_channel();
     let (stop, mut stopped) = mpsc::unbounded_channel::<()>();
-    let store = Store::load(&state);
+    let mut store = Store::load(&state);
+    let seen = store.sessions_mut().map(|s| (s.id, s.status)).collect();
     store.save(&state)?;
     let server = Server {
         store,
@@ -73,8 +75,10 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         clients: HashMap::new(),
         processes: HashMap::new(),
         agents: HashMap::new(),
-        models: None,
-        fetching_models: false,
+        seen,
+        models: HashMap::new(),
+        fetching_models: HashSet::new(),
+        usage: HashMap::new(),
         attached: HashMap::new(),
         generation: 0,
         events: events.clone(),
@@ -170,9 +174,13 @@ struct Server {
     clients: HashMap<u64, UnboundedSender<ServerMsg>>,
     processes: HashMap<u64, Process>,
     agents: HashMap<u64, Agent>,
-    // what codex can run, fetched once the first agent is opened
-    models: Option<Vec<ModelOption>>,
-    fetching_models: bool,
+    // last known status of each session, to notice when one changes
+    seen: HashMap<u64, SessionStatus>,
+    // what each agent cli can run, fetched once the first agent is opened
+    models: HashMap<Provider, Vec<ModelOption>>,
+    fetching_models: HashSet<Provider>,
+    // the latest plan limits each agent cli reported
+    usage: HashMap<Provider, Vec<UsageWindow>>,
     // which clients are watching each session's terminal
     attached: HashMap<u64, HashSet<u64>>,
     // bumped per spawn so output from a killed process can't leak into its replacement
@@ -193,9 +201,16 @@ impl Server {
             Event::Connected(client, tx) => {
                 let _ = tx.send(ServerMsg::Welcome { protocol: PROTOCOL });
                 let _ = tx.send(self.state_msg());
-                if let Some(models) = &self.models {
+                for (provider, models) in &self.models {
                     let _ = tx.send(ServerMsg::AgentModels {
+                        provider: *provider,
                         models: models.clone(),
+                    });
+                }
+                for (provider, windows) in &self.usage {
+                    let _ = tx.send(ServerMsg::AgentUsage {
+                        provider: *provider,
+                        windows: windows.clone(),
                     });
                 }
                 self.clients.insert(client, tx);
@@ -220,7 +235,7 @@ impl Server {
                 for change in changes {
                     let Change::Title(title) = change;
                     if let Some(info) = self.store.session_mut(session)
-                        && let Some(title) = title
+                        && let Some(title) = title.map(|t| short_title(&t))
                         && info.meta != title
                     {
                         info.meta = title;
@@ -246,7 +261,7 @@ impl Server {
                 }
                 self.changed();
             }
-            Event::Codex {
+            Event::Agent {
                 session,
                 generation,
                 msg,
@@ -258,21 +273,25 @@ impl Server {
                     self.agent_changed(session);
                 }
             }
-            Event::Models(result) => {
-                self.fetching_models = false;
+            Event::Models(provider, result) => {
+                self.fetching_models.remove(&provider);
                 match result {
-                    Ok(models) => {
+                    Ok(catalog) => {
                         for tx in self.clients.values() {
                             let _ = tx.send(ServerMsg::AgentModels {
-                                models: models.clone(),
+                                provider,
+                                models: catalog.models.clone(),
                             });
                         }
-                        self.models = Some(models);
+                        self.models.insert(provider, catalog.models);
+                        if let Some(windows) = catalog.usage {
+                            self.set_usage(provider, windows);
+                        }
                     }
-                    Err(err) => eprintln!("mux: could not list codex models: {err}"),
+                    Err(err) => eprintln!("mux: could not list {} models: {err}", provider.label()),
                 }
             }
-            Event::CodexExited {
+            Event::AgentExited {
                 session,
                 generation,
             } => {
@@ -374,21 +393,34 @@ impl Server {
                     settings: agent.settings.clone(),
                 };
                 self.send(client, msg);
-                if self.models.is_none() && !self.fetching_models {
-                    self.fetching_models = true;
+                for provider in Provider::ALL {
+                    if self.models.contains_key(&provider) || !self.fetching_models.insert(provider)
+                    {
+                        continue;
+                    }
                     let events = self.events.clone();
                     tokio::spawn(async move {
-                        let result = models::fetch().await.map_err(|e| e.to_string());
-                        let _ = events.send(Event::Models(result));
+                        let result = models::fetch(provider).await.map_err(|e| e.to_string());
+                        let _ = events.send(Event::Models(provider, result));
                     });
                 }
             }
-            ClientMsg::AgentConfigure { id, settings } => {
+            ClientMsg::AgentConfigure { id, mut settings } => {
                 let path = self.agent_path(id);
                 let agent = self.agent(id);
+                // a conversation stays with the agent that started it, since neither can resume the other's
+                if !agent.items.is_empty() {
+                    settings.provider = agent.settings.provider;
+                }
                 agent.settings = settings.clone();
                 if let Err(err) = agent.save(&path) {
                     eprintln!("mux: could not save {}: {err}", path.display());
+                }
+                if let Some(info) = self.store.session_mut(id)
+                    && info.provider != settings.provider
+                {
+                    info.provider = settings.provider;
+                    self.changed();
                 }
                 self.send_watchers(id, ServerMsg::AgentSettings { id, settings });
             }
@@ -493,6 +525,9 @@ impl Server {
         };
         let (items, busy) = agent.take_changes();
         let status = agent.status();
+        let provider = agent.settings.provider;
+        let label = provider.label();
+        let usage = agent.usage.take();
         // saved when a turn starts or ends rather than on every streamed word
         if (busy.is_some() || (!agent.busy && !items.is_empty()))
             && let Err(err) = agent.save(&path)
@@ -505,13 +540,29 @@ impl Server {
         if let Some(busy) = busy {
             self.send_watchers(id, ServerMsg::AgentBusy { id, busy });
         }
+        if let Some(windows) = usage {
+            self.set_usage(provider, windows);
+        }
         if let Some(info) = self.store.session_mut(id)
             && info.status != status
         {
             info.status = status;
-            info.meta = "codex".to_owned();
+            info.meta = label.to_owned();
             self.changed();
         }
+    }
+
+    fn set_usage(&mut self, provider: Provider, windows: Vec<UsageWindow>) {
+        if self.usage.get(&provider) == Some(&windows) {
+            return;
+        }
+        for tx in self.clients.values() {
+            let _ = tx.send(ServerMsg::AgentUsage {
+                provider,
+                windows: windows.clone(),
+            });
+        }
+        self.usage.insert(provider, windows);
     }
 
     fn live(&mut self, session: u64, generation: u64) -> Option<&mut Process> {
@@ -531,6 +582,12 @@ impl Server {
     }
 
     fn changed(&mut self) {
+        // stamp sessions whose status moved, so the sidebar can say how long ago it happened
+        for info in self.store.sessions_mut() {
+            if self.seen.insert(info.id, info.status) != Some(info.status) {
+                info.updated = store::now();
+            }
+        }
         if let Err(err) = self.store.save(&self.state) {
             eprintln!("mux: could not save {}: {err}", self.state.display());
         }
@@ -538,9 +595,11 @@ impl Server {
     }
 
     fn state_msg(&self) -> ServerMsg {
-        ServerMsg::State {
-            groups: self.store.groups.clone(),
+        let mut groups = self.store.groups.clone();
+        for group in &mut groups {
+            group.branch = group.path.as_deref().and_then(git_branch);
         }
+        ServerMsg::State { groups }
     }
 
     fn broadcast_state(&self) {
@@ -563,5 +622,58 @@ impl Server {
         for client in watchers {
             self.send(*client, msg.clone());
         }
+    }
+}
+
+// shells title themselves `user@host:path`, and only the path is worth showing
+fn short_title(title: &str) -> String {
+    let path = match title.split_once(':') {
+        Some((who, path)) if who.contains('@') && !who.contains(' ') => path.trim(),
+        _ => title,
+    };
+    mux_core::display_path(path)
+}
+
+// reads the branch straight from .git so showing state never has to run git
+fn git_branch(folder: &str) -> Option<String> {
+    let dot_git = Path::new(folder).join(".git");
+    let git_dir = if dot_git.is_file() {
+        // worktrees and submodules point at their real git directory
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        PathBuf::from(pointer.strip_prefix("gitdir:")?.trim())
+    } else {
+        dot_git
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    match head.trim().strip_prefix("ref: refs/heads/") {
+        Some(branch) => Some(branch.to_owned()),
+        None => Some(head.trim().chars().take(7).collect()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortens_shell_titles_to_their_folder() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            short_title(&format!("me@box:{home}/code/mux")),
+            "~/code/mux"
+        );
+        assert_eq!(short_title("me@box:~"), "~");
+        assert_eq!(short_title("vim notes.md"), "vim notes.md");
+        assert_eq!(short_title("ssh: connecting"), "ssh: connecting");
+    }
+
+    #[test]
+    fn reads_the_branch_of_this_repo() {
+        let repo = env!("CARGO_MANIFEST_DIR")
+            .rsplit_once("/crates/")
+            .unwrap()
+            .0;
+        assert!(git_branch(repo).is_some_and(|b| !b.is_empty()));
+        assert_eq!(git_branch("/nonexistent"), None);
     }
 }

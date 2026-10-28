@@ -2010,7 +2010,13 @@ dependencies = [
  "mux-core",
  "mux-server",
  "mux-ui",
+ "raw-window-handle",
  "rfd",
+ "serde",
+ "serde_json",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

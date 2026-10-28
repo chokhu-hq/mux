@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::{SessionKind, SessionStatus};
+use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -17,6 +17,11 @@ pub struct SessionInfo {
     pub kind: SessionKind,
     pub status: SessionStatus,
     pub meta: String,
+    // unix seconds of the last status change, for the sidebar's relative times
+    #[serde(default)]
+    pub updated: u64,
+    #[serde(default)]
+    pub provider: Provider,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,6 +31,9 @@ pub struct GroupInfo {
     // the project folder sessions start in, the home folder when unset
     #[serde(default)]
     pub path: Option<String>,
+    // the checked out branch of the folder, filled in by the server when it sends state
+    #[serde(default)]
+    pub branch: Option<String>,
     pub open: bool,
     pub sessions: Vec<SessionInfo>,
 }
@@ -58,6 +66,13 @@ pub enum AgentItem {
     Error {
         message: String,
     },
+    // any other tool call, like reading a file or searching
+    Tool {
+        name: String,
+        detail: String,
+        output: String,
+        status: ItemStatus,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -77,9 +92,13 @@ pub enum ItemStatus {
 // unset fields mean the agent's own default, so a user's codex config still applies
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSettings {
+    #[serde(default)]
+    pub provider: Provider,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fast: bool,
+    #[serde(default)]
+    pub access: Access,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +111,16 @@ pub struct ModelOption {
     pub is_default: bool,
     // the description of the model's fast tier, when it has one
     pub fast: Option<String>,
+}
+
+// one rate limit window of an agent's plan, like its five hour or weekly allowance
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    pub label: String,
+    // how much of the window is used, from 0 to 1
+    pub used: f32,
+    // unix seconds when the window resets, 0 when unknown
+    pub resets_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,7 +250,12 @@ pub enum ServerMsg {
         settings: AgentSettings,
     },
     AgentModels {
+        provider: Provider,
         models: Vec<ModelOption>,
+    },
+    AgentUsage {
+        provider: Provider,
+        windows: Vec<UsageWindow>,
     },
 }
 

@@ -36,6 +36,62 @@ impl SessionKind {
     }
 }
 
+// which coding agent cli runs an agent session
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Provider {
+    #[default]
+    Codex,
+    Claude,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Claude];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+}
+
+// how far an agent may go before it stops to ask, the same four modes t3 code offers
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Access {
+    Supervised,
+    #[default]
+    AutoEdits,
+    Auto,
+    Full,
+}
+
+impl Access {
+    pub const ALL: [Access; 4] = [
+        Access::Supervised,
+        Access::AutoEdits,
+        Access::Auto,
+        Access::Full,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Supervised => "Supervised",
+            Self::AutoEdits => "Auto-accept edits",
+            Self::Auto => "Auto",
+            Self::Full => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Supervised => "Ask before commands and file changes",
+            Self::AutoEdits => "Edit the project freely, ask before other actions",
+            Self::Auto => "The agent reviews routine actions itself",
+            Self::Full => "Run commands and edit without asking",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionStatus {
     Running,

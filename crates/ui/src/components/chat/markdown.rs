@@ -5,7 +5,9 @@ use crate::components::{IconButton, TooltipExt};
 use crate::icons;
 use crate::theme::{self, Palette, font, radius, space, text};
 
-const LINE_HEIGHT: f32 = 20.0;
+// chat reads better a size up from the rest of the ui, with room between lines
+const SIZE: f32 = text::MD + 1.0;
+const LINE_HEIGHT: f32 = 22.0;
 
 // a deliberately small subset: paragraphs, headings, lists, bold, inline code and fenced code blocks
 pub fn markdown(ui: &mut Ui, source: &str) {
@@ -109,21 +111,29 @@ fn append(job: &mut LayoutJob, buf: &mut String, p: &Palette, bold: bool, code: 
             font_id: font::mono(text::MONO_SM),
             color: p.text,
             background: p.hover,
+            expand_bg: 2.0,
+            // the smaller mono font would otherwise sit on the bottom of the taller prose line
+            valign: egui::Align::Center,
             ..Default::default()
         }
     } else {
         TextFormat {
             font_id: if bold {
-                font::semibold(text::MD)
+                font::semibold(SIZE)
             } else {
-                font::regular(text::MD)
+                font::regular(SIZE)
             },
             color: p.text,
             line_height: Some(LINE_HEIGHT),
             ..Default::default()
         }
     };
-    job.append(buf, 0.0, format);
+    if code {
+        // thin spaces inside the background give the code a little room on each side
+        job.append(&format!("\u{2009}{buf}\u{2009}"), 0.0, format);
+    } else {
+        job.append(buf, 0.0, format);
+    }
     buf.clear();
 }
 

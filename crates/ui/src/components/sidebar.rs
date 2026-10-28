@@ -12,6 +12,8 @@ const HANDLE: f32 = 6.0;
 pub struct Sidebar {
     open: bool,
     width: f32,
+    // how far open it is this frame, between 0 and 1
+    t: f32,
 }
 
 impl Default for Sidebar {
@@ -19,6 +21,7 @@ impl Default for Sidebar {
         Self {
             open: true,
             width: 260.0,
+            t: 1.0,
         }
     }
 }
@@ -32,11 +35,18 @@ impl Sidebar {
         self.open = !self.open;
     }
 
+    // advances the open animation and returns the visible width, so the window can paint behind it first
+    pub fn animate(&mut self, ctx: &egui::Context) -> f32 {
+        let id = Id::unique("mux-sidebar");
+        self.t = spring_bool(ctx, id.with("open"), self.open, Spring::SMOOTH).max(0.0);
+        self.width * self.t
+    }
+
     pub fn show(&mut self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) -> Rect {
         let p = theme::palette(ui);
         let id = Id::unique("mux-sidebar");
         let rect = ui.max_rect();
-        let t = spring_bool(ui.ctx(), id.with("open"), self.open, Spring::SMOOTH).max(0.0);
+        let t = self.t;
         let edge = rect.min.x + self.width * t;
         let visible = Rect::from_min_max(rect.min, pos2(edge, rect.max.y));
 
@@ -50,8 +60,6 @@ impl Sidebar {
             child.set_clip_rect(visible.intersect(ui.clip_rect()));
             child.multiply_opacity(t.min(1.0));
             add_contents(&mut child);
-            ui.painter()
-                .vline(edge - 0.5, rect.y_range(), Stroke::new(1.0, p.border));
         }
 
         if self.open {

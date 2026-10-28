@@ -1,33 +1,63 @@
-use egui::{Align2, CornerRadius, CursorIcon, Rect, Response, Sense, Ui, Vec2, WidgetInfo, pos2};
-use mux_core::{SessionKind, SessionStatus};
+use std::sync::Arc;
 
-use super::{Badge, StatusDot, hover_t};
+use egui::text::{LayoutJob, TextWrapping};
+use egui::{
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Response, Sense, Ui, Vec2,
+    WidgetInfo, pos2,
+};
+use mux_core::{Provider, SessionKind, SessionStatus};
+
+use super::{hover_t, provider_color, provider_mark};
+use crate::icons;
 use crate::motion::{Spring, spring_bool};
-use crate::theme::{self, font, radius, space, text};
+use crate::theme::{self, Palette, font, icon, radius, space, text};
 
 pub struct SessionRow<'a> {
     title: &'a str,
     kind: SessionKind,
     status: SessionStatus,
-    meta: &'a str,
+    context: &'a str,
+    time: &'a str,
+    branch: &'a str,
+    provider: Option<Provider>,
     selected: bool,
 }
 
 impl<'a> SessionRow<'a> {
-    pub const HEIGHT: f32 = 44.0;
+    pub const HEIGHT: f32 = 70.0;
 
     pub fn new(title: &'a str, kind: SessionKind, status: SessionStatus) -> Self {
         Self {
             title,
             kind,
             status,
-            meta: "",
+            context: "",
+            time: "",
+            branch: "",
+            provider: None,
             selected: false,
         }
     }
 
-    pub fn meta(mut self, meta: &'a str) -> Self {
-        self.meta = meta;
+    // the faint line above the title, which turns amber or red when the session needs attention
+    pub fn context(mut self, context: &'a str) -> Self {
+        self.context = context;
+        self
+    }
+
+    pub fn time(mut self, time: &'a str) -> Self {
+        self.time = time;
+        self
+    }
+
+    pub fn branch(mut self, branch: &'a str) -> Self {
+        self.branch = branch;
+        self
+    }
+
+    // shows the agent's own logo in place of the session type icon
+    pub fn provider(mut self, provider: Provider) -> Self {
+        self.provider = Some(provider);
         self
     }
 
@@ -50,52 +80,133 @@ impl<'a> SessionRow<'a> {
                 self.selected,
                 Spring::SMOOTH,
             );
-            let fill =
-                p.bg.gamma_multiply(0.0)
-                    .lerp_to_gamma(p.hover, t)
-                    .lerp_to_gamma(p.active, selected);
+            let fill = Color32::TRANSPARENT
+                .lerp_to_gamma(theme::tint(p, 0.05), t)
+                .lerp_to_gamma(theme::tint(p, 0.10), selected);
             ui.painter()
-                .rect_filled(rect, CornerRadius::same(radius::MD), fill);
+                .rect_filled(rect, CornerRadius::same(radius::LG), fill);
 
-            let inner = rect.shrink2(Vec2::new(space::SM + 2.0, space::XS + 2.0));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                pos2(inner.min.x, inner.center().y - 6.0),
-                Vec2::splat(12.0),
-            )));
-            StatusDot::new(self.status).show(&mut child);
+            let inner = rect.shrink2(Vec2::new(space::MD, 11.0));
+            let small = font::regular(text::SM + 1.0);
+            // each line sits on its own spot, so the title gets room above and below it
+            let lines = [inner.top() + 7.0, inner.top() + 25.0, inner.bottom() - 7.0];
+            let row = |i: f32| lines[i as usize];
 
-            let text_x = inner.min.x + 12.0 + space::SM;
-            let badge_w = 56.0;
-            let max_title = inner.max.x - text_x - badge_w;
-            let title = ui.painter().layout(
-                self.title.to_owned(),
-                font::medium(text::MD),
-                p.text,
-                f32::INFINITY,
+            let time =
+                ui.painter()
+                    .layout_no_wrap(self.time.to_owned(), small.clone(), p.text_faint);
+            let time_w = time.size().x;
+            ui.painter().galley(
+                pos2(inner.right() - time_w, row(0.0) - time.size().y / 2.0),
+                time,
+                p.text_faint,
             );
-            let title_pos = pos2(text_x, inner.min.y);
-            ui.painter()
-                .with_clip_rect(Rect::from_min_size(title_pos, Vec2::new(max_title, 18.0)))
-                .galley(title_pos, title, p.text);
-            ui.painter().text(
-                pos2(text_x, inner.max.y),
-                Align2::LEFT_BOTTOM,
-                self.meta,
-                font::regular(text::SM),
+            let context = elided(
+                ui,
+                self.context,
+                small.clone(),
+                context_color(p, self.status),
+                inner.width() - time_w - space::SM,
+            );
+            ui.painter().galley(
+                pos2(inner.left(), row(0.0) - context.size().y / 2.0),
+                context,
                 p.text_faint,
             );
 
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(Rect::from_min_max(
-                        pos2(inner.max.x - badge_w, inner.min.y),
-                        pos2(inner.max.x, inner.min.y + 18.0),
-                    ))
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            let title = elided(
+                ui,
+                self.title,
+                font::medium(text::MD + 1.0),
+                p.text,
+                inner.width(),
             );
-            Badge::kind(self.kind).show(&mut child);
+            ui.painter().galley(
+                pos2(inner.left(), row(1.0) - title.size().y / 2.0),
+                title,
+                p.text,
+            );
+
+            let mark_center = pos2(inner.left() + icon::SM / 2.0, row(2.0));
+            if let Some(provider) = self.provider {
+                let color = match self.status {
+                    SessionStatus::Done | SessionStatus::Idle => {
+                        provider_color(provider, p.text_faint)
+                    }
+                    status => status_color(p, status),
+                };
+                provider_mark(ui.painter(), mark_center, icon::SM, provider, color);
+            } else {
+                let glyph = match self.kind {
+                    SessionKind::Agent => icons::ROBOT,
+                    SessionKind::Shell => icons::TERMINAL,
+                    SessionKind::Task => icons::PLAY,
+                };
+                ui.painter().text(
+                    mark_center,
+                    Align2::CENTER_CENTER,
+                    glyph,
+                    font::icon(icon::SM),
+                    status_color(p, self.status),
+                );
+            }
+            if !self.branch.is_empty() {
+                let x = inner.left() + icon::SM + space::SM;
+                ui.painter().text(
+                    pos2(x + icon::SM / 2.0, row(2.0)),
+                    Align2::CENTER_CENTER,
+                    icons::GIT_BRANCH,
+                    font::icon(icon::SM),
+                    p.text_faint,
+                );
+                let branch_x = x + icon::SM + space::XS;
+                let branch = elided(
+                    ui,
+                    self.branch,
+                    small,
+                    p.text_faint,
+                    inner.right() - branch_x,
+                );
+                ui.painter().galley(
+                    pos2(branch_x, row(2.0) - branch.size().y / 2.0),
+                    branch,
+                    p.text_faint,
+                );
+            }
         }
 
-        response.on_hover_cursor(CursorIcon::PointingHand)
+        response
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(format!("{} · {}", self.kind.label(), self.status.label()))
     }
+}
+
+// the type icon only takes a colour when the session wants attention, otherwise it stays quiet
+fn status_color(p: &Palette, status: SessionStatus) -> Color32 {
+    match status {
+        SessionStatus::Running => p.accent,
+        SessionStatus::Waiting => p.warning,
+        SessionStatus::Failed => p.danger,
+        SessionStatus::Done | SessionStatus::Idle => p.text_faint,
+    }
+}
+
+fn context_color(p: &Palette, status: SessionStatus) -> Color32 {
+    match status {
+        SessionStatus::Waiting => p.warning,
+        SessionStatus::Failed => p.danger,
+        _ => p.text_faint,
+    }
+}
+
+// one line that ends in an ellipsis instead of being cut through a letter
+fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = TextWrapping {
+        max_width: width.max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.painter().layout_job(job)
 }

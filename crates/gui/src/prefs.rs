@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use mux_core::protocol;
+use mux_core::protocol::{self, AgentSettings};
+use mux_core::{Access, Provider};
 use mux_ui::motion;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +44,28 @@ pub struct Prefs {
     // on windows, the wsl distribution the server runs in, or none to run it on windows itself
     #[serde(default)]
     pub wsl: Option<String>,
+    #[serde(default)]
+    pub new_agent: NewAgent,
+}
+
+// what a new agent starts with, before anything is picked in its composer
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NewAgent {
+    pub provider: Provider,
+    // a model of that agent, or none for the one its cli starts with
+    pub model: Option<String>,
+    pub access: Access,
+}
+
+impl NewAgent {
+    pub fn settings(&self) -> AgentSettings {
+        AgentSettings {
+            provider: self.provider,
+            model: self.model.clone(),
+            access: self.access,
+            ..AgentSettings::default()
+        }
+    }
 }
 
 impl Prefs {

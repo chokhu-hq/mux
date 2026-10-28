@@ -1,6 +1,6 @@
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Sense, UiBuilder, pos2, vec2};
-use mux_core::Provider;
 use mux_core::protocol::{UsageDay, UsageWindow};
+use mux_core::{Access, Provider};
 use mux_ui::theme::{self, font, icon, space, text};
 use mux_ui::{IconButton, Segmented, TooltipExt, icons};
 
@@ -50,6 +50,7 @@ pub struct Page<'a> {
     pub tokens: Option<(i64, Vec<UsageDay>)>,
     // on windows, the wsl distributions the server could run in instead
     pub distros: Option<Vec<String>>,
+    pub models: crate::sessions::Models,
 }
 
 impl Page<'_> {
@@ -112,6 +113,7 @@ impl Page<'_> {
                         self.blur,
                         &self.agents,
                         self.distros.as_deref(),
+                        &self.models,
                     ),
                     Tab::Usage => {
                         crate::token_usage::show(ui, self.tokens.as_ref());
@@ -169,11 +171,13 @@ fn general(
     blur: bool,
     agents: &[(Provider, bool)],
     distros: Option<&[String]>,
+    models: &crate::sessions::Models,
 ) {
     let p = theme::palette(ui);
     if let Some(distros) = distros {
         server(ui, prefs, distros);
     }
+    new_agents(ui, prefs, models);
     section(ui, "Appearance", |ui| {
         setting(ui, "Theme", "Follow the system, or always use one", |ui| {
             Segmented::new(
@@ -336,6 +340,109 @@ fn server(ui: &mut egui::Ui, prefs: &mut Prefs, distros: &[String]) {
                             .clicked()
                         {
                             prefs.wsl = Some(distro.clone());
+                        }
+                    }
+                });
+        });
+    });
+}
+
+// what a new agent starts with, so the composer is already set the way someone usually works
+fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Models) {
+    let defaults = &mut prefs.new_agent;
+    section(ui, "New agents", |ui| {
+        setting(
+            ui,
+            "Agent",
+            "Which coding agent a new chat starts with",
+            |ui| {
+                let before = defaults.provider;
+                Segmented::new(
+                    &mut defaults.provider,
+                    &Provider::ALL.map(|provider| (provider, provider.label())),
+                )
+                .show(ui);
+                // a model belongs to one agent, so switching agent goes back to that agent's own default
+                if defaults.provider != before {
+                    defaults.model = None;
+                }
+            },
+        );
+        divider(ui);
+        let list = models.get(&defaults.provider);
+        let default_name = list
+            .and_then(|l| l.iter().find(|m| m.is_default).or(l.first()))
+            .map(|m| m.name.clone());
+        setting(
+            ui,
+            "Model",
+            "Any chat can still pick another in its composer",
+            |ui| {
+                let Some(list) = list else {
+                    mux_ui::Button::new("Loading…")
+                        .size(mux_ui::Size::Sm)
+                        .enabled(false)
+                        .show(ui);
+                    return;
+                };
+                let current = match &defaults.model {
+                    Some(id) => list
+                        .iter()
+                        .find(|m| &m.id == id)
+                        .map_or(id.clone(), |m| m.name.clone()),
+                    None => "Default".to_owned(),
+                };
+                let button = mux_ui::Button::new(current).size(mux_ui::Size::Sm).show(ui);
+                egui::Popup::menu(&button)
+                    .align(egui::RectAlign::BOTTOM_END)
+                    .gap(space::XS)
+                    .show(|ui| {
+                        ui.set_width(260.0);
+                        let detail = default_name.as_deref().unwrap_or_default();
+                        if mux_ui::MenuItem::new("Default")
+                            .detail(detail)
+                            .checked(defaults.model.is_none())
+                            .show(ui)
+                            .clicked()
+                        {
+                            defaults.model = None;
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for model in list {
+                                    let chosen =
+                                        defaults.model.as_deref() == Some(model.id.as_str());
+                                    if mux_ui::MenuItem::new(&model.name)
+                                        .checked(chosen)
+                                        .show(ui)
+                                        .clicked()
+                                    {
+                                        defaults.model = Some(model.id.clone());
+                                    }
+                                }
+                            });
+                    });
+            },
+        );
+        divider(ui);
+        setting(ui, "Permissions", defaults.access.description(), |ui| {
+            let button = mux_ui::Button::new(defaults.access.label())
+                .size(mux_ui::Size::Sm)
+                .show(ui);
+            egui::Popup::menu(&button)
+                .align(egui::RectAlign::BOTTOM_END)
+                .gap(space::XS)
+                .show(|ui| {
+                    ui.set_width(320.0);
+                    for access in Access::ALL {
+                        if mux_ui::MenuItem::new(access.label())
+                            .detail(access.description())
+                            .checked(defaults.access == access)
+                            .show(ui)
+                            .clicked()
+                        {
+                            defaults.access = access;
                         }
                     }
                 });

@@ -122,6 +122,10 @@ pub struct Sessions {
     // agents that just finished, failed or started waiting, for the app to point out
     alerts: Vec<Alert>,
     pub outbox: Vec<ClientMsg>,
+    // what each session asked for should start with, in the order the server confirms them
+    creating: std::collections::VecDeque<Option<mux_core::protocol::AgentSettings>>,
+    // the settings a new agent starts with, chosen in settings
+    pub agent_defaults: mux_core::protocol::AgentSettings,
 }
 
 impl Sessions {
@@ -209,6 +213,10 @@ impl Sessions {
                 self.loaded = true;
             }
             ServerMsg::Created { id } => {
+                // a new agent takes the defaults from settings before its first message
+                if let Some(Some(settings)) = self.creating.pop_front() {
+                    self.outbox.push(ClientMsg::AgentConfigure { id, settings });
+                }
                 self.selected = Some(id);
                 self.picked = true;
             }
@@ -306,6 +314,10 @@ impl Sessions {
         self.tokens.as_ref()
     }
 
+    pub fn models(&self) -> &Models {
+        &self.models
+    }
+
     pub fn usage(&self, provider: Provider) -> &[UsageWindow] {
         self.usage.get(&provider).map_or(&[], Vec::as_slice)
     }
@@ -359,6 +371,13 @@ impl Sessions {
             .selected
             .and_then(|id| self.locate(id))
             .map(|(g, _)| self.groups[g].id);
+        self.request(group, title, kind);
+    }
+
+    // every new session goes through here, so the server's confirmations line up with what was asked for
+    fn request(&mut self, group: Option<u64>, title: &str, kind: SessionKind) {
+        let settings = (kind == SessionKind::Agent).then(|| self.agent_defaults.clone());
+        self.creating.push_back(settings);
         self.outbox.push(ClientMsg::CreateSession {
             group,
             title: title.to_owned(),
@@ -651,11 +670,9 @@ impl Sessions {
         for action in actions {
             match action {
                 Action::Toggle(id) => self.outbox.push(ClientMsg::ToggleGroup { id }),
-                Action::NewAgent(group) => self.outbox.push(ClientMsg::CreateSession {
-                    group: Some(group),
-                    title: "New agent".to_owned(),
-                    kind: SessionKind::Agent,
-                }),
+                Action::NewAgent(group) => {
+                    self.request(Some(group), "New agent", SessionKind::Agent)
+                }
                 Action::StartRename(id, name) => self.renaming = Some((id, name)),
                 Action::Rename(id, name) => self.outbox.push(ClientMsg::RenameGroup { id, name }),
                 Action::EndRename => self.renaming = None,
@@ -1269,6 +1286,30 @@ fn diff_lines(diff: &str) -> Vec<DiffLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_agents_start_with_the_defaults_from_settings() {
+        let mut sessions = Sessions::default();
+        sessions.agent_defaults = mux_core::protocol::AgentSettings {
+            provider: Provider::Claude,
+            model: Some("opus".into()),
+            ..Default::default()
+        };
+        sessions.create("New agent", SessionKind::Agent);
+        sessions.create("Shell", SessionKind::Shell);
+        sessions.outbox.clear();
+        sessions.apply(ServerMsg::Created { id: 7 });
+        sessions.apply(ServerMsg::Created { id: 8 });
+        // only the agent is configured, and a shell confirmed after it doesn't take its settings
+        assert_eq!(sessions.outbox.len(), 1);
+        assert!(matches!(
+            &sessions.outbox[0],
+            ClientMsg::AgentConfigure { id: 7, settings }
+                if settings.provider == Provider::Claude
+                    && settings.model.as_deref() == Some("opus")
+                    && settings.access == mux_core::Access::Auto
+        ));
+    }
 
     #[test]
     fn finished_turns_that_touch_several_files_get_a_summary() {

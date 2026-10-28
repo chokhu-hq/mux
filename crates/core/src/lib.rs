@@ -102,8 +102,8 @@ impl Provider {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Access {
     Supervised,
-    #[default]
     AutoEdits,
+    #[default]
     Auto,
     Full,
 }

@@ -183,7 +183,7 @@ impl App {
         // the server's paths are translated for this app once it's known to run in wsl
         #[cfg(windows)]
         mux_core::paths::set_wsl(prefs.wsl.clone());
-        let app = Self {
+        let mut app = Self {
             palette: CommandPalette::default(),
             sidebar: Sidebar::default(),
             sessions: Sessions::default(),
@@ -216,6 +216,7 @@ impl App {
             distros: None,
         };
         app.prefs.apply(ctx);
+        app.sessions.agent_defaults = app.prefs.new_agent.settings();
         app
     }
 
@@ -762,6 +763,7 @@ impl App {
             usage: Provider::ALL.map(|p| (p, self.sessions.usage(p).to_vec())),
             tokens: self.sessions.tokens().cloned(),
             distros,
+            models: self.sessions.models().clone(),
         }
         .show(ui);
         if close {
@@ -769,6 +771,7 @@ impl App {
         }
         if prefs != self.prefs {
             let moved = prefs.wsl != self.prefs.wsl;
+            self.sessions.agent_defaults = prefs.new_agent.settings();
             prefs.apply(&ctx);
             prefs.save();
             self.prefs = prefs;
@@ -786,6 +789,7 @@ impl App {
         );
         mux_core::paths::set_wsl(self.prefs.wsl.clone());
         self.sessions = Sessions::default();
+        self.sessions.agent_defaults = self.prefs.new_agent.settings();
         self.installed = None;
         self.link = Link::start(ctx);
     }

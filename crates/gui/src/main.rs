@@ -684,7 +684,10 @@ impl App {
             UiBuilder::new()
                 .max_rect(Rect::from_min_max(
                     pos2(left, bar.top()),
-                    pos2(bar.right() - space::MD, bar.bottom()),
+                    pos2(
+                        bar.right() - space::MD - window::titlebar_trailing_inset(),
+                        bar.bottom(),
+                    ),
                 ))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );

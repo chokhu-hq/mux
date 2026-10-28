@@ -240,8 +240,11 @@ pub(super) fn ring(ui: &Ui, center: egui::Pos2, used: f32) {
 
 pub(super) fn bar(ui: &Ui, rect: Rect, used: f32) {
     let p = theme::palette(ui);
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(radius::FULL), theme::tint(p, 0.10));
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(radius::FULL),
+        theme::tint(p, theme::fill::TRACK),
+    );
     if used > 0.0 {
         let fill = Rect::from_min_size(
             rect.min,

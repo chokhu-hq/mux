@@ -46,6 +46,9 @@ pub struct Prefs {
     pub wsl: Option<String>,
     #[serde(default)]
     pub new_agent: NewAgent,
+    // terminal text size, or none for the default
+    #[serde(default)]
+    pub terminal_text: Option<f32>,
 }
 
 // what a new agent starts with, before anything is picked in its composer
@@ -69,6 +72,10 @@ impl NewAgent {
 }
 
 impl Prefs {
+    pub fn terminal_size(&self) -> f32 {
+        self.terminal_text.unwrap_or(mux_ui::theme::text::MONO)
+    }
+
     pub fn load() -> Self {
         std::fs::read(path())
             .ok()

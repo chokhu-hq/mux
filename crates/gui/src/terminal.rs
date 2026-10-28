@@ -51,14 +51,15 @@ impl Terminal {
         ui: &mut egui::Ui,
         id: u64,
         outbox: &mut Vec<ClientMsg>,
-    ) -> egui::Response {
+        size: f32,
+    ) -> (egui::Response, Option<f32>) {
         // the server answers terminal queries, so only clipboard writes matter here
         while let Ok(event) = self.events.try_recv() {
             if let Event::ClipboardStore(_, text) = event {
                 ui.ctx().copy_text(text);
             }
         }
-        let out = TerminalView::new(&self.term).show(ui);
+        let out = TerminalView::new(&self.term).font_size(size).show(ui);
         if !out.input.is_empty() {
             outbox.push(ClientMsg::Input {
                 id,
@@ -72,6 +73,6 @@ impl Terminal {
                 rows: size.num_lines,
             });
         }
-        out.response
+        (out.response, out.zoom)
     }
 }

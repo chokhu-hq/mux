@@ -33,7 +33,7 @@ impl<'a> TextInput<'a> {
         let id = ui.next_auto_id();
         let focused = ui.memory(|m| m.has_focus(id));
         let border = if focused { p.accent } else { p.border_strong };
-        TextEdit::singleline(self.value)
+        let response = TextEdit::singleline(self.value)
             .id(id)
             .hint_text(self.placeholder)
             .frame(
@@ -47,6 +47,8 @@ impl<'a> TextInput<'a> {
             .desired_width(width - 20.0)
             .show(ui)
             .response
-            .response
+            .response;
+        super::edit_menu(&response, self.value);
+        response
     }
 }

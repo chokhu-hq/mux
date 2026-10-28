@@ -542,29 +542,56 @@ fn claude_background_command_live() {
     let mut stop_sent = false;
     let mut saw_output = false;
     let task = loop {
-        assert!(Instant::now() < deadline, "the background command never stopped");
+        assert!(
+            Instant::now() < deadline,
+            "the background command never stopped"
+        );
         match recv(&mut stream) {
             ServerMsg::AgentItem {
-                item: AgentItem::Approval { id: approval, decision: None, title, detail },
+                item:
+                    AgentItem::Approval {
+                        id: approval,
+                        decision: None,
+                        title,
+                        detail,
+                    },
                 ..
             } => {
                 eprintln!("approval: {title} {detail}");
                 send(
                     &mut stream,
-                    ClientMsg::AgentDecide { id, approval, decision: Decision::Allow },
+                    ClientMsg::AgentDecide {
+                        id,
+                        approval,
+                        decision: Decision::Allow,
+                    },
                 );
             }
             ServerMsg::AgentBackground { tasks, .. } => {
                 for task in &tasks {
-                    eprintln!("background: {} {:?} {:?}", task.label, task.state, task.output.lines().last());
+                    eprintln!(
+                        "background: {} {:?} {:?}",
+                        task.label,
+                        task.state,
+                        task.output.lines().last()
+                    );
                 }
                 let Some(task) = tasks.into_iter().next() else {
                     continue;
                 };
-                if task.state == BackgroundState::Running && task.output.contains("start") && !stop_sent {
+                if task.state == BackgroundState::Running
+                    && task.output.contains("start")
+                    && !stop_sent
+                {
                     saw_output = true;
                     assert!(task.stoppable);
-                    send(&mut stream, ClientMsg::AgentStopBackground { id, task: task.id.clone() });
+                    send(
+                        &mut stream,
+                        ClientMsg::AgentStopBackground {
+                            id,
+                            task: task.id.clone(),
+                        },
+                    );
                     stop_sent = true;
                 }
                 if stop_sent && task.state != BackgroundState::Running {
@@ -576,6 +603,9 @@ fn claude_background_command_live() {
     };
     assert!(saw_output, "the output never reached the strip");
     assert_eq!(task.state, BackgroundState::Stopped);
-    assert!(!task.output.contains("end"), "it ran to the end instead of being stopped");
+    assert!(
+        !task.output.contains("end"),
+        "it ran to the end instead of being stopped"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

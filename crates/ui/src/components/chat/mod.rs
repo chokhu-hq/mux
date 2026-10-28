@@ -331,9 +331,19 @@ impl<'a> ChatView<'a> {
                                     }
                                 }
                                 ChatItem::Assistant(text) => {
-                                    if let Some(target) = markdown(ui, text) {
+                                    let shown = ui.scope(|ui| markdown(ui, text));
+                                    if let Some(target) = shown.inner {
                                         action = Some(ChatAction::OpenLink(target));
                                     }
+                                    let id = ui.make_persistent_id("reply-menu");
+                                    crate::components::area_menu(
+                                        ui,
+                                        shown.response.rect,
+                                        id,
+                                        |ui| {
+                                            crate::components::copy_item(ui, "Copy message", text);
+                                        },
+                                    );
                                 }
                                 ChatItem::Tool(tool) => cards::tool_call(ui, tool),
                                 ChatItem::Diff(diff) => {

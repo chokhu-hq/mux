@@ -222,6 +222,32 @@ fn general(
                 .show(ui);
             },
         );
+        divider(ui);
+        setting(
+            ui,
+            "Terminal text size",
+            "The zoom keys in a terminal change it too",
+            |ui| {
+                let size = prefs.terminal_size();
+                let mut next = size;
+                if IconButton::new(icons::PLUS, "Larger").show(ui).clicked() {
+                    next += 1.0;
+                }
+                ui.label(
+                    egui::RichText::new(format!("{size}"))
+                        .font(font::regular(text::MD))
+                        .color(p.text_muted),
+                );
+                if IconButton::new(icons::MINUS, "Smaller").show(ui).clicked() {
+                    next -= 1.0;
+                }
+                let next = next.clamp(mux_ui::TERMINAL_MIN_SIZE, mux_ui::TERMINAL_MAX_SIZE);
+                if next != size {
+                    let default = (next - text::MONO).abs() < 0.01;
+                    prefs.terminal_text = (!default).then_some(next);
+                }
+            },
+        );
     });
 
     section(ui, "Coding agents", |ui| {

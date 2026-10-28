@@ -7,7 +7,7 @@ use egui::{
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 
-use super::{hover_t, provider_color, provider_mark};
+use super::{TooltipExt, hover_t, provider_color, provider_mark};
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
 use crate::theme::{self, Palette, font, icon, radius, space, text};
@@ -95,6 +95,7 @@ impl<'a> SessionRow<'a> {
         let size = Vec2::new(ui.available_width(), Self::HEIGHT);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         response.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, self.title));
+        let mut cut = false;
 
         if ui.is_rect_visible(rect) {
             let t = hover_t(ui, &response);
@@ -105,8 +106,8 @@ impl<'a> SessionRow<'a> {
                 Spring::SMOOTH,
             );
             let fill = Color32::TRANSPARENT
-                .lerp_to_gamma(theme::tint(p, 0.05), t)
-                .lerp_to_gamma(theme::tint(p, 0.10), selected);
+                .lerp_to_gamma(theme::tint(p, theme::fill::HOVER), t)
+                .lerp_to_gamma(theme::tint(p, theme::fill::SELECTED), selected);
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(radius::LG), fill);
 
@@ -157,6 +158,7 @@ impl<'a> SessionRow<'a> {
                 p.text,
                 inner.width(),
             );
+            cut = title.elided;
             ui.painter().galley(
                 pos2(inner.left(), row(1.0) - title.size().y / 2.0),
                 title,
@@ -232,7 +234,13 @@ impl<'a> SessionRow<'a> {
             }
         }
 
-        response.on_hover_cursor(CursorIcon::PointingHand)
+        let response = response.on_hover_cursor(CursorIcon::PointingHand);
+        // everything else is already on the row, so only a title cut short needs a tooltip
+        if cut {
+            response.tip(self.title)
+        } else {
+            response
+        }
     }
 }
 

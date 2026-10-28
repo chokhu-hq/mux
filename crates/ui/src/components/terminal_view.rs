@@ -21,26 +21,42 @@ use crate::theme::{self, Palette, font, text};
 
 pub struct TerminalView<'a, L: EventListener> {
     term: &'a FairMutex<Term<L>>,
+    size: f32,
 }
+
+// the text size range zooming moves within, and how far one step goes
+pub const MIN_SIZE: f32 = 8.0;
+pub const MAX_SIZE: f32 = 32.0;
+const STEP: f32 = 1.0;
 
 pub struct TerminalResponse {
     pub response: Response,
     pub input: Vec<u8>,
     pub resize: Option<WindowSize>,
+    // a new text size asked for by zooming in or out, which the app keeps
+    pub zoom: Option<f32>,
 }
 
 impl<'a, L: EventListener> TerminalView<'a, L> {
     pub fn new(term: &'a FairMutex<Term<L>>) -> Self {
-        Self { term }
+        Self {
+            term,
+            size: text::MONO,
+        }
+    }
+
+    pub fn font_size(mut self, size: f32) -> Self {
+        self.size = size.clamp(MIN_SIZE, MAX_SIZE);
+        self
     }
 
     pub fn show(self, ui: &mut Ui) -> TerminalResponse {
         let p = theme::palette(ui);
         let fonts = Fonts {
-            regular: font::mono(text::MONO),
-            bold: font::mono_bold(text::MONO),
-            italic: font::mono_italic(text::MONO),
-            bold_italic: font::mono_bold_italic(text::MONO),
+            regular: font::mono(self.size),
+            bold: font::mono_bold(self.size),
+            italic: font::mono_italic(self.size),
+            bold_italic: font::mono_bold_italic(self.size),
         };
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| {
             (
@@ -76,6 +92,7 @@ impl<'a, L: EventListener> TerminalView<'a, L> {
             response,
             input: Vec::new(),
             resize: None,
+            zoom: None,
         };
         if term.columns() != cols || term.screen_lines() != lines {
             term.resize(TermSize::new(cols, lines));
@@ -94,6 +111,13 @@ impl<'a, L: EventListener> TerminalView<'a, L> {
             lines,
         };
         mouse(ui, &out.response, &mut term, &grid, &mut out.input);
+        // a program that asked for the mouse gets right clicks itself, unless shift is held as with selecting
+        let captured =
+            term.mode().intersects(TermMode::MOUSE_MODE) && !ui.input(|i| i.modifiers.shift);
+        if !captured {
+            menu(&out.response, &term);
+        }
+        out.zoom = zoom(ui, &out.response, focused, self.size);
         if focused {
             keyboard(ui, out.response.id, &mut term, &mut out.input);
         }
@@ -388,6 +412,51 @@ fn keyboard<L: EventListener>(ui: &Ui, id: egui::Id, term: &mut Term<L>, input: 
         term.scroll_display(Scroll::Bottom);
         term.selection = None;
     }
+}
+
+// the zoom keys change only the terminal's text while it has focus, and so does ctrl and the wheel over it
+fn zoom(ui: &Ui, response: &Response, focused: bool, size: f32) -> Option<f32> {
+    let mut next = size;
+    if focused {
+        ui.input_mut(|i| {
+            let command = |key| egui::KeyboardShortcut::new(Modifiers::COMMAND, key);
+            for key in [Key::Plus, Key::Equals] {
+                if i.consume_shortcut(&command(key)) {
+                    next += STEP;
+                }
+            }
+            if i.consume_shortcut(&command(Key::Minus)) {
+                next -= STEP;
+            }
+            if i.consume_shortcut(&command(Key::Num0)) {
+                next = text::MONO;
+            }
+        });
+    }
+    // egui turns ctrl and the wheel into a zoom factor rather than a scroll
+    let factor = ui.input(|i| i.zoom_delta());
+    if response.hovered() && factor != 1.0 {
+        next *= factor;
+    }
+    let next = (next * 2.0).round() / 2.0;
+    (next != size).then_some(next.clamp(MIN_SIZE, MAX_SIZE))
+}
+
+// copy what's selected and paste into the shell, on right click
+fn menu<L: EventListener>(response: &Response, term: &Term<L>) {
+    egui::Popup::context_menu(response).show(|ui| {
+        ui.set_min_width(180.0);
+        if let Some(text) = term.selection_to_string().filter(|t| !t.is_empty()) {
+            super::copy_item(ui, "Copy", &text);
+        }
+        // the terminal takes the keyboard first, so the paste reaches the shell as typed text
+        if super::MenuItem::new("Paste").show(ui).clicked() {
+            response.request_focus();
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            ui.close();
+        }
+    });
 }
 
 fn copy<L: EventListener>(ui: &Ui, term: &Term<L>) {

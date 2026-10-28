@@ -3,6 +3,7 @@ mod button;
 pub mod chat;
 mod chip;
 mod command_palette;
+mod context_menu;
 mod context_ring;
 mod empty_state;
 mod file_viewer;
@@ -28,6 +29,7 @@ pub use chip::Chip;
 pub use command_palette::{
     Choice, Command, CommandPalette, Destination, SHORTCUT as PALETTE_SHORTCUT,
 };
+pub use context_menu::{area_menu, copy_item, edit_menu};
 pub use context_ring::{ContextRing, tokens as short_tokens};
 pub use empty_state::EmptyState;
 pub use file_viewer::{FileView, FileViewAction, link_target, open_in_editor};
@@ -42,7 +44,9 @@ pub use segmented::Segmented;
 pub use session_row::SessionRow;
 pub use sidebar::{SHORTCUT as SIDEBAR_SHORTCUT, Sidebar};
 pub use status_dot::StatusDot;
-pub use terminal_view::{TerminalResponse, TerminalView};
+pub use terminal_view::{
+    MAX_SIZE as TERMINAL_MAX_SIZE, MIN_SIZE as TERMINAL_MIN_SIZE, TerminalResponse, TerminalView,
+};
 pub use text_input::TextInput;
 pub use tooltip::TooltipExt;
 pub use usage_ring::{UsageRing, usage_rows};

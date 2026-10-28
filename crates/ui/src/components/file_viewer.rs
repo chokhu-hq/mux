@@ -528,7 +528,7 @@ fn paint_diff_rows(
         let fill = match row.kind {
             RowKind::Add => p.success.gamma_multiply(0.12),
             RowKind::Remove => p.danger.gamma_multiply(0.12),
-            RowKind::Hunk => theme::tint(p, 0.04),
+            RowKind::Hunk => theme::tint(p, theme::fill::HOVER),
             RowKind::Context => continue,
         };
         let (Some(&first), last) = (line_rows.get(i), line_rows.get(i + 1)) else {

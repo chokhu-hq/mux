@@ -167,7 +167,7 @@ impl<'a> Composer<'a> {
                     .max_height(180.0)
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        ui.add(
+                        let field = ui.add(
                             TextEdit::multiline(self.draft)
                                 .id(edit_id)
                                 .frame(Frame::NONE)
@@ -177,6 +177,7 @@ impl<'a> Composer<'a> {
                                 .desired_width(f32::INFINITY)
                                 .margin(Margin::ZERO),
                         );
+                        crate::components::edit_menu(&field, self.draft);
                     });
                 ui.add_space(space::SM);
                 ui.horizontal(|ui| {
@@ -334,7 +335,7 @@ fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response 
         (_, true) => (p.text, p.bg),
         // filled in the text colour like t3 code, so it reads as the one thing to press
         (true, false) => (p.text.gamma_multiply(0.9).lerp_to_gamma(p.text, t), p.bg),
-        (false, false) => (theme::tint(p, 0.12), p.text_faint),
+        (false, false) => (theme::tint(p, theme::fill::DISABLED), p.text_faint),
     };
     // grows a touch under the pointer and gives a little when pressed
     let rect = rect

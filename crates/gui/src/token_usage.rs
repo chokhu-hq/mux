@@ -133,7 +133,7 @@ fn tiles(ui: &mut egui::Ui, t: &TokenTotals) {
             let (rect, _) = ui.allocate_exact_size(vec2(width, 76.0), Sense::hover());
             let rounding = CornerRadius::same(theme::radius::LG);
             ui.painter()
-                .rect_filled(rect, rounding, theme::tint(p, 0.03));
+                .rect_filled(rect, rounding, theme::tint(p, theme::fill::CARD));
             ui.painter().rect_stroke(
                 rect,
                 rounding,
@@ -563,7 +563,7 @@ fn models(ui: &mut egui::Ui, days: &[&UsageDay], total: u64) {
         painter.rect_filled(
             bar,
             CornerRadius::same(theme::radius::FULL),
-            theme::tint(p, 0.08),
+            theme::tint(p, theme::fill::TRACK),
         );
         painter.rect_filled(
             Rect::from_min_size(bar.min, vec2((bar.width() * share).max(2.0), bar.height())),

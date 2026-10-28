@@ -254,7 +254,7 @@ fn choice(ui: &mut Ui, index: usize, label: &str, detail: &str, on: bool, multip
         motion::Spring::QUICK,
     );
     let fill = Color32::TRANSPARENT
-        .lerp_to_gamma(theme::tint(p, 0.05), t)
+        .lerp_to_gamma(theme::tint(p, theme::fill::HOVER), t)
         .lerp_to_gamma(p.accent.gamma_multiply(0.12), shown);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(radius::MD), fill);

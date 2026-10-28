@@ -87,6 +87,8 @@ enum Action {
     StartDrag(Drag),
     StartGroupDrag(Drag),
     NewAgent(u64),
+    NewShell(u64),
+    Split(u64),
 }
 
 pub enum Event {
@@ -99,6 +101,12 @@ pub struct Alert {
     pub id: u64,
     pub title: String,
     pub event: Event,
+}
+
+struct Creating {
+    settings: Option<mux_core::protocol::AgentSettings>,
+    // opened on the right instead of taking over the main view
+    split: bool,
 }
 
 #[derive(Default)]
@@ -125,7 +133,9 @@ pub struct Sessions {
     alerts: Vec<Alert>,
     pub outbox: Vec<ClientMsg>,
     // what each session asked for should start with, in the order the server confirms them
-    creating: std::collections::VecDeque<Option<mux_core::protocol::AgentSettings>>,
+    creating: std::collections::VecDeque<Creating>,
+    // the terminal shown on the right beside the selected session
+    pub split: Option<u64>,
     // the settings a new agent starts with, chosen in settings
     pub agent_defaults: mux_core::protocol::AgentSettings,
 }
@@ -164,8 +174,56 @@ impl Sessions {
     }
 
     pub fn select(&mut self, id: u64) {
+        // a session can only be shown in one place, so picking the one on the right moves it to the main view
+        if self.split == Some(id) {
+            self.split = None;
+        }
         self.selected = Some(id);
         self.picked = true;
+    }
+
+    // shows a terminal for the selected session's project on the right, or hides the one that's there
+    pub fn toggle_split_terminal(&mut self) {
+        if self.split.take().is_some() {
+            return;
+        }
+        let Some((g, _)) = self.selected.and_then(|id| self.locate(id)) else {
+            return;
+        };
+        let group = &self.groups[g];
+        let shell = group
+            .sessions
+            .iter()
+            .find(|s| s.kind == SessionKind::Shell && Some(s.id) != self.selected)
+            .map(|s| s.id);
+        match shell {
+            Some(id) => self.split = Some(id),
+            None => {
+                let group = group.id;
+                self.request(Some(group), "Shell", SessionKind::Shell, true);
+            }
+        }
+    }
+
+    // the session for the pane on the right, which may still be fading out after it was closed
+    pub fn split_session(
+        &mut self,
+        id: u64,
+    ) -> Option<(&SessionInfo, &mut Local, &mut Vec<ClientMsg>)> {
+        let Some(info) = self
+            .groups
+            .iter()
+            .flat_map(|g| &g.sessions)
+            .find(|s| s.id == id)
+        else {
+            // removed elsewhere, so there's nothing left to show
+            if self.split == Some(id) {
+                self.split = None;
+            }
+            return None;
+        };
+        let local = self.locals.entry(id).or_default();
+        Some((info, local, &mut self.outbox))
     }
 
     pub fn selected_id(&self) -> Option<u64> {
@@ -215,9 +273,14 @@ impl Sessions {
                 self.loaded = true;
             }
             ServerMsg::Created { id } => {
+                let creating = self.creating.pop_front();
                 // a new agent takes the defaults from settings before its first message
-                if let Some(Some(settings)) = self.creating.pop_front() {
+                if let Some(settings) = creating.as_ref().and_then(|c| c.settings.clone()) {
                     self.outbox.push(ClientMsg::AgentConfigure { id, settings });
+                }
+                if creating.is_some_and(|c| c.split) {
+                    self.split = Some(id);
+                    return;
                 }
                 self.selected = Some(id);
                 self.picked = true;
@@ -378,13 +441,13 @@ impl Sessions {
             .selected
             .and_then(|id| self.locate(id))
             .map(|(g, _)| self.groups[g].id);
-        self.request(group, title, kind);
+        self.request(group, title, kind, false);
     }
 
     // every new session goes through here, so the server's confirmations line up with what was asked for
-    fn request(&mut self, group: Option<u64>, title: &str, kind: SessionKind) {
+    fn request(&mut self, group: Option<u64>, title: &str, kind: SessionKind, split: bool) {
         let settings = (kind == SessionKind::Agent).then(|| self.agent_defaults.clone());
-        self.creating.push_back(settings);
+        self.creating.push_back(Creating { settings, split });
         self.outbox.push(ClientMsg::CreateSession {
             group,
             title: title.to_owned(),
@@ -419,6 +482,9 @@ impl Sessions {
     }
 
     fn remove(&mut self, id: u64) {
+        if self.split == Some(id) {
+            self.split = None;
+        }
         if self.selected == Some(id)
             && let Some((g, i)) = self.locate(id)
         {
@@ -509,6 +575,23 @@ impl Sessions {
                     }));
                 }
                 header.context_menu(|ui| {
+                    if MenuItem::new("New agent")
+                        .icon(icons::ROBOT)
+                        .show(ui)
+                        .clicked()
+                    {
+                        actions.push(Action::NewAgent(group.id));
+                        ui.close();
+                    }
+                    if MenuItem::new("New shell")
+                        .icon(icons::TERMINAL_WINDOW)
+                        .show(ui)
+                        .clicked()
+                    {
+                        actions.push(Action::NewShell(group.id));
+                        ui.close();
+                    }
+                    folder_items(ui, group.path.as_deref());
                     if MenuItem::new("Rename")
                         .icon(icons::PENCIL_SIMPLE)
                         .show(ui)
@@ -588,14 +671,7 @@ impl Sessions {
                             if let Some(summary) = &session.summary {
                                 row = row.changes(summary.added, summary.removed);
                             }
-                            let branch = session.branch.as_deref().or(group.branch.as_deref());
-                            // the card waits until the pointer settles, and never shows mid drag
-                            let row = row.show(ui);
-                            if dragging.is_some() {
-                                row
-                            } else {
-                                row.tip_ui(|ui| session_card(ui, session, group, branch, &model))
-                            }
+                            row.show(ui)
                         })
                         .inner;
                     if row.clicked() {
@@ -611,6 +687,21 @@ impl Sessions {
                         }));
                     }
                     row.context_menu(|ui| {
+                        folder_items(ui, session.worktree.as_deref().or(group.path.as_deref()));
+                        if let Some(branch) = session.branch.as_ref().or(group.branch.as_ref()) {
+                            mux_ui::copy_item(ui, "Copy branch name", branch);
+                        }
+                        let terminal = session.kind != SessionKind::Agent;
+                        if terminal
+                            && self.selected != Some(session.id)
+                            && MenuItem::new("Open on the right")
+                                .icon(icons::SIDEBAR_SIMPLE)
+                                .show(ui)
+                                .clicked()
+                        {
+                            actions.push(Action::Split(session.id));
+                            ui.close();
+                        }
                         if MenuItem::new("Delete")
                             .icon(icons::TRASH)
                             .danger()
@@ -678,17 +769,18 @@ impl Sessions {
             match action {
                 Action::Toggle(id) => self.outbox.push(ClientMsg::ToggleGroup { id }),
                 Action::NewAgent(group) => {
-                    self.request(Some(group), "New agent", SessionKind::Agent)
+                    self.request(Some(group), "New agent", SessionKind::Agent, false)
+                }
+                Action::Split(id) => self.split = Some(id),
+                Action::NewShell(group) => {
+                    self.request(Some(group), "Shell", SessionKind::Shell, false)
                 }
                 Action::StartRename(id, name) => self.renaming = Some((id, name)),
                 Action::Rename(id, name) => self.outbox.push(ClientMsg::RenameGroup { id, name }),
                 Action::EndRename => self.renaming = None,
                 Action::ChangeFolder(id) => self.set_group_folder(id),
                 Action::RemoveGroup(id) => self.outbox.push(ClientMsg::DeleteGroup { id }),
-                Action::Select(id) => {
-                    self.selected = Some(id);
-                    self.picked = true;
-                }
+                Action::Select(id) => self.select(id),
                 Action::Remove(id) => self.remove(id),
                 Action::StartDrag(drag) => self.drag = Some(drag),
                 Action::StartGroupDrag(drag) => self.group_drag = Some(drag),
@@ -789,6 +881,22 @@ fn group_gap(blocks: &[(f32, f32)], y: f32, from: Option<usize>) -> Option<usize
         .then_some(gap)
 }
 
+// the folder a project or session works in, to copy or open in the file manager
+fn folder_items(ui: &mut egui::Ui, folder: Option<&str>) {
+    let Some(folder) = folder else {
+        return;
+    };
+    mux_ui::copy_item(ui, "Copy folder path", folder);
+    if MenuItem::new("Open folder")
+        .icon(icons::FOLDER_OPEN)
+        .show(ui)
+        .clicked()
+    {
+        mux_ui::chat::open_externally(&mux_core::paths::local(folder));
+        ui.close();
+    }
+}
+
 // the native dialog blocks this frame, which is fine for a one-off pick and required on macos
 pub fn pick_files(start: Option<&str>) -> Vec<String> {
     let mut dialog = rfd::FileDialog::new().set_title("Attach files");
@@ -842,176 +950,6 @@ fn model_name(models: &Models, session: &SessionInfo) -> String {
             .or_else(|| list.iter().find(|m| id.is_empty() && m.is_default))
     })
     .map_or_else(|| id.to_owned(), |m| m.name.clone())
-}
-
-// everything worth knowing about a session at a glance, shown when its row is hovered
-fn session_card(
-    ui: &mut egui::Ui,
-    session: &SessionInfo,
-    group: &GroupInfo,
-    branch: Option<&str>,
-    model: &str,
-) {
-    let p = theme::palette(ui);
-    ui.set_width(300.0);
-    ui.spacing_mut().item_spacing.y = 0.0;
-    ui.spacing_mut().interact_size.y = 0.0;
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(&session.title)
-                .font(theme::font::medium(theme::text::MD + 1.0))
-                .color(p.text),
-        )
-        .wrap(),
-    );
-    ui.add_space(theme::space::XS);
-    let (color, label) = match session.status {
-        SessionStatus::Running => (p.accent, "Working"),
-        SessionStatus::Waiting => (p.warning, "Needs your input"),
-        SessionStatus::Failed => (p.danger, "Failed"),
-        SessionStatus::Done if session.kind == SessionKind::Agent => (p.success, "Finished"),
-        SessionStatus::Done => (p.text_faint, "Exited"),
-        SessionStatus::Idle => (p.text_faint, "Not started"),
-    };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::space::SM;
-        let (dot, _) = ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
-        ui.painter().circle_filled(dot.center(), 3.5, color);
-        let when = ago(session.updated);
-        let text = if when.is_empty() || when == "now" {
-            label.to_owned()
-        } else {
-            format!("{label} · {when} ago")
-        };
-        ui.label(
-            egui::RichText::new(text)
-                .font(theme::font::regular(theme::text::SM + 1.0))
-                .color(p.text_muted),
-        );
-    });
-    ui.add_space(theme::space::MD);
-    let line = ui.available_rect_before_wrap();
-    ui.painter()
-        .hline(line.x_range(), line.top(), Stroke::new(1.0, p.border));
-    ui.add_space(theme::space::SM);
-
-    let mut facts: Vec<(&str, String)> = Vec::new();
-    let folder = session
-        .worktree
-        .as_deref()
-        .or(group.path.as_deref())
-        .map(mux_core::display_path)
-        .unwrap_or_else(|| "No folder".to_owned());
-    facts.push(("Project", group.name.clone()));
-    facts.push((
-        if session.worktree.is_some() {
-            "Worktree"
-        } else {
-            "Folder"
-        },
-        folder,
-    ));
-    if let Some(branch) = branch {
-        facts.push(("Branch", branch.to_owned()));
-    }
-    match session.kind {
-        SessionKind::Agent => {
-            let agent = session.provider.label();
-            facts.push((
-                "Agent",
-                if model.is_empty() {
-                    agent.to_owned()
-                } else {
-                    format!("{agent} · {model}")
-                },
-            ));
-            if let Some(summary) = &session.summary {
-                facts.push(("Messages", summary.messages.to_string()));
-                if summary.files > 0 {
-                    let files = if summary.files == 1 { "file" } else { "files" };
-                    facts.push((
-                        "Changes",
-                        format!(
-                            "{} {files}, +{} −{}",
-                            summary.files, summary.added, summary.removed
-                        ),
-                    ));
-                }
-                if let Some(context) = summary.context.filter(|c| c.window > 0) {
-                    let share = context.used as f32 / context.window as f32;
-                    facts.push((
-                        "Context",
-                        format!(
-                            "{} of {} · {}%",
-                            mux_ui::short_tokens(context.used),
-                            mux_ui::short_tokens(context.window),
-                            (share * 100.0).round() as u32
-                        ),
-                    ));
-                }
-            }
-        }
-        SessionKind::Shell | SessionKind::Task if !session.meta.is_empty() => {
-            let label = if session.kind == SessionKind::Task {
-                "Command"
-            } else {
-                "Running in"
-            };
-            facts.push((label, session.meta.clone()));
-        }
-        _ => {}
-    }
-    for (label, value) in facts {
-        ui.allocate_ui_with_layout(
-            vec2(ui.available_width(), 22.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(
-                    egui::RichText::new(label)
-                        .font(theme::font::regular(theme::text::SM + 1.0))
-                        .color(p.text_faint),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut job = egui::text::LayoutJob::simple_singleline(
-                        value,
-                        theme::font::regular(theme::text::SM + 1.0),
-                        p.text,
-                    );
-                    job.wrap = egui::text::TextWrapping {
-                        max_width: 200.0,
-                        max_rows: 1,
-                        break_anywhere: true,
-                        overflow_character: Some('…'),
-                    };
-                    ui.label(job);
-                });
-            },
-        );
-    }
-
-    let preview = session
-        .summary
-        .as_ref()
-        .map(|s| s.preview.split_whitespace().collect::<Vec<_>>().join(" "))
-        .unwrap_or_default()
-        .replace("**", "")
-        .replace('`', "");
-    if !preview.is_empty() {
-        ui.add_space(theme::space::SM);
-        let line = ui.available_rect_before_wrap();
-        ui.painter()
-            .hline(line.x_range(), line.top(), Stroke::new(1.0, p.border));
-        ui.add_space(theme::space::SM);
-        let mut job = egui::text::LayoutJob::simple(
-            preview,
-            theme::font::regular(theme::text::SM + 1.0),
-            p.text_muted,
-            300.0,
-        );
-        job.wrap.max_rows = 3;
-        job.wrap.overflow_character = Some('…');
-        ui.label(job);
-    }
 }
 
 fn ago(updated: u64) -> String {

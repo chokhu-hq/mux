@@ -8,6 +8,7 @@ pub struct IconButton {
     label: &'static str,
     size: Size,
     selected: bool,
+    filled: bool,
 }
 
 impl IconButton {
@@ -17,7 +18,14 @@ impl IconButton {
             label,
             size: Size::Sm,
             selected: false,
+            filled: false,
         }
+    }
+
+    // the solid version of the glyph, for icons like stop that read as something else in outline
+    pub fn filled(mut self) -> Self {
+        self.filled = true;
+        self
     }
 
     pub fn size(mut self, size: Size) -> Self {
@@ -58,13 +66,14 @@ impl IconButton {
             let rect = rect.shrink(side * 0.03 * pressed);
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(radius::MD), fill);
-            ui.painter().text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                self.glyph,
-                font::icon(icon::LG),
-                fg,
-            );
+            // a solid glyph carries more weight, so it's drawn a step smaller to look the same size
+            let glyph = if self.filled {
+                font::icon_fill(icon::MD)
+            } else {
+                font::icon(icon::LG)
+            };
+            ui.painter()
+                .text(rect.center(), Align2::CENTER_CENTER, self.glyph, glyph, fg);
         }
 
         response.on_hover_cursor(CursorIcon::PointingHand)

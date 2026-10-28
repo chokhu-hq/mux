@@ -187,6 +187,7 @@ impl CommandPalette {
                                 .frame(Frame::new().inner_margin(Margin::symmetric(10, 10)))
                                 .desired_width(f32::INFINITY),
                         );
+                        super::edit_menu(&input, &mut self.query);
                         if self.open && !input.has_focus() {
                             input.request_focus();
                         }

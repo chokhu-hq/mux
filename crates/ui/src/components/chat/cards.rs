@@ -43,6 +43,11 @@ pub fn user_message(
     let top = ui.cursor().top();
     let bubble_rect = (!message.is_empty()).then(|| bubble(ui, message));
     ui.set_opacity(opacity);
+    if let Some(rect) = bubble_rect {
+        crate::components::area_menu(ui, rect, ui.make_persistent_id("menu"), |ui| {
+            crate::components::copy_item(ui, "Copy message", message);
+        });
+    }
     let rewind = match bubble_rect {
         Some(rect) if rewindable => rewind_button(ui, rect, top),
         _ => false,
@@ -264,8 +269,11 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
             pos2(target_x, y - tag.size().y / 2.0 - 2.0),
             vec2(tag.size().x + space::SM * 2.0, tag.size().y + 4.0),
         );
-        ui.painter()
-            .rect_filled(pill, CornerRadius::same(radius::SM), theme::tint(p, 0.07));
+        ui.painter().rect_filled(
+            pill,
+            CornerRadius::same(radius::SM),
+            theme::tint(p, theme::fill::QUIET),
+        );
         ui.painter().galley(
             pos2(pill.left() + space::SM, pill.top() + 2.0),
             tag,
@@ -299,6 +307,18 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
         );
         response.on_hover_cursor(CursorIcon::PointingHand);
     }
+
+    crate::components::area_menu(ui, rect, id.with("menu"), |ui| {
+        let what = if tool.kind == ToolKind::Run {
+            "Copy command"
+        } else {
+            "Copy"
+        };
+        crate::components::copy_item(ui, what, tool.target.trim());
+        if let Some(output) = &tool.output {
+            crate::components::copy_item(ui, "Copy output", output);
+        }
+    });
 
     if expandable {
         reveal(ui, id.with("output"), open, |ui| {
@@ -981,8 +1001,11 @@ pub fn subagent(ui: &mut Ui, agent: &Subagent) -> Option<String> {
         );
         let y = rect.center().y;
         let tile = Rect::from_center_size(pos2(rect.left() + 12.0 + 14.0, y), vec2(28.0, 28.0));
-        ui.painter()
-            .rect_filled(tile, CornerRadius::same(radius::MD), theme::tint(p, 0.07));
+        ui.painter().rect_filled(
+            tile,
+            CornerRadius::same(radius::MD),
+            theme::tint(p, theme::fill::QUIET),
+        );
         crate::components::provider_mark(
             ui.painter(),
             tile.center(),

@@ -86,6 +86,7 @@ fn main() -> eframe::Result {
 const NEW_AGENT: KeyboardShortcut = shortcut::app(Key::T);
 const NEW_SHELL: KeyboardShortcut = shortcut::app(Key::N);
 const SETTINGS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
+const TERMINAL: KeyboardShortcut = shortcut::app(Key::Backtick);
 // alt on linux, since ctrl and shift with a number turn into symbols on most layouts
 const JUMP_MODIFIER: Modifiers = if cfg!(target_os = "macos") {
     Modifiers::COMMAND
@@ -104,7 +105,7 @@ const NUMBER_KEYS: [Key; 9] = [
     Key::Num9,
 ];
 
-const COMMANDS: [Command; 6] = [
+const COMMANDS: [Command; 7] = [
     Command::new("new-agent", "New agent session")
         .icon(icons::ROBOT)
         .shortcut(NEW_AGENT),
@@ -115,6 +116,9 @@ const COMMANDS: [Command; 6] = [
     Command::new("toggle-sidebar", "Toggle sidebar")
         .icon(icons::SIDEBAR_SIMPLE)
         .shortcut(SIDEBAR_SHORTCUT),
+    Command::new("toggle-terminal", "Toggle terminal on the right")
+        .icon(icons::TERMINAL_WINDOW)
+        .shortcut(TERMINAL),
     Command::new("compact", "Compact conversation").icon(icons::ARROWS_IN_LINE_VERTICAL),
     Command::new("settings", "Open settings")
         .icon(icons::GEAR)
@@ -155,6 +159,11 @@ struct App {
     viewer: Option<FileView>,
     viewer_open: bool,
     viewer_width: f32,
+    // the terminal pane on the right, and which session last took focus in it
+    split_width: f32,
+    split_focused: Option<u64>,
+    // what the pane last showed, kept while it fades out after closing
+    split_shown: Option<u64>,
     // every file changed in the open chat, with the agent's own hunks for when git can't say, and the one shown
     diffs: Vec<(String, String)>,
     diff_index: usize,
@@ -211,6 +220,9 @@ impl App {
             viewer: None,
             viewer_open: false,
             viewer_width: 560.0,
+            split_width: 520.0,
+            split_focused: None,
+            split_shown: None,
             diffs: Vec::new(),
             diff_index: 0,
             review: false,
@@ -231,6 +243,7 @@ impl App {
             "new-shell" => self.sessions.create("Shell", SessionKind::Shell),
             "new-group" => self.sessions.create_group_from_folder(),
             "toggle-sidebar" => self.sidebar.toggle(),
+            "toggle-terminal" => self.sessions.toggle_split_terminal(),
             "settings" => self.settings_open = true,
             "compact" => {
                 if let Some((session, _, outbox, _)) = self.sessions.selected()
@@ -602,7 +615,10 @@ impl App {
         ui.painter().rect_filled(rect, 0.0, theme::palette(ui).bg);
         let body = rect.shrink2(vec2(space::MD, space::SM));
         let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
-        let response = terminal.show(&mut body_ui, id, outbox);
+        let (response, zoom) = terminal.show(&mut body_ui, id, outbox, self.prefs.terminal_size());
+        if let Some(size) = zoom {
+            zoom_terminal(&mut self.prefs, size);
+        }
         // files dropped on a terminal type their paths, quoted, the way other terminals do
         let dropped = std::mem::take(&mut self.dropped);
         if !dropped.is_empty() {
@@ -716,6 +732,14 @@ impl App {
             );
         }
         crumbs.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if IconButton::new(icons::TERMINAL_WINDOW, "Terminal")
+                .selected(self.sessions.split.is_some())
+                .show(ui)
+                .tip_with_shortcut("Terminal on the right", TERMINAL)
+                .clicked()
+            {
+                *run = Some("toggle-terminal");
+            }
             if info.restartable
                 && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
                     .show(ui)
@@ -874,7 +898,7 @@ fn welcome(ui: &mut egui::Ui, agents: &[(Provider, bool)]) -> bool {
         let (tile, _) = ui.allocate_exact_size(vec2(56.0, 56.0), egui::Sense::hover());
         let rounding = egui::CornerRadius::same(theme::radius::XL);
         ui.painter()
-            .rect_filled(tile, rounding, theme::tint(p, 0.06));
+            .rect_filled(tile, rounding, theme::tint(p, theme::fill::QUIET));
         ui.painter().rect_stroke(
             tile,
             rounding,
@@ -999,6 +1023,13 @@ fn cli(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::OpenCode => "opencode",
     }
+}
+
+// a terminal asked for a new text size, which every terminal then shares and keeps
+fn zoom_terminal(prefs: &mut Prefs, size: f32) {
+    let default = (size - theme::text::MONO).abs() < 0.01;
+    prefs.terminal_text = (!default).then_some(size);
+    prefs.save();
 }
 
 // a path the agent reported, made absolute against the project when it's relative
@@ -1248,7 +1279,7 @@ fn agent_controls(
                     egui::Shape::rect_filled(
                         tabs[0].translate(vec2(step * at, 0.0)),
                         egui::CornerRadius::same(theme::radius::MD),
-                        theme::tint(p, 0.10),
+                        theme::tint(p, theme::fill::SELECTED),
                     ),
                 );
             });
@@ -1546,7 +1577,7 @@ fn update_row(ui: &mut egui::Ui, update: &update::Update) -> egui::Response {
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same(theme::radius::LG),
-        theme::tint(p, 0.05 * hover),
+        theme::tint(p, theme::fill::HOVER * hover),
     );
     let y = rect.center().y;
     let x = rect.left() + space::MD;
@@ -1590,8 +1621,8 @@ fn settings_row(
     );
     let shown = if open { 1.0 } else { 0.0 };
     let fill = egui::Color32::TRANSPARENT
-        .lerp_to_gamma(theme::tint(p, 0.05), hover)
-        .lerp_to_gamma(theme::tint(p, 0.10), shown);
+        .lerp_to_gamma(theme::tint(p, theme::fill::HOVER), hover)
+        .lerp_to_gamma(theme::tint(p, theme::fill::SELECTED), shown);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::radius::LG), fill);
     let y = rect.center().y;
@@ -1765,7 +1796,7 @@ fn agent_tab(ui: &mut egui::Ui, provider: Provider, active: bool, width: f32) ->
         ui.painter().rect_filled(
             rect,
             egui::CornerRadius::same(theme::radius::MD),
-            theme::tint(p, 0.05),
+            theme::tint(p, theme::fill::HOVER),
         );
     }
     let text = if active { p.text } else { p.text_muted };
@@ -1807,6 +1838,121 @@ fn effort_label(effort: &str) -> String {
 }
 
 impl App {
+    // a terminal on the right beside the session, returning what's left of `main` for it
+    fn split_panel(&mut self, ui: &mut egui::Ui, main: Rect) -> Rect {
+        let ctx = ui.ctx().clone();
+        let p = theme::palette(ui);
+        if let Some(id) = self.sessions.split {
+            self.split_shown = Some(id);
+        }
+        let open = self.sessions.split.is_some();
+        let t = motion::spring_bool(&ctx, egui::Id::unique("split-panel"), open, Spring::QUICK)
+            .clamp(0.0, 1.0);
+        let Some(id) = self.split_shown.filter(|_| open || t > 0.01) else {
+            self.split_shown = None;
+            self.split_focused = None;
+            return main;
+        };
+        let full = self
+            .split_width
+            .clamp(280.0, (main.width() * 0.7).max(280.0));
+        // the chat takes its new width once, at the start of opening and the end of closing,
+        // while the pane fades and eases in over that space, so nothing reflows mid animation
+        let edge = main.right() - full;
+        let handle = Rect::from_min_max(
+            pos2(edge - 3.0, main.top()),
+            pos2(edge + 3.0, main.bottom()),
+        );
+        if open {
+            let drag = ui
+                .interact(
+                    handle,
+                    egui::Id::unique("split-resize"),
+                    egui::Sense::drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if drag.dragged() {
+                self.split_width = full - drag.drag_delta().x;
+            }
+        }
+        let slide = 24.0 * (1.0 - t);
+        let panel = Rect::from_min_size(pos2(edge + slide, main.top()), vec2(full, main.height()));
+        let clip = Rect::from_min_max(pos2(edge, main.top()), main.max).intersect(ui.clip_rect());
+        let mut pane = ui.new_child(UiBuilder::new().id_salt("split-pane").max_rect(panel));
+        pane.set_clip_rect(clip);
+        pane.multiply_opacity(t);
+        // terminal text needs a steady backdrop, so it never shows the blur behind the window
+        pane.painter().rect_filled(panel, 0.0, p.bg);
+        pane.painter().vline(
+            panel.left(),
+            panel.y_range(),
+            egui::Stroke::new(1.0, p.border),
+        );
+
+        let header = Rect::from_min_size(panel.min, vec2(full, FOOTER_ROW + space::SM));
+        let mut close = false;
+        let Some((info, local, outbox)) = self.sessions.split_session(id) else {
+            self.split_shown = None;
+            return main;
+        };
+        let mut head = pane.new_child(
+            UiBuilder::new()
+                .id_salt("split-header")
+                .max_rect(header.shrink2(vec2(space::MD, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let glyph = match info.kind {
+            SessionKind::Task => icons::PLAY,
+            _ => icons::TERMINAL,
+        };
+        head.label(
+            egui::RichText::new(glyph.to_string())
+                .font(font::icon(icon::MD))
+                .color(p.text_faint),
+        );
+        head.label(
+            egui::RichText::new(&info.title)
+                .font(font::medium(text::MD))
+                .color(p.text_muted),
+        );
+        head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = IconButton::new(icons::X, "Close")
+                .show(ui)
+                .tip_with_shortcut("Close the terminal", TERMINAL)
+                .clicked();
+        });
+        pane.painter().hline(
+            header.x_range(),
+            header.bottom(),
+            egui::Stroke::new(1.0, p.border),
+        );
+
+        // attaching starts the process on the server if it has not run yet, then streams it here
+        if local.terminal.is_none() && !local.attaching {
+            outbox.push(ClientMsg::Attach { id });
+            local.attaching = true;
+        }
+        if let Some(terminal) = &mut local.terminal {
+            let body = Rect::from_min_max(pos2(panel.left(), header.bottom()), panel.max)
+                .shrink2(vec2(space::MD, space::SM));
+            let mut body_ui = pane.new_child(UiBuilder::new().id_salt("split-body").max_rect(body));
+            let (response, zoom) =
+                terminal.show(&mut body_ui, id, outbox, self.prefs.terminal_size());
+            if let Some(size) = zoom {
+                zoom_terminal(&mut self.prefs, size);
+            }
+            // a terminal just opened on the right takes the keyboard, as if it had been clicked
+            if open && self.split_focused != Some(id) {
+                response.request_focus();
+                self.split_focused = Some(id);
+            }
+        }
+        if close {
+            self.sessions.split = None;
+        }
+        Rect::from_min_max(main.min, pos2(edge, main.bottom()))
+    }
+
     // the file viewer on the right, returning what's left of `main` for the session
     fn file_panel(&mut self, ui: &mut egui::Ui, main: Rect) -> Rect {
         let ctx = ui.ctx().clone();
@@ -2056,6 +2202,7 @@ impl eframe::App for App {
                         let main = sidebar.show(ui, |ui| self.sidebar_contents(ui));
                         self.sidebar = sidebar;
                         let main = self.file_panel(ui, main);
+                        let main = self.split_panel(ui, main);
                         let mut ui = ui.new_child(UiBuilder::new().max_rect(main));
                         ui.set_clip_rect(main.intersect(ui.clip_rect()));
                         self.main_contents(&mut ui, &mut run);

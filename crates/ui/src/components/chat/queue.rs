@@ -42,13 +42,14 @@ pub fn queue(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent>
         ui.push_id(i, |ui| {
             if let Some((index, draft)) = editing.as_mut().filter(|(index, _)| *index == i) {
                 // edited in place, then saved over the waiting message or left as it was
-                ui.add(
+                let field = ui.add(
                     TextEdit::multiline(draft)
                         .font(font::regular(text::MD + 1.0))
                         .desired_rows(2)
                         .desired_width(f32::INFINITY)
                         .margin(Margin::symmetric(12, 8)),
                 );
+                crate::components::edit_menu(&field, draft);
                 ui.add_space(space::XS);
                 let mut done = false;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

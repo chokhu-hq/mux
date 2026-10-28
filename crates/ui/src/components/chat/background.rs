@@ -5,13 +5,11 @@ use egui::{
 };
 use mux_core::protocol::{Background, BackgroundState};
 
-use super::cards::{caret, glyph, spinner};
-use crate::components::{TooltipExt, hover_t, reveal};
+use super::cards::{ROW, caret, glyph, spinner};
+use crate::components::{IconButton, TooltipExt, hover_t, reveal};
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
-use crate::theme::{self, font, icon, radius, space, text};
-
-const ROW: f32 = 30.0;
+use crate::theme::{self, control, font, icon, radius, space, text};
 
 // commands the agent left running, above the composer so they stay in sight while the chat scrolls,
 // returning the one to stop when its stop button is pressed
@@ -98,25 +96,15 @@ fn row(ui: &mut Ui, task: &Background, now: u64) -> bool {
     let mut right = rect.right() - space::MD - 12.0 - space::SM;
     let mut stopped = false;
     if task.stoppable {
-        let button = Rect::from_center_size(pos2(right - 11.0, y), vec2(22.0, 22.0));
-        let hit = ui
-            .interact(button, id.with("stop"), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .tip("Stop this command");
-        let hover = hover_t(ui, &hit);
-        ui.painter().rect_filled(
-            button,
-            CornerRadius::same(radius::SM),
-            theme::tint(p, 0.08 * hover),
-        );
-        ui.painter().text(
-            button.center(),
-            Align2::CENTER_CENTER,
-            icons::STOP,
-            font::icon_fill(icon::SM),
-            p.text_muted.lerp_to_gamma(p.danger, hover),
-        );
-        stopped = hit.clicked();
+        let size = control::SM;
+        let button = Rect::from_center_size(pos2(right - size / 2.0, y), vec2(size, size));
+        stopped = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(button), |ui| {
+                IconButton::new(icons::STOP, "Stop").filled().show(ui)
+            })
+            .inner
+            .tip("Stop this command")
+            .clicked();
         right = button.left() - space::SM;
     }
     let status = ui.painter().text(

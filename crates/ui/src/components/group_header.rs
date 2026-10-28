@@ -77,7 +77,7 @@ impl<'a> GroupHeader<'a> {
                 Spring::QUICK,
             );
             let fill = Color32::TRANSPARENT
-                .lerp_to_gamma(theme::tint(p, 0.04), t)
+                .lerp_to_gamma(theme::tint(p, theme::fill::HOVER), t)
                 .lerp_to_gamma(p.accent.gamma_multiply(0.16), target);
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(radius::LG), fill);
@@ -135,7 +135,8 @@ impl<'a> GroupHeader<'a> {
             ui.painter().rect_filled(
                 add_rect,
                 CornerRadius::same(radius::MD),
-                theme::tint(p, 0.08 * add_t),
+                // stronger than the row's own hover, since it sits on top of it
+                theme::tint(p, theme::fill::SELECTED * add_t),
             );
             ui.painter().text(
                 add_rect.center(),

@@ -83,12 +83,12 @@ pub fn picture(ui: &Ui, path: &str, rect: Rect, cover: bool) {
             }
             None => {
                 ui.painter()
-                    .rect_filled(rect, rounding, theme::tint(p, 0.06));
+                    .rect_filled(rect, rounding, theme::tint(p, theme::fill::QUIET));
             }
         },
         Err(_) => {
             ui.painter()
-                .rect_filled(rect, rounding, theme::tint(p, 0.06));
+                .rect_filled(rect, rounding, theme::tint(p, theme::fill::QUIET));
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -139,8 +139,14 @@ fn file(ui: &mut Ui, path: &str, height: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(FILE_WIDTH, height), Sense::click());
     let t = hover_t(ui, &response);
     let rounding = CornerRadius::same(radius::LG);
-    ui.painter()
-        .rect_filled(rect, rounding, theme::tint(p, 0.05 + 0.03 * t));
+    ui.painter().rect_filled(
+        rect,
+        rounding,
+        theme::tint(
+            p,
+            theme::fill::QUIET + (theme::fill::SELECTED - theme::fill::QUIET) * t,
+        ),
+    );
     ui.painter().rect_stroke(
         rect,
         rounding,

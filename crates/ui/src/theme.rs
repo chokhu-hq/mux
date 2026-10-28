@@ -212,7 +212,7 @@ pub const LIGHT: Palette = Palette {
 pub fn card(ui: &egui::Ui) -> egui::Frame {
     let p = palette(ui);
     egui::Frame::new()
-        .fill(tint(p, 0.03))
+        .fill(tint(p, fill::CARD))
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(radius::LG))
 }
@@ -225,6 +225,18 @@ pub fn floating(ui: &egui::Ui) -> egui::Frame {
         .stroke(Stroke::new(1.0, p.border_strong))
         .corner_radius(CornerRadius::same(radius::LG))
         .shadow(ui.visuals().popup_shadow)
+}
+
+// how strong each kind of tint is, so the same job looks the same everywhere
+pub mod fill {
+    pub const CARD: f32 = 0.03;
+    pub const HOVER: f32 = 0.05;
+    // the block behind a tag, a tile or a placeholder
+    pub const QUIET: f32 = 0.06;
+    // the empty part of a bar or ring
+    pub const TRACK: f32 = 0.10;
+    pub const SELECTED: f32 = 0.10;
+    pub const DISABLED: f32 = 0.12;
 }
 
 // a wash of the text colour, which reads the same on solid and see-through backgrounds

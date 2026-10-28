@@ -294,6 +294,7 @@ impl Agent {
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::Running,
+                background: false,
             },
             Some("edit" | "delete" | "move") => AgentItem::FileChange {
                 changes: Vec::new(),
@@ -337,6 +338,7 @@ impl Agent {
                 output,
                 exit_code,
                 status: s,
+                ..
             }) => {
                 let named = command_of(update);
                 if !named.is_empty() {

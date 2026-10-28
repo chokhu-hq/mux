@@ -400,7 +400,8 @@ impl eframe::App for Gallery {
                                                         | ChatAction::ImplementPlan
                                                         | ChatAction::Rewind(_)
                                                         | ChatAction::Queue(..)
-                                                        | ChatAction::Resume,
+                                                        | ChatAction::Resume
+                                                        | ChatAction::StopBackground(_),
                                                     ) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;

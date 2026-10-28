@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 23;
+pub const PROTOCOL: u32 = 24;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -95,6 +95,9 @@ pub enum AgentItem {
         output: String,
         exit_code: Option<i32>,
         status: ItemStatus,
+        // left running in the background while the agent carried on
+        #[serde(default)]
+        background: bool,
     },
     FileChange {
         changes: Vec<FileChange>,
@@ -252,6 +255,29 @@ impl TokenTotals {
         self.output += other.output;
         self.reasoning += other.reasoning;
     }
+}
+
+// a command an agent left running while it carried on, like a dev server or a long build
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Background {
+    pub id: String,
+    // what the agent said it's for, or the command itself
+    pub label: String,
+    pub command: String,
+    // unix seconds, for how long it has been running
+    pub started: u64,
+    pub state: BackgroundState,
+    // the end of what it has printed so far
+    pub output: String,
+    // whether mux can stop it, which only some agents allow
+    pub stoppable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackgroundState {
+    Running,
+    Exited(Option<i32>),
+    Stopped,
 }
 
 // a message waiting to be sent once the agent finishes what it's doing
@@ -412,6 +438,11 @@ pub enum ClientMsg {
         index: usize,
         action: QueueAction,
     },
+    // stops a command the agent left running in the background
+    AgentStopBackground {
+        id: u64,
+        task: String,
+    },
     // lets messages held back by a stop carry on being sent
     AgentResume {
         id: u64,
@@ -488,6 +519,11 @@ pub enum ServerMsg {
         id: u64,
         queue: Vec<Queued>,
         held: bool,
+    },
+    // the commands the agent has running in the background, and ones that just finished
+    AgentBackground {
+        id: u64,
+        tasks: Vec<Background>,
     },
     // the skills the agent can be asked to use, for the composer's menus
     AgentSkills {

@@ -50,6 +50,13 @@ pub enum Event {
     History(Box<history::History>),
     // the skills found for a session's agent, tagged with which agent they're for
     Skills(u64, Provider, Vec<mux_core::protocol::Skill>),
+    // more output from a command an agent left running in the background
+    BackgroundOutput {
+        session: u64,
+        generation: u64,
+        task: String,
+        output: String,
+    },
 }
 
 // blocks until ctrl+c or a client asks the server to shut down
@@ -311,6 +318,19 @@ impl Server {
                     Err(err) => log::error!("could not list {} models: {err}", provider.label()),
                 }
             }
+            Event::BackgroundOutput {
+                session,
+                generation,
+                task,
+                output,
+            } => {
+                if let Some(agent) = self.agents.get_mut(&session)
+                    && agent.generation == generation
+                {
+                    agent.background_output(&task, output);
+                    self.agent_changed(session);
+                }
+            }
             Event::AgentExited {
                 session,
                 generation,
@@ -431,9 +451,11 @@ impl Server {
                 };
                 let (skills, provider) = (agent.skills(), agent.settings.provider);
                 let (queue, held) = (agent.queue.clone(), agent.held);
+                let tasks = agent.background();
                 self.send(client, msg);
                 self.send(client, ServerMsg::AgentSkills { id, skills });
                 self.send(client, ServerMsg::AgentQueue { id, queue, held });
+                self.send(client, ServerMsg::AgentBackground { id, tasks });
                 self.fetch_skills(id, provider);
                 for provider in Provider::ALL {
                     if !self.models.contains_key(&provider) {
@@ -516,6 +538,9 @@ impl Server {
                 if let Some(message) = send {
                     self.agent_send(id, message.text, message.attachments);
                 }
+            }
+            ClientMsg::AgentStopBackground { id, task } => {
+                self.agent(id).stop_background(&task);
             }
             ClientMsg::AgentResume { id } => {
                 let send = self.agent(id).resume();
@@ -738,6 +763,7 @@ impl Server {
         let context = agent.take_context();
         let skills = agent.take_skills();
         let queue = agent.take_queue();
+        let background = agent.take_background();
         // saved when a turn starts or ends rather than on every streamed word, and the sidebar's summary with it
         let settled = busy.is_some() || (!agent.busy && !items.is_empty());
         if settled && let Err(err) = agent.save(&path) {
@@ -762,6 +788,9 @@ impl Server {
         }
         if let Some(skills) = skills {
             self.send_watchers(id, ServerMsg::AgentSkills { id, skills });
+        }
+        if let Some(tasks) = background {
+            self.send_watchers(id, ServerMsg::AgentBackground { id, tasks });
         }
         if let Some((queue, held)) = queue {
             // waiting messages are kept even when nothing else about the chat changed

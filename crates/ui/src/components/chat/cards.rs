@@ -252,7 +252,27 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
         font::medium(text::MD),
         p.text_muted,
     );
-    let target_x = verb.right() + space::SM;
+    let mut target_x = verb.right() + space::SM;
+    // a command still running after the agent moved on is marked, so it doesn't read as finished
+    if tool.background {
+        let tag = ui.painter().layout_no_wrap(
+            "background".to_owned(),
+            font::regular(text::SM),
+            p.text_faint,
+        );
+        let pill = Rect::from_min_size(
+            pos2(target_x, y - tag.size().y / 2.0 - 2.0),
+            vec2(tag.size().x + space::SM * 2.0, tag.size().y + 4.0),
+        );
+        ui.painter()
+            .rect_filled(pill, CornerRadius::same(radius::SM), theme::tint(p, 0.07));
+        ui.painter().galley(
+            pos2(pill.left() + space::SM, pill.top() + 2.0),
+            tag,
+            p.text_faint,
+        );
+        target_x = pill.right() + space::SM;
+    }
     let caret_space = if expandable { 28.0 } else { space::SM };
     // the row is one line tall, so a longer command is run together onto it and cut off at the edge
     let target = ui
@@ -1112,7 +1132,7 @@ fn card(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
     });
 }
 
-fn glyph(ui: &Ui, center: Pos2, icon: char, size: f32, color: Color32) {
+pub(super) fn glyph(ui: &Ui, center: Pos2, icon: char, size: f32, color: Color32) {
     ui.painter()
         .text(center, Align2::CENTER_CENTER, icon, font::icon(size), color);
 }
@@ -1127,7 +1147,7 @@ fn rotated(ui: &Ui, center: Pos2, icon: char, size: f32, angle: f32, color: Colo
     );
 }
 
-fn spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
+pub(super) fn spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
     if motion::reduced(ui.ctx()) {
         glyph(ui, center, icons::SPINNER, size, color);
         return;
@@ -1137,7 +1157,7 @@ fn spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
     ui.ctx().request_repaint();
 }
 
-fn caret(ui: &Ui, center: Pos2, turn: f32, color: Color32) {
+pub(super) fn caret(ui: &Ui, center: Pos2, turn: f32, color: Color32) {
     rotated(
         ui,
         center,

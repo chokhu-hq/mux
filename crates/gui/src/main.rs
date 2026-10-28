@@ -432,6 +432,7 @@ impl App {
             let action = ChatView::new(&local.chat, &mut local.draft)
                 .commands(&commands)
                 .queue(&local.queue, local.held)
+                .background(&local.background)
                 .attachments(&mut local.attachments)
                 .dropping(self.dropping)
                 .running(local.busy)
@@ -522,6 +523,9 @@ impl App {
                     outbox.push(ClientMsg::AgentQueue { id, index, action })
                 }
                 Some(ChatAction::Resume) => outbox.push(ClientMsg::AgentResume { id }),
+                Some(ChatAction::StopBackground(task)) => {
+                    outbox.push(ClientMsg::AgentStopBackground { id, task })
+                }
                 Some(ChatAction::Answer(index, answers)) => {
                     if let Some(Some(question)) = local.approvals.get(index) {
                         outbox.push(ClientMsg::AgentAnswer {

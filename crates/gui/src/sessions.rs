@@ -40,6 +40,8 @@ pub struct Local {
     // messages waiting for the agent to finish, and whether a stop is holding them
     pub queue: Vec<wire::Queued>,
     pub held: bool,
+    // commands the agent left running in the background, and ones that just finished
+    pub background: Vec<wire::Background>,
     // files picked or dropped for the next message
     pub attachments: Vec<String>,
     transcript: Vec<AgentItem>,
@@ -240,6 +242,11 @@ impl Sessions {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.queue = queue;
                     local.held = held;
+                }
+            }
+            ServerMsg::AgentBackground { id, tasks } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.background = tasks;
                 }
             }
             ServerMsg::AgentSkills { id, skills } => {
@@ -1053,12 +1060,14 @@ fn chat_items(
                 command,
                 output,
                 status,
+                background,
                 ..
             } => items.push(ChatItem::Tool(ToolCall {
                 kind: ToolKind::Run,
                 target: shell_body(command),
                 status: tool_status(*status),
                 output: (!output.is_empty()).then(|| output.clone()),
+                background: *background,
             })),
             AgentItem::FileChange { changes, .. } => {
                 for change in changes {
@@ -1115,6 +1124,7 @@ fn chat_items(
                         },
                         status: tool_status(step.status),
                         output: None,
+                        background: false,
                     })
                     .collect(),
                 result: result.clone(),
@@ -1134,6 +1144,7 @@ fn chat_items(
                 },
                 status: tool_status(*status),
                 output: (!output.is_empty()).then(|| output.clone()),
+                background: false,
             })),
             AgentItem::Compaction { status } => {
                 items.push(ChatItem::Compaction(tool_status(*status)))

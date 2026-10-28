@@ -1,5 +1,6 @@
 mod asks;
 mod attachments;
+mod background;
 mod cards;
 mod composer;
 mod markdown;
@@ -77,6 +78,8 @@ pub struct ToolCall {
     pub target: String,
     pub status: ToolStatus,
     pub output: Option<String>,
+    // left running in the background while the agent carried on
+    pub background: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +148,8 @@ pub enum ChatAction {
     Queue(usize, mux_core::protocol::QueueAction),
     Resume,
     Decide(usize, Decision),
+    // a command left running in the background, by the id the agent gave it
+    StopBackground(String),
 }
 
 pub struct ChatView<'a> {
@@ -158,6 +163,7 @@ pub struct ChatView<'a> {
     commands: &'a [SlashCommand],
     queue: &'a [mux_core::protocol::Queued],
     held: bool,
+    background: &'a [mux_core::protocol::Background],
 }
 
 impl<'a> ChatView<'a> {
@@ -173,7 +179,14 @@ impl<'a> ChatView<'a> {
             commands: &[],
             queue: &[],
             held: false,
+            background: &[],
         }
+    }
+
+    // commands the agent left running, shown above the composer
+    pub fn background(mut self, tasks: &'a [mux_core::protocol::Background]) -> Self {
+        self.background = tasks;
+        self
     }
 
     // messages sent while the agent works, shown after the chat until they go out
@@ -228,6 +241,9 @@ impl<'a> ChatView<'a> {
             pos2(left + width, rect.bottom() - space::MD),
         );
         let mut bottom = ui.new_child(UiBuilder::new().max_rect(composer));
+        if let Some(task) = background::strip(&mut bottom, self.background) {
+            action = Some(ChatAction::StopBackground(task));
+        }
         let mut input = Composer::new(self.draft)
             .running(self.running)
             .context(self.context)
@@ -452,6 +468,7 @@ pub fn sample() -> Vec<ChatItem> {
             target: target.to_owned(),
             status,
             output: output.map(str::to_owned),
+            background: false,
         })
     };
     let line = |kind, text: &str| DiffLine {

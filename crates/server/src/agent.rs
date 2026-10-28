@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{Event, usage};
 
+mod background;
 mod interaction;
 mod opencode;
 mod rewind;
@@ -150,6 +151,12 @@ pub struct Agent {
     compacting: Option<usize>,
     compact_queued: bool,
     applied: opencode::Applied,
+    // commands the agent left running in the background, and ones that finished since the last message
+    background: Vec<background::Tracked>,
+    background_changed: bool,
+    // where background output is reported, kept from the launch for the followers it starts
+    events: Option<UnboundedSender<Event>>,
+    session: u64,
 }
 
 impl Agent {
@@ -225,6 +232,10 @@ impl Agent {
             compacting: None,
             compact_queued: false,
             applied: opencode::Applied::default(),
+            background: Vec::new(),
+            background_changed: false,
+            events: None,
+            session: 0,
         }
     }
 
@@ -400,6 +411,7 @@ impl Agent {
     fn record(&mut self, text: &str, attachments: &[String], steer: bool) {
         // a new message starts a new checklist
         self.todos = None;
+        self.clear_finished_background();
         let claude = self.settings.provider == Provider::Claude;
         // codex waits for its thread to open before it takes a message
         let queued = !claude && !self.thread_live && self.process.is_some();
@@ -709,6 +721,7 @@ impl Agent {
         self.compact_queued = false;
         self.finish_compaction(ItemStatus::Failed);
         self.fail_subagents();
+        self.stop_all_background();
         self.set_busy(false);
     }
 
@@ -779,6 +792,7 @@ impl Agent {
                 }
             }
         });
+        self.events = Some(events.clone());
         let events = events.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -802,6 +816,7 @@ impl Agent {
         });
 
         self.generation = generation;
+        self.session = session;
         self.process = Some(Process {
             stdin: tx,
             _child: Some(child),
@@ -993,6 +1008,7 @@ impl Agent {
                 self.expire_approvals();
                 self.expire_questions();
                 self.finish_compaction(ItemStatus::Failed);
+                self.codex_backgrounded();
                 self.set_busy(false);
                 self.next_queued();
             }
@@ -1031,6 +1047,12 @@ impl Agent {
                     output.push_str(params["delta"].as_str().unwrap_or_default());
                     trim_front(output);
                 }
+                if let Some(&index) = params["itemId"]
+                    .as_str()
+                    .and_then(|id| self.by_codex_id.get(id))
+                {
+                    self.codex_background_item(index);
+                }
             }
             _ => {}
         }
@@ -1049,6 +1071,7 @@ impl Agent {
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::Running,
+                background: false,
             },
             Some("fileChange") => AgentItem::FileChange {
                 changes: file_changes(item),
@@ -1124,6 +1147,7 @@ impl Agent {
             _ => return,
         }
         self.changed.insert(index);
+        self.codex_background_item(index);
     }
 
     fn handle_claude(&mut self, msg: &Value) {
@@ -1138,7 +1162,9 @@ impl Agent {
                     .as_str()
                     .is_some_and(|s| s.starts_with("task_")) =>
             {
-                self.claude_task(msg)
+                if !self.claude_background_task(msg) {
+                    self.claude_task(msg)
+                }
             }
             Some("system") if msg["subtype"] == "init" => {
                 self.session_id = msg["session_id"].as_str().map(str::to_owned);
@@ -1334,6 +1360,7 @@ impl Agent {
                 output: String::new(),
                 exit_code: None,
                 status: ItemStatus::Running,
+                background: input["run_in_background"] == true,
             },
             "Edit" | "MultiEdit" | "Write" => AgentItem::FileChange {
                 changes: vec![FileChange {
@@ -1371,6 +1398,19 @@ impl Agent {
             ItemStatus::Done
         };
         let text = result_text(&block["content"]);
+        // a command moved to the background answers at once, but keeps running and its row with it
+        if !failed
+            && matches!(
+                self.items.get(index),
+                Some(AgentItem::Command {
+                    background: true,
+                    ..
+                })
+            )
+            && self.claude_backgrounded(index, &text)
+        {
+            return;
+        }
         match self.items.get_mut(index) {
             Some(AgentItem::Command {
                 output, status: s, ..
@@ -2356,6 +2396,7 @@ mod tests {
                     output: "hi\n".into(),
                     exit_code: Some(0),
                     status: ItemStatus::Done,
+                    background: false,
                 },
                 AgentItem::Approval {
                     id: 1,

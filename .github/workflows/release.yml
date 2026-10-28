@@ -26,29 +26,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-22.04
+          - runner: ubuntu-26.04
             arch: x86_64
-          - runner: ubuntu-22.04-arm
+          - runner: ubuntu-26.04-arm
             arch: aarch64
-    # the oldest supported ubuntu keeps the glibc requirement low enough for most distros
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+      # zig links against an older glibc than the runner has, so the app still runs on older distros
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Install system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxcb1-dev
       - name: Build
-        run: cargo build --release --locked -p mux-gui -p mux-server
+        run: |
+          # the window needs the system's display and gpu libraries, so the app links glibc 2.28 dynamically
+          cargo zigbuild --release --locked -p mux-gui --target ${{ matrix.arch }}-unknown-linux-gnu.2.28
+          # the server needs nothing from the system, so it's fully static and runs on any distro
+          cargo zigbuild --release --locked -p mux-server --target ${{ matrix.arch }}-unknown-linux-musl
       - name: Package
         run: |
           # the bare server is what the windows app installs into wsl, named as `uname -m` reports
-          cp target/release/mux-server mux-server-linux-${{ matrix.arch }}
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/mux-server mux-server-linux-${{ matrix.arch }}
           dir=mux-linux-${{ matrix.arch }}
           mkdir -p $dir/icons
-          cp target/release/mux-gui $dir/
+          cp target/${{ matrix.arch }}-unknown-linux-gnu/release/mux-gui $dir/
           cp assets/mux.desktop $dir/
           cp assets/icons/*.png $dir/icons/
           cp LICENSE README.md $dir/
@@ -140,7 +152,7 @@ jobs:
 
   publish:
     needs: [linux, macos, windows]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}

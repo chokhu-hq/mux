@@ -246,6 +246,8 @@ fn now() -> i64 {
 // the local calendar day a moment falls on, using the offset in force at that moment so summer time is right
 #[cfg(unix)]
 fn local_day(at: i64) -> i64 {
+    // musl's time_t is flagged for a future change of size, but it is already 64 bits on every target mux builds for
+    #[allow(deprecated)]
     let time: libc::time_t = at as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // localtime_r only writes into the struct it's given

@@ -1,0 +1,135 @@
+# every push to main refreshes the rolling experimental prerelease, and a v* tag publishes a proper release
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# a newer push makes an older experimental build pointless
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    # the oldest supported ubuntu keeps the glibc requirement low enough for most distros
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxcb1-dev
+      - name: Build
+        run: cargo build --release --locked -p mux-gui
+      - name: Package
+        run: |
+          dir=mux-linux-${{ matrix.arch }}
+          mkdir -p $dir/icons
+          cp target/release/mux-gui $dir/
+          cp assets/mux.desktop $dir/
+          cp assets/icons/*.png $dir/icons/
+          cp LICENSE README.md $dir/
+          tar -czf $dir.tar.gz $dir
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mux-linux-${{ matrix.arch }}
+          path: mux-linux-${{ matrix.arch }}.tar.gz
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          cargo build --release --locked -p mux-gui --target aarch64-apple-darwin
+          cargo build --release --locked -p mux-gui --target x86_64-apple-darwin
+      - name: Package
+        run: |
+          app=Mux.app/Contents
+          mkdir -p $app/MacOS $app/Resources
+          # one universal binary runs natively on both apple silicon and intel macs
+          lipo -create -output $app/MacOS/mux-gui \
+            target/aarch64-apple-darwin/release/mux-gui \
+            target/x86_64-apple-darwin/release/mux-gui
+          set=mux.iconset
+          mkdir $set
+          for size in 16 32 128 256 512; do
+            cp assets/icons/mux-$size.png $set/icon_${size}x${size}.png
+          done
+          cp assets/icons/mux-32.png $set/icon_16x16@2x.png
+          cp assets/icons/mux-64.png $set/icon_32x32@2x.png
+          cp assets/icons/mux-256.png $set/icon_128x128@2x.png
+          cp assets/icons/mux-512.png $set/icon_256x256@2x.png
+          iconutil -c icns $set -o $app/Resources/mux.icns
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          cat > $app/Info.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Mux</string>
+            <key>CFBundleDisplayName</key><string>Mux</string>
+            <key>CFBundleIdentifier</key><string>com.chokhu.mux</string>
+            <key>CFBundleExecutable</key><string>mux-gui</string>
+            <key>CFBundleIconFile</key><string>mux</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
+            <key>CFBundleVersion</key><string>$version</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          # an ad hoc signature is the least apple silicon will run, until there's a developer id to sign with
+          codesign --force --deep --sign - Mux.app
+          ditto -c -k --keepParent Mux.app mux-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mux-macos-universal
+          path: mux-macos-universal.zip
+
+  publish:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish a tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+      - name: Refresh the experimental prerelease
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        run: |
+          gh release delete experimental --cleanup-tag --yes || true
+          gh release create experimental dist/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Experimental" \
+            --notes "Built from ${GITHUB_SHA::7} on main. These builds change with every push and may break.
+
+          On macOS the app isn't notarised yet, so after unzipping run \`xattr -dr com.apple.quarantine Mux.app\` before opening it."

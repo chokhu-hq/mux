@@ -28,7 +28,7 @@ jobs:
     # the oldest supported ubuntu keeps the glibc requirement low enough for most distros
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system libraries
@@ -46,7 +46,7 @@ jobs:
           cp assets/icons/*.png $dir/icons/
           cp LICENSE README.md $dir/
           tar -czf $dir.tar.gz $dir
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mux-linux-${{ matrix.arch }}
           path: mux-linux-${{ matrix.arch }}.tar.gz
@@ -54,7 +54,7 @@ jobs:
   macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -103,19 +103,19 @@ jobs:
           # an ad hoc signature is the least apple silicon will run, until there's a developer id to sign with
           codesign --force --deep --sign - Mux.app
           ditto -c -k --keepParent Mux.app mux-macos-universal.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mux-macos-universal
           path: mux-macos-universal.zip
 
   publish:
     needs: [linux, macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

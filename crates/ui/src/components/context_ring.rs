@@ -36,7 +36,15 @@ impl ContextRing {
     pub fn show(self, ui: &mut Ui) -> bool {
         let p = theme::palette(ui);
         let used = share(self.context);
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(control::SM), Sense::click());
+        // the share is written beside the ring, so it reads as a meter and never as a spinner
+        let label = ui.painter().layout_no_wrap(
+            format!("{}%", (used * 100.0).round() as u32),
+            font::regular(text::SM + 1.0),
+            p.text_faint,
+        );
+        let width = space::XS + super::usage_ring::SIZE + space::XS + label.size().x + space::SM;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, control::SM), Sense::click());
         if ui.is_rect_visible(rect) {
             let t = hover_t(ui, &response);
             ui.painter().rect_filled(
@@ -44,7 +52,25 @@ impl ContextRing {
                 CornerRadius::same(radius::MD),
                 p.hover.gamma_multiply(t),
             );
-            ring(ui, rect.center(), used);
+            let center = egui::pos2(
+                rect.left() + space::XS + super::usage_ring::SIZE / 2.0,
+                rect.center().y,
+            );
+            ring(ui, center, used);
+            // the number warms up with the ring once the window is getting full
+            let color = if used >= 0.75 {
+                level_color(p, used)
+            } else {
+                p.text_faint.lerp_to_gamma(p.text_muted, t)
+            };
+            ui.painter().galley(
+                egui::pos2(
+                    center.x + super::usage_ring::SIZE / 2.0 + space::XS,
+                    rect.center().y - label.size().y / 2.0,
+                ),
+                label,
+                color,
+            );
         }
         let context = self.context;
         let response = response.on_hover_cursor(CursorIcon::PointingHand);

@@ -1069,7 +1069,8 @@ fn agent_controls(
             .gap(space::XS)
     };
 
-    // the model chip carries the effort too, and drops the model's name first when the composer is narrow
+    // the model chip carries the effort too, and a narrow composer drops labels in steps:
+    // the permission's name first, then build or plan, then the model's name, leaving their icons
     let label = current.map_or(settings.provider.label(), |m| m.name.as_str());
     let effort = current
         .filter(|m| !m.efforts.is_empty())
@@ -1078,11 +1079,30 @@ fn agent_controls(
         Some(effort) => format!("{label} · {effort}"),
         None => label.to_owned(),
     };
+    let access = settings.access;
+    let mode = if settings.plan { "Plan" } else { "Build" };
+    let place = if settings.worktree {
+        "Worktree"
+    } else {
+        "Local"
+    };
     let gap = ui.spacing().item_spacing.x;
-    let options_width = Chip::new("Plan · Fast").icon(icons::LIGHTNING).width(ui) + gap;
-    let fits = Chip::new(&full_label).provider(settings.provider).width(ui) + gap + options_width
-        <= ui.available_width();
-    let shown = if fits {
+    let separators = if locked { 2.0 } else { 3.0 } * (space::SM + gap);
+    let width = |label: &str| Chip::new(label).icon(icons::LIGHTNING).width(ui) + gap;
+    let toggle = |label: &str| {
+        Chip::new(label)
+            .icon(icons::LIGHTNING)
+            .toggle(false)
+            .width(ui)
+            + gap
+    };
+    let place_width = if locked { 0.0 } else { width(place) };
+    let budget = ui.available_width() - separators - place_width;
+    let model_full = Chip::new(&full_label).provider(settings.provider).width(ui) + gap;
+    let show_access = model_full + toggle(mode) + width(access.label()) <= budget;
+    let show_mode = model_full + toggle(mode) + width("") <= budget;
+    let show_model = model_full + toggle("") + width("") <= budget;
+    let shown = if show_model {
         full_label.clone()
     } else {
         effort.clone().unwrap_or_default()
@@ -1263,28 +1283,52 @@ fn agent_controls(
                     }
                 }
             }
+            // fast mode is a faster tier of the same model, so it lives with the model too
+            if let Some(detail) = current.and_then(|m| m.fast.as_deref()) {
+                menu_divider(ui);
+                if MenuItem::new("Fast mode")
+                    .icon(icons::LIGHTNING)
+                    .detail(detail)
+                    .checked(settings.fast)
+                    .show(ui)
+                    .clicked()
+                {
+                    let mut changed = settings.clone();
+                    changed.fast = !changed.fast;
+                    next = Some(changed);
+                    ui.close();
+                }
+            }
         });
 
-    // everything else about how the agent works lives in one menu, with only what's switched on named
-    let fast = current.and_then(|m| m.fast.clone());
-    let access = settings.access;
-    let mut on = Vec::new();
-    if settings.plan {
-        on.push("Plan");
+    control_separator(ui);
+    // build or plan, a toggle since there are only the two
+    let plan = Chip::new(if show_mode { mode } else { "" })
+        .icon(if settings.plan {
+            icons::LIST_CHECKS
+        } else {
+            icons::ROBOT
+        })
+        .toggle(settings.plan)
+        .show(ui)
+        .tip(if settings.plan {
+            "Plan mode: the agent plans and waits for you. Click to build instead"
+        } else {
+            "Build mode: the agent makes changes. Click to plan first"
+        });
+    if plan.clicked() {
+        let mut changed = settings.clone();
+        changed.plan = !changed.plan;
+        next = Some(changed);
     }
-    if settings.fast && fast.is_some() {
-        on.push("Fast");
-    }
-    if settings.worktree {
-        on.push("Worktree");
-    }
-    let summary = on.join(" · ");
-    let chip = Chip::new(&summary)
+
+    control_separator(ui);
+    let chip = Chip::new(if show_access { access.label() } else { "" })
         .icon(access_icon(access))
         .show(ui)
         .tip(format!("Permissions: {}", access.label()));
     menu(&chip).show(|ui| {
-        ui.set_width(300.0);
+        ui.set_width(320.0);
         ui.spacing_mut().item_spacing.y = 0.0;
         menu_caption(ui, "Permissions");
         for option in Access::ALL {
@@ -1301,9 +1345,22 @@ fn agent_controls(
                 ui.close();
             }
         }
-        // where it works can only be picked before the first message
-        if !locked {
-            menu_divider(ui);
+    });
+
+    // where it works can only be picked before the first message
+    if !locked {
+        control_separator(ui);
+        let chip = Chip::new(place)
+            .icon(if settings.worktree {
+                icons::GIT_BRANCH
+            } else {
+                icons::FOLDER
+            })
+            .show(ui)
+            .tip("Where the agent works");
+        menu(&chip).show(|ui| {
+            ui.set_width(300.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
             menu_caption(ui, "Where it works");
             for (worktree, label, icon, detail) in [
                 (
@@ -1332,34 +1389,8 @@ fn agent_controls(
                     ui.close();
                 }
             }
-        }
-        menu_divider(ui);
-        if MenuItem::new("Plan mode")
-            .icon(icons::LIST_CHECKS)
-            .detail("Plan first, and wait for you before changing anything")
-            .checked(settings.plan)
-            .show(ui)
-            .clicked()
-        {
-            let mut changed = settings.clone();
-            changed.plan = !changed.plan;
-            next = Some(changed);
-            ui.close();
-        }
-        if let Some(detail) = &fast
-            && MenuItem::new("Fast mode")
-                .icon(icons::LIGHTNING)
-                .detail(detail)
-                .checked(settings.fast)
-                .show(ui)
-                .clicked()
-        {
-            let mut changed = settings.clone();
-            changed.fast = !changed.fast;
-            next = Some(changed);
-            ui.close();
-        }
-    });
+        });
+    }
 
     next
 }
@@ -1508,6 +1539,17 @@ fn changes_button(ui: &mut egui::Ui, added: usize, removed: usize) -> egui::Resp
     ui.painter()
         .galley(pos2(x, y - minus.size().y / 2.0), minus, p.danger);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+// a thin upright line between groups of composer controls
+fn control_separator(ui: &mut egui::Ui) {
+    let p = theme::palette(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(space::SM, 16.0), egui::Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        egui::Stroke::new(1.0, p.border_strong),
+    );
 }
 
 fn menu_caption(ui: &mut egui::Ui, label: &str) {

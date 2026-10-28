@@ -76,17 +76,15 @@ impl<'a> MenuItem<'a> {
                     .size()
                     .x,
             );
-        let check_w = if self.checked {
-            icon::MD + space::SM
-        } else {
-            0.0
-        };
+        // every row leaves room for a check, so a menu sizes the same whichever row is ticked
+        let check_w = icon::MD + space::SM;
         let natural = MIN_WIDTH.max(space::SM * 3.0 + icon_w + label_w + check_w);
-        // menus measure on a sizing pass first, then every row fills the settled width
+        // menus measure on a sizing pass first, then every row fills exactly the settled width, so checks
+        // and dividers line up and a long row shortens its text rather than poking out
         let width = if ui.is_sizing_pass() {
             natural
         } else {
-            ui.available_width().max(natural)
+            ui.available_width()
         };
         let height = if self.detail.is_empty() {
             control::MD
@@ -138,29 +136,29 @@ impl<'a> MenuItem<'a> {
                 }
                 x += meter_width(total) + space::SM;
             }
+            // room is always kept for the check, so text ends at the same place whether or not this row has it
+            let room = rect.right() - space::SM - icon::MD - space::SM - x;
+            let line = |text: &str, font: egui::FontId, color: egui::Color32| {
+                let mut job =
+                    egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+                job.wrap = egui::text::TextWrapping {
+                    max_width: room.max(0.0),
+                    max_rows: 1,
+                    break_anywhere: true,
+                    overflow_character: Some('…'),
+                };
+                ui.painter().layout_job(job)
+            };
+            let label = line(self.label, font::regular(text::MD), fg);
             if self.detail.is_empty() {
-                ui.painter().text(
-                    pos2(x, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    self.label,
-                    font::regular(text::MD),
-                    fg,
-                );
+                let y = rect.center().y - label.size().y / 2.0;
+                ui.painter().galley(pos2(x, y), label, fg);
             } else {
-                ui.painter().text(
-                    pos2(x, rect.center().y - 1.0),
-                    Align2::LEFT_BOTTOM,
-                    self.label,
-                    font::regular(text::MD),
-                    fg,
-                );
-                ui.painter().text(
-                    pos2(x, rect.center().y + 1.0),
-                    Align2::LEFT_TOP,
-                    self.detail,
-                    font::regular(text::SM),
-                    p.text_faint,
-                );
+                let detail = line(self.detail, font::regular(text::SM), p.text_faint);
+                let y = rect.center().y - 1.0 - label.size().y;
+                ui.painter().galley(pos2(x, y), label, fg);
+                ui.painter()
+                    .galley(pos2(x, rect.center().y + 1.0), detail, p.text_faint);
             }
             if self.checked {
                 ui.painter().text(

@@ -126,24 +126,31 @@ impl<'a> Composer<'a> {
 
         let focus = spring_bool(ui.ctx(), edit_id.with("focus"), focused, Spring::QUICK);
         Frame::new()
-            .fill(p.surface)
+            .fill(p.elevated)
             .stroke(Stroke::new(
                 1.0,
-                // focus firms the border a little rather than lighting it up in accent blue
-                p.border.lerp_to_gamma(p.border_strong, focus),
+                // a faint outline like t3 code's that firms up with focus instead of turning blue
+                if ui.visuals().dark_mode {
+                    Color32::from_white_alpha(13)
+                        .lerp_to_gamma(Color32::from_white_alpha(30), focus)
+                } else {
+                    Color32::from_black_alpha(20)
+                        .lerp_to_gamma(Color32::from_black_alpha(40), focus)
+                },
             ))
             .corner_radius(radius::XL)
             .inner_margin(Margin {
-                left: 12,
-                right: 8,
-                top: 10,
-                bottom: 8,
+                left: 16,
+                right: 12,
+                top: 14,
+                bottom: 12,
             })
+            // only the light theme lifts it with a shadow, the dark one lets the outline do it
             .shadow(egui::Shadow {
                 offset: [0, 4],
                 blur: 16,
                 spread: 0,
-                color: Color32::from_black_alpha(if ui.visuals().dark_mode { 60 } else { 12 }),
+                color: Color32::from_black_alpha(if ui.visuals().dark_mode { 0 } else { 14 }),
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -165,34 +172,29 @@ impl<'a> Composer<'a> {
                                 .id(edit_id)
                                 .frame(Frame::NONE)
                                 .hint_text(self.hint)
-                                .font(font::regular(text::MD))
+                                .font(font::regular(text::MD + 1.0))
                                 .desired_rows(1)
                                 .desired_width(f32::INFINITY)
                                 .margin(Margin::ZERO),
                         );
                     });
-                ui.add_space(space::XS);
+                ui.add_space(space::SM);
                 ui.horizontal(|ui| {
-                    if IconButton::new(icons::PAPERCLIP, "Attach")
-                        .show(ui)
-                        .tip("Attach files")
-                        .clicked()
-                    {
-                        action = Some(ComposerAction::Attach);
-                    }
                     if let Some(controls) = self.controls.take() {
-                        // the controls get what's left once send and the context ring have their room,
+                        // the controls get what's left once send, the context ring and attach have their room,
                         // and are clipped to it, so they shrink rather than slide under them
                         let gap = ui.spacing().item_spacing.x;
+                        // room for the ring with a label as wide as 100%
                         let ring = if self.context.is_some() {
-                            space::XS + control::SM + gap
+                            56.0 + gap
                         } else {
                             0.0
                         };
-                        let budget = (ui.available_width() - SEND - ring - gap).max(0.0);
+                        let attach = control::SM + gap;
+                        let budget = (ui.available_width() - SEND - ring - attach - gap).max(0.0);
                         let row = ui.available_rect_before_wrap();
                         ui.allocate_ui_with_layout(
-                            vec2(budget, control::SM),
+                            vec2(budget, control::MD),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 ui.set_clip_rect(ui.clip_rect().intersect(
@@ -225,14 +227,19 @@ impl<'a> Composer<'a> {
                                 send = true;
                             }
                         }
-                        if let Some(context) = self.context {
-                            ui.add_space(space::XS);
-                            if ContextRing::new(context)
+                        if let Some(context) = self.context
+                            && ContextRing::new(context)
                                 .can_compact(!self.running)
                                 .show(ui)
-                            {
-                                action = Some(ComposerAction::Compact);
-                            }
+                        {
+                            action = Some(ComposerAction::Compact);
+                        }
+                        if IconButton::new(icons::PAPERCLIP, "Attach")
+                            .show(ui)
+                            .tip("Attach files")
+                            .clicked()
+                        {
+                            action = Some(ComposerAction::Attach);
                         }
                     });
                 });
@@ -311,7 +318,7 @@ fn compact_notice(ui: &mut Ui, context: ContextUsage) -> bool {
     clicked
 }
 
-const SEND: f32 = 26.0;
+const SEND: f32 = 32.0;
 
 fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response {
     let p = theme::palette(ui);
@@ -325,10 +332,14 @@ fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response 
     let pressed = press_t(ui, &response);
     let (fill, fg) = match (enabled, stop) {
         (_, true) => (p.text, p.bg),
-        (true, false) => (p.accent.lerp_to_gamma(p.accent_hover, t), p.on_accent),
-        (false, false) => (p.active, p.text_faint),
+        // filled in the text colour like t3 code, so it reads as the one thing to press
+        (true, false) => (p.text.gamma_multiply(0.9).lerp_to_gamma(p.text, t), p.bg),
+        (false, false) => (theme::tint(p, 0.12), p.text_faint),
     };
-    let rect = rect.shrink(26.0 * 0.04 * pressed);
+    // grows a touch under the pointer and gives a little when pressed
+    let rect = rect
+        .expand(SEND * 0.025 * t * f32::from(u8::from(enabled)))
+        .shrink(SEND * 0.04 * pressed);
     ui.painter()
         .circle_filled(rect.center(), rect.width() / 2.0, fill);
     let glyph = if stop {

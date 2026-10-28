@@ -11,6 +11,9 @@ pub struct Chip<'a> {
     label: &'a str,
     provider: Option<Provider>,
     icon: Option<char>,
+    // toggles have no menu, so no chevron
+    caret: bool,
+    pressed: bool,
 }
 
 impl<'a> Chip<'a> {
@@ -19,7 +22,16 @@ impl<'a> Chip<'a> {
             label,
             provider: None,
             icon: None,
+            caret: true,
+            pressed: false,
         }
+    }
+
+    // a toggle rather than a menu, without the chevron
+    pub fn toggle(mut self, pressed: bool) -> Self {
+        self.caret = false;
+        self.pressed = pressed;
+        self
     }
 
     // leads with an agent's logo, for pickers that choose between agents
@@ -47,7 +59,12 @@ impl<'a> Chip<'a> {
                 .size()
                 .x
         };
-        space::SM + self.mark_width() + label_w + space::XS + icon::SM + space::SM
+        let caret_w = if self.caret {
+            space::XS + icon::SM
+        } else {
+            0.0
+        };
+        space::SM + self.mark_width() + label_w + caret_w + space::SM
     }
 
     fn mark_width(&self) -> f32 {
@@ -68,19 +85,26 @@ impl<'a> Chip<'a> {
         let mark_w = self.mark_width();
         let width = self.width(ui);
         let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(width, control::SM), Sense::click());
+            ui.allocate_exact_size(Vec2::new(width, control::MD), Sense::click());
         response.widget_info(|| WidgetInfo::labeled(egui::Role::ComboBox, true, self.label));
 
         if ui.is_rect_visible(rect) {
             let t = hover_t(ui, &response);
             let open =
                 egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-            let fill = p.hover.gamma_multiply(if open { 1.0 } else { t });
+            let lit = if open || self.pressed { 1.0 } else { t };
+            let fill = if self.pressed {
+                p.active.lerp_to_gamma(p.hover, t)
+            } else {
+                p.hover.gamma_multiply(lit)
+            };
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(radius::MD), fill);
-            let color = p
+            // words sit a little back from full strength and come forward on hover, icons stay quieter
+            let text_color = p.text.gamma_multiply(0.8).lerp_to_gamma(p.text, lit);
+            let icon_color = p
                 .text_muted
-                .lerp_to_gamma(p.text, if open { 1.0 } else { t });
+                .lerp_to_gamma(p.text, if self.pressed { 1.0 } else { t * 0.5 });
             let mut x = rect.left() + space::SM;
             if let Some(provider) = self.provider {
                 let center = pos2(x + icon::MD / 2.0, rect.center().y);
@@ -89,7 +113,7 @@ impl<'a> Chip<'a> {
                     center,
                     icon::MD,
                     provider,
-                    provider_color(provider, color),
+                    provider_color(provider, icon_color),
                 );
                 x += mark_w;
             } else if let Some(glyph) = self.icon {
@@ -98,22 +122,24 @@ impl<'a> Chip<'a> {
                     Align2::CENTER_CENTER,
                     glyph,
                     font::icon(icon::MD),
-                    color,
+                    icon_color,
                 );
                 x += mark_w;
             }
             ui.painter().galley_with_override_text_color(
                 pos2(x, rect.center().y - galley.size().y / 2.0),
                 galley.clone(),
-                color,
+                text_color,
             );
-            ui.painter().text(
-                pos2(rect.right() - space::SM, rect.center().y),
-                Align2::RIGHT_CENTER,
-                icons::CARET_DOWN,
-                font::icon(icon::SM),
-                color,
-            );
+            if self.caret {
+                ui.painter().text(
+                    pos2(rect.right() - space::SM, rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    icons::CARET_DOWN,
+                    font::icon(icon::SM - 1.0),
+                    p.text_faint,
+                );
+            }
         }
         response.on_hover_cursor(CursorIcon::PointingHand)
     }

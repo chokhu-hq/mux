@@ -48,6 +48,7 @@ pub const PLUS: char = '\u{e3d4}';
 pub const ROBOT: char = '\u{e762}';
 pub const SHIELD_CHECK: char = '\u{e40c}';
 pub const SIDEBAR_SIMPLE: char = '\u{ec24}';
+pub const SLIDERS_HORIZONTAL: char = '\u{e434}';
 pub const SPARKLE: char = '\u{e6a2}';
 pub const SPINNER: char = '\u{e66a}';
 pub const STOP: char = '\u{e46c}';
@@ -60,7 +61,7 @@ pub const WARNING_CIRCLE: char = '\u{e4e2}';
 pub const X: char = '\u{e4f6}';
 pub const X_CIRCLE: char = '\u{e4f8}';
 
-pub const ALL: [(&str, char); 60] = [
+pub const ALL: [(&str, char); 61] = [
     ("arrows-in-line-vertical", ARROWS_IN_LINE_VERTICAL),
     ("arrow-clockwise", ARROW_CLOCKWISE),
     ("arrow-square-out", ARROW_SQUARE_OUT),
@@ -110,6 +111,7 @@ pub const ALL: [(&str, char); 60] = [
     ("robot", ROBOT),
     ("shield-check", SHIELD_CHECK),
     ("sidebar-simple", SIDEBAR_SIMPLE),
+    ("sliders-horizontal", SLIDERS_HORIZONTAL),
     ("sparkle", SPARKLE),
     ("spinner", SPINNER),
     ("stop", STOP),

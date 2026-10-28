@@ -1760,8 +1760,9 @@ impl App {
                 self.opened.0.clone(),
                 ctx.clone(),
             );
+            // only linux has desktop notifications so far
             #[cfg(not(target_os = "linux"))]
-            let _ = body;
+            let _ = (body, &alert.title);
         }
         for id in self.opened.1.try_iter() {
             self.sessions.select(id);

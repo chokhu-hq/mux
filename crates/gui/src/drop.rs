@@ -1,6 +1,7 @@
 use std::io::Read;
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use wayland_backend::client::Backend;
@@ -13,6 +14,14 @@ use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 
 const URI_LIST: &str = "text/uri-list";
+const TEXT_TYPES: [&str; 5] = [
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "TEXT",
+    "STRING",
+];
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 pub enum DropEvent {
     Hovering(bool),
@@ -22,6 +31,7 @@ pub enum DropEvent {
 struct State {
     connection: Connection,
     offer: Option<WlDataOffer>,
+    selection: Arc<Mutex<Option<WlDataOffer>>>,
     events: Sender<DropEvent>,
     ctx: eframe::egui::Context,
 }
@@ -33,11 +43,72 @@ impl State {
     }
 }
 
+// what's on the clipboard, read straight from the compositor because the xwayland fallback egui uses can't see images
+pub struct Clipboard {
+    connection: Connection,
+    selection: Arc<Mutex<Option<WlDataOffer>>>,
+}
+
+impl Clipboard {
+    // a paste as egui events: the text and the picture, whichever the clipboard has
+    pub fn paste(&self) -> Vec<eframe::egui::Event> {
+        let Some(offer) = self.selection.lock().ok().and_then(|s| s.clone()) else {
+            return Vec::new();
+        };
+        let types = offer
+            .data::<Mutex<Vec<String>>>()
+            .and_then(|t| t.lock().ok().map(|t| t.clone()))
+            .unwrap_or_default();
+        let mut events = Vec::new();
+        if let Some(mime) = pick(&types, &TEXT_TYPES)
+            && let Some(bytes) = self.receive(&offer, mime)
+        {
+            let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+            if !text.is_empty() {
+                events.push(eframe::egui::Event::Paste(text));
+            }
+        }
+        if let Some(mime) = pick(&types, &IMAGE_TYPES)
+            && let Some(bytes) = self.receive(&offer, mime)
+            && let Ok(image) = image::load_from_memory(&bytes)
+        {
+            let rgba = image.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let image = eframe::egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            events.push(eframe::egui::Event::PasteImage(Arc::new(image)));
+        }
+        events
+    }
+
+    fn receive(&self, offer: &WlDataOffer, mime: &str) -> Option<Vec<u8>> {
+        let (mut reader, writer) = std::io::pipe().ok()?;
+        offer.receive(mime.to_owned(), std::os::fd::AsFd::as_fd(&writer));
+        self.connection.flush().ok()?;
+        drop(writer);
+        // read on the side with a deadline, so an app that never answers can't freeze the window
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = reader.read_to_end(&mut bytes);
+            let _ = tx.send(bytes);
+        });
+        rx.recv_timeout(Duration::from_secs(2)).ok()
+    }
+}
+
+// the first of the wanted types that's on offer, in order of preference
+fn pick<'a>(offered: &[String], wanted: &[&'a str]) -> Option<&'a str> {
+    wanted
+        .iter()
+        .find(|w| offered.iter().any(|t| t == *w))
+        .copied()
+}
+
 // winit has no drag and drop on wayland, so files dropped on the window are read straight from the seat's data device
 pub fn listen(
     window: &impl HasDisplayHandle,
     ctx: eframe::egui::Context,
-) -> Result<Receiver<DropEvent>, String> {
+) -> Result<(Receiver<DropEvent>, Clipboard), String> {
     let display = window.display_handle().map_err(|e| e.to_string())?;
     let RawDisplayHandle::Wayland(display) = display.as_raw() else {
         return Err("not a wayland session".to_owned());
@@ -53,9 +124,15 @@ pub fn listen(
     let device = manager.get_data_device(&seat, &qh, ());
 
     let (tx, rx) = mpsc::channel();
+    let selection = Arc::new(Mutex::new(None));
+    let clipboard = Clipboard {
+        connection: connection.clone(),
+        selection: selection.clone(),
+    };
     let mut state = State {
         connection,
         offer: None,
+        selection,
         events: tx,
         ctx,
     };
@@ -66,7 +143,7 @@ pub fn listen(
             while queue.blocking_dispatch(&mut state).is_ok() {}
         })
         .map_err(|e| e.to_string())?;
-    Ok(rx)
+    Ok((rx, clipboard))
 }
 
 impl Dispatch<WlDataDevice, ()> for State {
@@ -96,8 +173,14 @@ impl Dispatch<WlDataDevice, ()> for State {
                     None => {}
                 }
             }
-            // clipboard offers arrive here too, and the clipboard is left to winit
-            wl_data_device::Event::Selection { id: Some(offer) } => offer.destroy(),
+            // the newest clipboard offer replaces the last, which is no longer worth anything
+            wl_data_device::Event::Selection { id } => {
+                if let Ok(mut selection) = state.selection.lock()
+                    && let Some(old) = std::mem::replace(&mut *selection, id)
+                {
+                    old.destroy();
+                }
+            }
             wl_data_device::Event::Leave => {
                 if let Some(offer) = state.offer.take() {
                     offer.destroy();

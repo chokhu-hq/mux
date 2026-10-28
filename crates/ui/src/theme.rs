@@ -13,12 +13,17 @@ pub mod space {
     pub const XL: f32 = 24.0;
 }
 
+// one radius per kind of thing, so shapes of the same role always match
 pub mod radius {
+    // small marks inside other things, like keys, swatches, chart bars and a segmented control's thumb
     pub const SM: u8 = 4;
+    // controls and the rows of a menu
     pub const MD: u8 = 6;
+    // cards, menus, tooltips, tiles and sidebar rows
     pub const LG: u8 = 10;
     // large floating surfaces like the palette, the composer and message bubbles
     pub const XL: u8 = 14;
+    // pills and progress bars
     pub const FULL: u8 = u8::MAX;
 }
 
@@ -203,6 +208,25 @@ pub const LIGHT: Palette = Palette {
     ],
 };
 
+// every card sitting in the page, from chat tool calls to settings sections, starts from this frame
+pub fn card(ui: &egui::Ui) -> egui::Frame {
+    let p = palette(ui);
+    egui::Frame::new()
+        .fill(tint(p, 0.03))
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(radius::LG))
+}
+
+// everything that floats above the window, like menus, tooltips and dragged rows, wears the same frame
+pub fn floating(ui: &egui::Ui) -> egui::Frame {
+    let p = palette(ui);
+    egui::Frame::new()
+        .fill(p.elevated)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .corner_radius(CornerRadius::same(radius::LG))
+        .shadow(ui.visuals().popup_shadow)
+}
+
 // a wash of the text colour, which reads the same on solid and see-through backgrounds
 pub fn tint(p: &Palette, amount: f32) -> Color32 {
     p.text.gamma_multiply(amount)
@@ -220,6 +244,8 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
     // pictures in chat are read from disk by path
     egui_extras::install_image_loaders(ctx);
+    // egui's 40 points a wheel notch crawls through long chats and files
+    ctx.options_mut(|o| o.input_options.line_scroll_speed = 90.0);
     ctx.style_mut_of(Theme::Dark, |style| apply(style, &DARK, true));
     ctx.style_mut_of(Theme::Light, |style| apply(style, &LIGHT, false));
 }
@@ -331,7 +357,7 @@ fn apply(style: &mut Style, p: &Palette, dark: bool) {
     v.weak_text_color = Some(p.text_muted);
     v.panel_fill = p.bg;
     v.window_fill = p.elevated;
-    v.window_stroke = Stroke::new(1.0, p.border);
+    v.window_stroke = Stroke::new(1.0, p.border_strong);
     v.window_corner_radius = CornerRadius::same(radius::LG);
     v.menu_corner_radius = CornerRadius::same(radius::LG);
     v.extreme_bg_color = p.surface;

@@ -54,7 +54,7 @@ pub fn size() -> Option<Vec2> {
     Some(vec2(w.parse().ok()?, h.parse().ok()?))
 }
 
-fn save(path: &Path, image: &ColorImage) -> io::Result<()> {
+pub(crate) fn save(path: &Path, image: &ColorImage) -> io::Result<()> {
     let [width, height] = image.size;
     let mut encoder = png::Encoder::new(
         BufWriter::new(File::create(path)?),

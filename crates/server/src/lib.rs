@@ -1,4 +1,5 @@
 mod agent;
+mod history;
 mod models;
 mod process;
 mod store;
@@ -42,6 +43,7 @@ pub enum Event {
         generation: u64,
     },
     Models(Provider, Result<models::Catalog, String>),
+    History(Box<history::History>),
 }
 
 // blocks until ctrl+c or a client asks the server to shut down
@@ -79,6 +81,7 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         models: HashMap::new(),
         fetching_models: HashSet::new(),
         usage: HashMap::new(),
+        history: Some(Box::default()),
         attached: HashMap::new(),
         generation: 0,
         events: events.clone(),
@@ -181,6 +184,8 @@ struct Server {
     fetching_models: HashSet<Provider>,
     // the latest plan limits each agent cli reported
     usage: HashMap<Provider, Vec<UsageWindow>>,
+    // token use read from the clis' transcripts, away on a blocking thread while it scans
+    history: Option<Box<history::History>>,
     // which clients are watching each session's terminal
     attached: HashMap<u64, HashSet<u64>>,
     // bumped per spawn so output from a killed process can't leak into its replacement
@@ -273,6 +278,16 @@ impl Server {
                     self.agent_changed(session);
                 }
             }
+            Event::History(history) => {
+                let (today, days) = history.summary();
+                self.history = Some(history);
+                for tx in self.clients.values() {
+                    let _ = tx.send(ServerMsg::TokenHistory {
+                        today,
+                        days: days.clone(),
+                    });
+                }
+            }
             Event::Models(provider, result) => {
                 self.fetching_models.remove(&provider);
                 match result {
@@ -325,6 +340,10 @@ impl Server {
             }
             ClientMsg::DeleteGroup { id } => {
                 self.store.delete_group(id);
+                self.changed();
+            }
+            ClientMsg::MoveGroup { id, index } => {
+                self.store.move_group(id, index);
                 self.changed();
             }
             ClientMsg::ToggleGroup { id } => {
@@ -395,14 +414,21 @@ impl Server {
                 };
                 self.send(client, msg);
                 for provider in Provider::ALL {
-                    if self.models.contains_key(&provider) || !self.fetching_models.insert(provider)
-                    {
-                        continue;
+                    if !self.models.contains_key(&provider) {
+                        self.fetch_models(provider);
                     }
+                }
+            }
+            ClientMsg::RefreshUsage => {
+                for provider in Provider::ALL {
+                    self.fetch_models(provider);
+                }
+                // a scan already running answers this request too
+                if let Some(mut history) = self.history.take() {
                     let events = self.events.clone();
-                    tokio::spawn(async move {
-                        let result = models::fetch(provider).await.map_err(|e| e.to_string());
-                        let _ = events.send(Event::Models(provider, result));
+                    tokio::task::spawn_blocking(move || {
+                        history.scan();
+                        let _ = events.send(Event::History(history));
                     });
                 }
             }
@@ -442,6 +468,7 @@ impl Server {
                 self.agent(id).stop();
                 self.agent_changed(id);
             }
+            ClientMsg::AgentCompact { id } => self.agent_compact(id),
         }
     }
 
@@ -518,6 +545,34 @@ impl Server {
             }
             Some(dir) => agent.send(text, attachments, id, generation, dir, &events),
         }
+        self.agent_changed(id);
+        self.changed();
+    }
+
+    // the model list comes with the plan limits, so fetching it again is how usage is refreshed
+    fn fetch_models(&mut self, provider: Provider) {
+        if !self.fetching_models.insert(provider) {
+            return;
+        }
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let result = models::fetch(provider).await.map_err(|e| e.to_string());
+            let _ = events.send(Event::Models(provider, result));
+        });
+    }
+
+    fn agent_compact(&mut self, id: u64) {
+        let Some(dir) = self
+            .store
+            .session_path(id)
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir())
+        else {
+            return;
+        };
+        self.generation += 1;
+        let (generation, events) = (self.generation, self.events.clone());
+        self.agent(id).compact(id, generation, dir, &events);
         self.agent_changed(id);
         self.changed();
     }

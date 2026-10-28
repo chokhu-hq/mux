@@ -54,7 +54,7 @@ impl<'a> GroupHeader<'a> {
     pub fn show(self, ui: &mut Ui) -> GroupHeaderResponse {
         let p = theme::palette(ui);
         let size = Vec2::new(ui.available_width(), HEIGHT);
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         response.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, self.label));
 
         let button = Vec2::splat(control::SM);

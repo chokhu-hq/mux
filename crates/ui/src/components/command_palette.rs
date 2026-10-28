@@ -133,11 +133,8 @@ impl CommandPalette {
                 let mut panel_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel));
                 panel_ui.multiply_opacity(fade);
 
-                let frame = Frame::new()
-                    .fill(p.elevated)
-                    .stroke(Stroke::new(1.0, p.border_strong))
+                let frame = theme::floating(ui)
                     .corner_radius(CornerRadius::same(radius::XL))
-                    .shadow(ui.visuals().popup_shadow)
                     .inner_margin(Margin::same(space::XS as i8))
                     .show(&mut panel_ui, |ui| {
                         ui.set_width(WIDTH - space::XS * 2.0);

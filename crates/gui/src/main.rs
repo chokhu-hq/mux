@@ -6,15 +6,16 @@ use mux_ui::shortcut;
 use mux_ui::theme::{self, font, icon, space, text};
 use mux_ui::window::{self, TITLEBAR_HEIGHT, WindowFrame};
 use mux_ui::{
-    Chip, Command, CommandPalette, EmptyState, IconButton, MenuItem, SIDEBAR_SHORTCUT, Segmented,
-    Sidebar, TooltipExt, UsageRing, icons, provider_color, provider_mark,
+    Chip, Command, CommandPalette, EmptyState, FileView, FileViewAction, IconButton, ImageViewer,
+    MenuItem, PALETTE_SHORTCUT, SIDEBAR_SHORTCUT, Sidebar, TooltipExt, UsageRing, icons,
+    link_target, open_in_editor, provider_color, provider_mark,
 };
 
 use link::Link;
 use mux_core::protocol::{self as wire, AgentSettings};
 use mux_core::{Access, Provider};
 use mux_ui::chat::{ChatAction, ChatView, Decision};
-use prefs::{Appearance, Prefs, Transparency};
+use prefs::Prefs;
 use sessions::{Models, Sessions};
 
 #[cfg(target_os = "linux")]
@@ -25,7 +26,9 @@ mod drop;
 mod link;
 mod prefs;
 mod sessions;
+mod settings;
 mod terminal;
+mod token_usage;
 
 fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--server") {
@@ -37,6 +40,8 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: window::viewport("Mux", vec2(1200.0, 800.0)),
+        // on wayland mux reads the clipboard itself, since egui's fallback can't see pictures
+        clipboard_shortcuts: !wayland(),
         ..Default::default()
     };
     eframe::run_native(
@@ -53,7 +58,7 @@ const NEW_AGENT: KeyboardShortcut = shortcut::app(Key::T);
 const NEW_SHELL: KeyboardShortcut = shortcut::app(Key::N);
 const SETTINGS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
 
-const COMMANDS: [Command; 5] = [
+const COMMANDS: [Command; 6] = [
     Command::new("new-agent", "New agent session")
         .icon(icons::ROBOT)
         .shortcut(NEW_AGENT),
@@ -64,6 +69,7 @@ const COMMANDS: [Command; 5] = [
     Command::new("toggle-sidebar", "Toggle sidebar")
         .icon(icons::SIDEBAR_SIMPLE)
         .shortcut(SIDEBAR_SHORTCUT),
+    Command::new("compact", "Compact conversation").icon(icons::ARROWS_IN_LINE_VERTICAL),
     Command::new("settings", "Open settings")
         .icon(icons::GEAR)
         .shortcut(SETTINGS),
@@ -79,18 +85,30 @@ struct App {
     // what the titlebar shows for the selected session, filled in while drawing it
     titlebar: Option<TitleBar>,
     prefs: Prefs,
-    // set by the settings command so the gear's popover opens on the next frame
-    open_settings: bool,
+    // the settings page stands in for the selected session until it's closed
+    settings_open: bool,
+    settings_tab: settings::Tab,
+    // usage is asked for once each time the page opens
+    usage_requested: bool,
     // asked for once on the first frame, and kept alive so the compositor keeps blurring
     #[cfg(target_os = "linux")]
     blur: Option<Result<blur::Blur, String>>,
     // started on the first frame, since winit doesn't pass wayland drops on
     #[cfg(target_os = "linux")]
     drops: Option<Option<std::sync::mpsc::Receiver<drop::DropEvent>>>,
+    // pastes read straight from the compositor, started alongside the drop listener
+    #[cfg(target_os = "linux")]
+    clipboard: Option<drop::Clipboard>,
     // files are being dragged over the window
     dropping: bool,
     // files dropped since the last frame, for the open agent to pick up
     dropped: Vec<String>,
+    // which agent clis are on PATH, checked once for the welcome screen
+    installed: Option<[(Provider, bool); 2]>,
+    // the file opened from a chat link, kept while the panel slides shut
+    viewer: Option<FileView>,
+    viewer_open: bool,
+    viewer_width: f32,
 }
 
 struct TitleBar {
@@ -112,13 +130,21 @@ impl App {
             link: Link::start(ctx),
             titlebar: None,
             prefs: Prefs::load(),
-            open_settings: false,
+            settings_open: false,
+            settings_tab: settings::Tab::default(),
+            usage_requested: false,
             #[cfg(target_os = "linux")]
             blur: None,
             #[cfg(target_os = "linux")]
             drops: None,
+            #[cfg(target_os = "linux")]
+            clipboard: None,
             dropping: false,
             dropped: Vec::new(),
+            installed: None,
+            viewer: None,
+            viewer_open: false,
+            viewer_width: 560.0,
         };
         app.prefs.apply(ctx);
         app
@@ -130,7 +156,14 @@ impl App {
             "new-shell" => self.sessions.create("Shell", SessionKind::Shell),
             "new-group" => self.sessions.create_group_from_folder(),
             "toggle-sidebar" => self.sidebar.toggle(),
-            "settings" => self.open_settings = true,
+            "settings" => self.settings_open = true,
+            "compact" => {
+                if let Some((session, _, outbox, _)) = self.sessions.selected()
+                    && session.kind == SessionKind::Agent
+                {
+                    outbox.push(ClientMsg::AgentCompact { id: session.id });
+                }
+            }
             _ => {}
         }
     }
@@ -144,6 +177,16 @@ impl App {
 
         let mut ui_list = ui.new_child(UiBuilder::new().max_rect(list));
         ui_list.add_space(space::XS);
+        if self.sessions.is_loaded() && !self.sessions.has_groups() {
+            ui_list.horizontal(|ui| {
+                ui.add_space(space::SM);
+                ui.label(
+                    egui::RichText::new("No projects yet")
+                        .font(font::regular(text::SM + 1.0))
+                        .color(p.text_faint),
+                );
+            });
+        }
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(&mut ui_list, |ui| self.sessions.show(ui));
@@ -153,26 +196,13 @@ impl App {
                 .max_rect(footer)
                 .layout(egui::Layout::left_to_right(egui::Align::Max)),
         );
-        #[cfg(target_os = "linux")]
-        let blur = matches!(self.blur, Some(Ok(_)));
-        #[cfg(not(target_os = "linux"))]
-        let blur = false;
-        let gear = IconButton::new(icons::GEAR, "Settings")
+        if IconButton::new(icons::GEAR, "Settings")
+            .selected(self.settings_open)
             .show(&mut ui_footer)
-            .tip_with_shortcut("Settings", SETTINGS);
-        let open =
-            std::mem::take(&mut self.open_settings).then_some(egui::SetOpenCommand::Bool(true));
-        let mut changed = self.prefs.clone();
-        egui::Popup::menu(&gear)
-            .open_memory(open.or(gear.clicked().then_some(egui::SetOpenCommand::Toggle)))
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .align(egui::RectAlign::TOP_START)
-            .gap(space::XS)
-            .show(|ui| settings_menu(ui, &mut changed, blur));
-        if changed != self.prefs {
-            changed.apply(ui.ctx());
-            changed.save();
-            self.prefs = changed;
+            .tip_with_shortcut("Settings", SETTINGS)
+            .clicked()
+        {
+            self.settings_open = !self.settings_open;
         }
         // only shown when something is wrong, a working connection needs no badge
         let status = match &self.link {
@@ -201,6 +231,17 @@ impl App {
     }
 
     fn main_contents(&mut self, ui: &mut egui::Ui, run: &mut Option<&'static str>) {
+        if self.sessions.take_picked() {
+            self.settings_open = false;
+        }
+        if self.settings_open {
+            if !std::mem::replace(&mut self.usage_requested, true) {
+                self.sessions.outbox.push(ClientMsg::RefreshUsage);
+            }
+            self.settings_page(ui);
+            return;
+        }
+        self.usage_requested = false;
         let group = self.sessions.selected_group();
         if !self.link.is_up() {
             self.link_view(ui);
@@ -210,11 +251,10 @@ impl App {
             return;
         }
         if !self.sessions.has_groups() {
-            if EmptyState::new(icons::FOLDER_OPEN, "Add your first project")
-                .detail("A project is a folder on your computer. Agents, shells and tasks you start in it work inside that folder.")
-                .action("Add project folder…")
-                .show(ui)
-            {
+            let installed = *self
+                .installed
+                .get_or_insert_with(|| Provider::ALL.map(installed));
+            if welcome(ui, &installed) {
                 *run = Some("new-group");
             }
             return;
@@ -282,11 +322,16 @@ impl App {
                 outbox.push(ClientMsg::AgentConfigure { id, settings });
             }
             match action {
-                Some(ChatAction::Send(text)) => outbox.push(ClientMsg::AgentSend {
-                    id,
-                    text,
-                    attachments: std::mem::take(&mut local.attachments),
-                }),
+                Some(ChatAction::Send(text)) => {
+                    // a file moved or deleted since it was attached is left out rather than failing the turn
+                    let mut attachments = std::mem::take(&mut local.attachments);
+                    attachments.retain(|path| std::path::Path::new(path).exists());
+                    outbox.push(ClientMsg::AgentSend {
+                        id,
+                        text,
+                        attachments,
+                    });
+                }
                 Some(ChatAction::Attach) => {
                     let folder = group.as_ref().and_then(|g| g.1.as_deref());
                     for path in sessions::pick_files(folder) {
@@ -295,7 +340,21 @@ impl App {
                         }
                     }
                 }
+                Some(ChatAction::OpenLink(target)) => {
+                    let folder = group.as_ref().and_then(|g| g.1.as_deref());
+                    match link_target(&target, folder) {
+                        Some((path, _)) if mux_core::protocol::is_image(&path) => {
+                            ImageViewer::open(ui.ctx(), vec![path], 0);
+                        }
+                        Some((path, lines)) => {
+                            self.viewer = Some(FileView::open(path, lines));
+                            self.viewer_open = true;
+                        }
+                        None => {}
+                    }
+                }
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
+                Some(ChatAction::Compact) => outbox.push(ClientMsg::AgentCompact { id }),
                 Some(ChatAction::Decide(index, decision)) => {
                     if let Some(Some(approval)) = local.approvals.get(index) {
                         outbox.push(ClientMsg::AgentDecide {
@@ -328,6 +387,15 @@ impl App {
         let body = rect.shrink2(vec2(space::MD, space::SM));
         let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
         let response = terminal.show(&mut body_ui, id, outbox);
+        // files dropped on a terminal type their paths, quoted, the way other terminals do
+        let dropped = std::mem::take(&mut self.dropped);
+        if !dropped.is_empty() {
+            let typed: Vec<String> = dropped.iter().map(|p| shell_quote(p)).collect();
+            outbox.push(ClientMsg::Input {
+                id,
+                data: format!("{} ", typed.join(" ")).into_bytes(),
+            });
+        }
         // focus the terminal when switching to it, and take focus back once the palette closes
         let idle = ui.ctx().memory(|m| m.focused().is_none()) && !self.palette.is_open();
         if self.focused != Some(id) || idle {
@@ -440,6 +508,40 @@ impl App {
         });
     }
 
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        if !egui::Popup::is_any_open(&ctx)
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.settings_open = false;
+        }
+        #[cfg(target_os = "linux")]
+        let blur = matches!(self.blur, Some(Ok(_)));
+        #[cfg(not(target_os = "linux"))]
+        let blur = false;
+        let agents = *self
+            .installed
+            .get_or_insert_with(|| Provider::ALL.map(installed));
+        let mut prefs = self.prefs.clone();
+        let close = settings::Page {
+            tab: &mut self.settings_tab,
+            prefs: &mut prefs,
+            blur,
+            agents,
+            usage: Provider::ALL.map(|p| (p, self.sessions.usage(p).to_vec())),
+            tokens: self.sessions.tokens().cloned(),
+        }
+        .show(ui);
+        if close {
+            self.settings_open = false;
+        }
+        if prefs != self.prefs {
+            prefs.apply(&ctx);
+            prefs.save();
+            self.prefs = prefs;
+        }
+    }
+
     fn link_view(&mut self, ui: &mut egui::Ui) {
         let now = ui.input(|i| i.time);
         let (title, detail, action) = match &self.link {
@@ -488,59 +590,195 @@ impl App {
 
 const SHOWN_MODELS: usize = 5;
 
-fn settings_menu(ui: &mut egui::Ui, prefs: &mut Prefs, blur: bool) {
+// the first run screen: what mux is, the one thing to do next, and whether the agents are ready
+fn welcome(ui: &mut egui::Ui, agents: &[(Provider, bool)]) -> bool {
     let p = theme::palette(ui);
-    ui.set_width(240.0);
-    let caption = |ui: &mut egui::Ui, label: &str| {
-        ui.add_space(space::XS);
+    let width = 420.0;
+    let mut open = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.5 - 230.0).max(space::XL));
+        let (tile, _) = ui.allocate_exact_size(vec2(56.0, 56.0), egui::Sense::hover());
+        let rounding = egui::CornerRadius::same(theme::radius::XL);
+        ui.painter()
+            .rect_filled(tile, rounding, theme::tint(p, 0.06));
+        ui.painter().rect_stroke(
+            tile,
+            rounding,
+            egui::Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            tile.center(),
+            egui::Align2::CENTER_CENTER,
+            icons::TERMINAL_WINDOW,
+            font::icon(28.0),
+            p.text,
+        );
+        ui.add_space(space::LG);
+        ui.label(
+            egui::RichText::new("Welcome to Mux")
+                .font(font::semibold(text::TITLE))
+                .color(p.text),
+        );
+        ui.add_space(space::SM);
+        let mut job = egui::text::LayoutJob::simple(
+            "Run coding agents, shells and tasks side by side. Each project is a folder, and everything you start in it works inside that folder.".to_owned(),
+            font::regular(text::MD),
+            p.text_muted,
+            width,
+        );
+        job.halign = egui::Align::Center;
+        // laid out up front so it wraps at the card's width rather than the window's
+        let galley = ui.painter().layout_job(job);
+        ui.add(egui::Label::new(galley));
+        ui.add_space(space::XL);
+        open = mux_ui::Button::new("Open a project folder…")
+            .primary()
+            .show(ui)
+            .clicked();
+        ui.add_space(space::XL);
+
+        ui.allocate_ui(vec2(width, 0.0), |ui| {
+            theme::card(ui)
+                .inner_margin(egui::Margin::symmetric(14, 12))
+                .show(ui, |ui| {
+                    ui.set_width(width - 28.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.spacing_mut().item_spacing.y = space::SM;
+                        ui.label(
+                            egui::RichText::new("Coding agents")
+                                .font(font::medium(text::SM))
+                                .color(p.text_faint),
+                        );
+                        for &(provider, ready) in agents {
+                            agent_status(ui, provider, ready);
+                        }
+                    });
+                });
+        });
+        ui.add_space(space::LG);
         ui.horizontal(|ui| {
-            ui.add_space(space::SM);
+            let hint = egui::RichText::new("to see every command")
+                .font(font::regular(text::SM + 1.0))
+                .color(p.text_faint);
+            let lead = egui::RichText::new("Press")
+                .font(font::regular(text::SM + 1.0))
+                .color(p.text_faint);
+            // centred by measuring the row once, since a horizontal layout starts at the left
+            let row_id = ui.scope_id().with("hint-width");
+            let row = ui.data(|d| d.get_temp::<f32>(row_id)).unwrap_or(0.0);
+            ui.add_space(((ui.available_width() - row) / 2.0).max(0.0));
+            let start = ui.cursor().min.x;
+            ui.label(lead);
+            mux_ui::Kbd::shortcut(ui, &PALETTE_SHORTCUT);
+            ui.label(hint);
+            let measured = ui.min_rect().right() - start;
+            ui.data_mut(|d| d.insert_temp(row_id, measured));
+        });
+    });
+    open
+}
+
+fn agent_status(ui: &mut egui::Ui, provider: Provider, ready: bool) {
+    let p = theme::palette(ui);
+    ui.horizontal(|ui| {
+        let (mark, _) = ui.allocate_exact_size(vec2(icon::LG, icon::LG), egui::Sense::hover());
+        provider_mark(
+            ui.painter(),
+            mark.center(),
+            icon::LG,
+            provider,
+            provider_color(provider, p.text),
+        );
+        ui.label(
+            egui::RichText::new(provider.label())
+                .font(font::medium(text::MD))
+                .color(p.text),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (glyph, label, color) = if ready {
+                (icons::CHECK_CIRCLE, "Installed".to_owned(), p.success)
+            } else {
+                (
+                    icons::WARNING_CIRCLE,
+                    format!("Install the {} CLI", cli(provider)),
+                    p.warning,
+                )
+            };
             ui.label(
                 egui::RichText::new(label)
-                    .font(font::medium(text::SM))
-                    .color(p.text_faint),
+                    .font(font::regular(text::SM + 1.0))
+                    .color(p.text_muted),
+            );
+            ui.label(
+                egui::RichText::new(glyph.to_string())
+                    .font(font::icon(icon::MD))
+                    .color(color),
             );
         });
-    };
-    caption(ui, "Appearance");
-    ui.horizontal(|ui| {
-        ui.add_space(space::SM);
-        Segmented::new(
-            &mut prefs.appearance,
-            &[
-                (Appearance::System, "System"),
-                (Appearance::Light, "Light"),
-                (Appearance::Dark, "Dark"),
-            ],
-        )
-        .show(ui);
     });
-    caption(ui, "Motion");
-    ui.horizontal(|ui| {
-        ui.add_space(space::SM);
-        Segmented::new(
-            &mut prefs.reduced_motion,
-            &[(false, "Full"), (true, "Reduced")],
-        )
-        .show(ui);
-    });
-    // only offered where the compositor can blur behind the window
-    if blur {
-        caption(ui, "Transparency");
-        ui.horizontal(|ui| {
-            ui.add_space(space::SM);
-            Segmented::new(
-                &mut prefs.transparency,
-                &[
-                    (Transparency::Off, "Off"),
-                    (Transparency::Subtle, "Subtle"),
-                    (Transparency::Full, "Full"),
-                ],
-            )
-            .show(ui);
-        });
+}
+
+fn cli(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "codex",
+        Provider::Claude => "claude",
     }
-    ui.add_space(space::XS);
+}
+
+fn wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+// copy, cut and paste shortcuts become the events egui would have made, with pastes read from wayland
+#[cfg(target_os = "linux")]
+fn clipboard_keys(clipboard: Option<&drop::Clipboard>, events: &mut Vec<egui::Event>) {
+    let mut out = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = &event
+        else {
+            out.push(event);
+            continue;
+        };
+        let command = modifiers.command_only();
+        match key {
+            Key::C if command => out.push(egui::Event::Copy),
+            Key::Copy => out.push(egui::Event::Copy),
+            Key::X if command => out.push(egui::Event::Cut),
+            Key::Cut => out.push(egui::Event::Cut),
+            Key::V if command => {
+                out.extend(clipboard.map(drop::Clipboard::paste).unwrap_or_default())
+            }
+            Key::Paste => out.extend(clipboard.map(drop::Clipboard::paste).unwrap_or_default()),
+            _ => out.push(event),
+        }
+    }
+    *events = out;
+}
+
+// plain paths go as they are, anything with spaces or shell characters is single quoted
+fn shell_quote(path: &str) -> String {
+    let plain = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+:@%".contains(c));
+    if plain {
+        path.to_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+// the server runs agents with the same PATH, so finding the cli here means it can start
+fn installed(provider: Provider) -> (Provider, bool) {
+    let found = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join(cli(provider)).is_file())
+    });
+    (provider, found)
 }
 
 // the agent, model, effort and speed pickers in the composer, returning new settings when one changes
@@ -766,10 +1004,16 @@ fn agent_controls(
     }
 
     let access = settings.access;
-    let chip = Chip::new(access.label())
+    // a narrow composer keeps just the icon, so the send button never gets pushed out
+    let label = if ui.available_width() < 300.0 {
+        ""
+    } else {
+        access.label()
+    };
+    let chip = Chip::new(label)
         .icon(access_icon(access))
         .show(ui)
-        .tip("What the agent may do without asking");
+        .tip(format!("Permissions: {}", access.label()));
     menu(&chip).show(|ui| {
         ui.set_width(320.0);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -909,6 +1153,64 @@ fn effort_label(effort: &str) -> String {
 }
 
 impl App {
+    // the file viewer on the right, returning what's left of `main` for the session
+    fn file_panel(&mut self, ui: &mut egui::Ui, main: Rect) -> Rect {
+        let ctx = ui.ctx().clone();
+        if self.viewer_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.viewer_open = false;
+        }
+        let open = self.viewer_open && self.viewer.is_some();
+        let t = motion::spring_bool(&ctx, egui::Id::unique("file-panel"), open, Spring::SMOOTH)
+            .clamp(0.0, 1.0);
+        if t <= 0.001 {
+            if !open {
+                self.viewer = None;
+            }
+            return main;
+        }
+        let full = self
+            .viewer_width
+            .clamp(320.0, (main.width() * 0.7).max(320.0));
+        // the session takes its final width at once and the panel slides over that edge,
+        // so the chat rewraps a single time instead of on every frame of the slide
+        let left = main.right() - full * t;
+        let edge = if open { main.right() - full } else { left };
+        let handle = Rect::from_min_max(
+            pos2(left - 3.0, main.top()),
+            pos2(left + 3.0, main.bottom()),
+        );
+        let drag = ui
+            .interact(
+                handle,
+                egui::Id::unique("file-panel-resize"),
+                egui::Sense::drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if drag.dragged() {
+            self.viewer_width = full - drag.drag_delta().x;
+        }
+        // laid out at full width and slid in from the edge, so the file doesn't reflow while it opens
+        let panel = Rect::from_min_size(pos2(left, main.top()), vec2(full, main.height()));
+        let mut panel_ui = ui.new_child(UiBuilder::new().id_salt("file-panel").max_rect(panel));
+        panel_ui.set_clip_rect(panel.intersect(main).intersect(ui.clip_rect()));
+        let action = self.viewer.as_mut().and_then(|v| v.show(&mut panel_ui));
+        if let (Some(action), Some(view)) = (action, &self.viewer) {
+            match action {
+                FileViewAction::Close => self.viewer_open = false,
+                FileViewAction::ToggleWrap => {
+                    if let Some(view) = &mut self.viewer {
+                        view.wrap = !view.wrap;
+                    }
+                }
+                FileViewAction::CopyPath => ctx.copy_text(view.path.clone()),
+                FileViewAction::OpenInEditor => {
+                    open_in_editor(&view.path, view.lines.map(|(start, _)| start))
+                }
+            }
+        }
+        Rect::from_min_max(main.min, pos2(edge, main.bottom()))
+    }
+
     fn take_drops(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         // other platforms get drops through egui, wayland through our own listener
         let (hovered, dropped) = ctx.input(|i| {
@@ -926,9 +1228,11 @@ impl App {
         #[cfg(target_os = "linux")]
         {
             let drops = self.drops.get_or_insert_with(|| {
-                drop::listen(frame, ctx.clone())
-                    .inspect_err(|reason| eprintln!("mux: no file drops: {reason}"))
-                    .ok()
+                let (drops, clipboard) = drop::listen(frame, ctx.clone())
+                    .inspect_err(|reason| eprintln!("mux: no file drops or pastes: {reason}"))
+                    .ok()?;
+                self.clipboard = Some(clipboard);
+                Some(drops)
             });
             for event in drops.iter().flat_map(|rx| rx.try_iter()) {
                 match event {
@@ -951,6 +1255,26 @@ impl eframe::App for App {
         window::CLEAR_COLOR
     }
 
+    // touchpads report scrolling in points, which the line speed above doesn't reach
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(target_os = "linux")]
+        if wayland() {
+            clipboard_keys(self.clipboard.as_ref(), &mut raw_input.events);
+        }
+        for event in &mut raw_input.events {
+            if let egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta,
+                modifiers,
+                ..
+            } = event
+                && !modifiers.command
+            {
+                *delta *= 1.4;
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         #[cfg(target_os = "linux")]
@@ -968,6 +1292,7 @@ impl eframe::App for App {
             false
         };
         self.take_drops(&ctx, frame);
+        ImageViewer::show(&ctx);
         let mut run = self.palette.show(&ctx, &COMMANDS);
         self.link.tick(&ctx, &mut self.sessions);
         mux_ui::capture::screenshot(&ctx);
@@ -1005,6 +1330,7 @@ impl eframe::App for App {
                         let mut sidebar = std::mem::take(&mut self.sidebar);
                         let main = sidebar.show(ui, |ui| self.sidebar_contents(ui));
                         self.sidebar = sidebar;
+                        let main = self.file_panel(ui, main);
                         let mut ui = ui.new_child(UiBuilder::new().max_rect(main));
                         ui.set_clip_rect(main.intersect(ui.clip_rect()));
                         self.main_contents(&mut ui, &mut run);
@@ -1015,5 +1341,20 @@ impl eframe::App for App {
             self.run(command);
         }
         self.link.tick(&ctx, &mut self.sessions);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn quotes_dropped_paths_only_when_needed() {
+        assert_eq!(shell_quote("/home/me/a.txt"), "/home/me/a.txt");
+        assert_eq!(
+            shell_quote("/home/me/My Shot.png"),
+            "'/home/me/My Shot.png'"
+        );
+        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
     }
 }

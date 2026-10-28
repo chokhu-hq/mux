@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
 use eframe::egui::{
-    self, CornerRadius, CursorIcon, Frame, Id, Key, Modifiers, Order, Rect, Sense, Stroke,
-    UiBuilder, Vec2, pos2, vec2,
+    self, CursorIcon, Id, Key, Modifiers, Order, Rect, Sense, Stroke, UiBuilder, Vec2, pos2, vec2,
 };
 use mux_core::protocol::{
     self as wire, AgentItem, AgentSettings, ClientMsg, ContextUsage, GroupInfo, ItemStatus,
-    ModelOption, ServerMsg, SessionInfo, UsageWindow,
+    ModelOption, ServerMsg, SessionInfo, UsageDay, UsageWindow,
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 use mux_ui::chat::{
@@ -14,7 +13,7 @@ use mux_ui::chat::{
     ToolStatus,
 };
 use mux_ui::motion::{Spring, spring_bool};
-use mux_ui::theme::{self, radius};
+use mux_ui::theme;
 use mux_ui::{GroupHeader, MenuItem, SessionRow, TextInput, TooltipExt, icons};
 
 use crate::terminal::Terminal;
@@ -52,7 +51,8 @@ impl Local {
 
     // rebuilt only when the transcript changes, not every frame
     fn rebuild(&mut self) {
-        (self.chat, self.approvals) = chat_items(&self.transcript, self.busy);
+        (self.chat, self.approvals) =
+            chat_items(&self.transcript, self.busy, self.settings.provider);
     }
 }
 
@@ -78,6 +78,7 @@ enum Action {
     Select(u64),
     Remove(u64),
     StartDrag(Drag),
+    StartGroupDrag(Drag),
     NewAgent(u64),
 }
 
@@ -86,17 +87,27 @@ pub struct Sessions {
     groups: Vec<GroupInfo>,
     locals: HashMap<u64, Local>,
     selected: Option<u64>,
+    // a session was picked since the last check, which takes the window off the settings page
+    picked: bool,
     drag: Option<Drag>,
+    // a group being dragged to a new place in the sidebar
+    group_drag: Option<Drag>,
     loaded: bool,
     // the group whose name is being edited inline, with the draft name
     renaming: Option<(u64, String)>,
     // the models each agent cli offers, sent by the server once it has asked
     models: Models,
     usage: HashMap<Provider, Vec<UsageWindow>>,
+    // the last month of token use and which day is today, once the server has read the clis' history
+    tokens: Option<(i64, Vec<UsageDay>)>,
     pub outbox: Vec<ClientMsg>,
 }
 
 impl Sessions {
+    pub fn take_picked(&mut self) -> bool {
+        std::mem::take(&mut self.picked)
+    }
+
     pub fn apply(&mut self, msg: ServerMsg) {
         match msg {
             ServerMsg::Welcome { .. } => {}
@@ -111,7 +122,10 @@ impl Sessions {
                 }
                 self.loaded = true;
             }
-            ServerMsg::Created { id } => self.selected = Some(id),
+            ServerMsg::Created { id } => {
+                self.selected = Some(id);
+                self.picked = true;
+            }
             ServerMsg::Attached {
                 id,
                 cols,
@@ -165,6 +179,7 @@ impl Sessions {
             ServerMsg::AgentUsage { provider, windows } => {
                 self.usage.insert(provider, windows);
             }
+            ServerMsg::TokenHistory { today, days } => self.tokens = Some((today, days)),
             ServerMsg::AgentModels { provider, models } => {
                 self.models.insert(provider, models);
             }
@@ -188,6 +203,10 @@ impl Sessions {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    pub fn tokens(&self) -> Option<&(i64, Vec<UsageDay>)> {
+        self.tokens.as_ref()
     }
 
     pub fn usage(&self, provider: Provider) -> &[UsageWindow] {
@@ -291,13 +310,21 @@ impl Sessions {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(ui);
         let dragging = self.drag.as_ref().map(|d| d.id);
+        let group_dragging = self.group_drag.as_ref().map(|d| d.id);
         let pointer = ui.ctx().pointer_latest_pos();
         let mut actions = Vec::new();
         let mut drop: Option<(Drop, Option<f32>)> = None;
         let width = ui.available_width();
+        // where each group's header and rows sit, to find the gap a dragged group would land in
+        let mut blocks = Vec::new();
 
         ui.spacing_mut().item_spacing.y = 0.0;
         for (g, group) in self.groups.iter().enumerate() {
+            let block_top = ui.cursor().top();
+            let opacity = ui.opacity();
+            if group_dragging == Some(group.id) {
+                ui.multiply_opacity(0.35);
+            }
             if let Some((id, draft)) = &mut self.renaming
                 && *id == group.id
             {
@@ -340,6 +367,16 @@ impl Sessions {
                 let header = shown.response.tip(folder);
                 if header.clicked() {
                     actions.push(Action::Toggle(group.id));
+                }
+                if header.drag_started()
+                    && dragging.is_none()
+                    && let Some(pos) = header.interact_pointer_pos()
+                {
+                    actions.push(Action::StartGroupDrag(Drag {
+                        id: group.id,
+                        grab: pos - header.rect.min,
+                        width: header.rect.width(),
+                    }));
                 }
                 header.context_menu(|ui| {
                     if MenuItem::new("Rename")
@@ -450,7 +487,13 @@ impl Sessions {
                     }
                 }
             }
+            blocks.push((block_top, ui.cursor().top()));
+            ui.set_opacity(opacity);
             ui.add_space(GROUP_GAP);
+        }
+
+        if let Some(id) = group_dragging {
+            self.drop_group(ui, id, &blocks, pointer);
         }
 
         if let Some(id) = dragging {
@@ -496,10 +539,73 @@ impl Sessions {
                 Action::EndRename => self.renaming = None,
                 Action::ChangeFolder(id) => self.set_group_folder(id),
                 Action::RemoveGroup(id) => self.outbox.push(ClientMsg::DeleteGroup { id }),
-                Action::Select(id) => self.selected = Some(id),
+                Action::Select(id) => {
+                    self.selected = Some(id);
+                    self.picked = true;
+                }
                 Action::Remove(id) => self.remove(id),
                 Action::StartDrag(drag) => self.drag = Some(drag),
+                Action::StartGroupDrag(drag) => self.group_drag = Some(drag),
             }
+        }
+    }
+
+    // shows where a dragged group would land, and moves it there on release
+    fn drop_group(
+        &mut self,
+        ui: &egui::Ui,
+        id: u64,
+        blocks: &[(f32, f32)],
+        pointer: Option<egui::Pos2>,
+    ) {
+        let p = theme::palette(ui);
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        let from = self.groups.iter().position(|g| g.id == id);
+        let index = pointer.and_then(|pos| group_gap(blocks, pos.y, from));
+        if let Some(index) = index {
+            let y = match index {
+                0 => blocks.first().map_or(0.0, |b| b.0) - GROUP_GAP / 2.0,
+                i => blocks[i - 1].1 + GROUP_GAP / 2.0,
+            };
+            let x = ui.max_rect().x_range();
+            ui.painter()
+                .hline(x.min + 4.0..=x.max - 4.0, y, Stroke::new(2.0, p.accent));
+            ui.painter()
+                .circle(pos2(x.min + 4.0, y), 3.0, p.bg, Stroke::new(2.0, p.accent));
+        }
+        if let (Some(drag), Some(pos), Some(group)) = (
+            &self.group_drag,
+            pointer,
+            self.groups.iter().find(|g| g.id == id),
+        ) {
+            egui::Area::new(Id::unique("mux-group-ghost"))
+                .order(Order::Tooltip)
+                .fixed_pos(pos - drag.grab)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    theme::floating(ui).show(ui, |ui| {
+                        ui.set_width(drag.width);
+                        GroupHeader::new(&group.name).open(group.open).show(ui);
+                    });
+                });
+        }
+        let (released, cancelled) = ui.input_mut(|i| {
+            (
+                i.pointer.any_released(),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        if released || cancelled {
+            if let (false, Some(index)) = (cancelled, index) {
+                // moved here too so the sidebar doesn't jump back until the server agrees
+                if let Some(from) = from {
+                    let group = self.groups.remove(from);
+                    let at = if from < index { index - 1 } else { index };
+                    self.groups.insert(at.min(self.groups.len()), group);
+                }
+                self.outbox.push(ClientMsg::MoveGroup { id, index });
+            }
+            self.group_drag = None;
         }
     }
 
@@ -511,26 +617,30 @@ impl Sessions {
         let Some(session) = self.infos().find(|s| s.id == drag.id) else {
             return;
         };
-        let p = theme::palette(ui);
         egui::Area::new(Id::unique("mux-session-ghost"))
             .order(Order::Tooltip)
             .fixed_pos(pos - drag.grab)
             .interactable(false)
             .show(ui.ctx(), |ui| {
-                Frame::new()
-                    .fill(p.elevated)
-                    .stroke(Stroke::new(1.0, p.border_strong))
-                    .corner_radius(CornerRadius::same(radius::MD))
-                    .shadow(ui.visuals().popup_shadow)
-                    .show(ui, |ui| {
-                        ui.set_width(drag.width);
-                        SessionRow::new(&session.title, session.kind, session.status)
-                            .context(&row_context(session))
-                            .time(&ago(session.updated))
-                            .show(ui);
-                    });
+                theme::floating(ui).show(ui, |ui| {
+                    ui.set_width(drag.width);
+                    SessionRow::new(&session.title, session.kind, session.status)
+                        .context(&row_context(session))
+                        .time(&ago(session.updated))
+                        .show(ui);
+                });
             });
     }
+}
+
+// the gap past every group whose middle is above the pointer, unless that leaves the group where it is
+fn group_gap(blocks: &[(f32, f32)], y: f32, from: Option<usize>) -> Option<usize> {
+    let gap = blocks
+        .iter()
+        .filter(|(top, bottom)| (top + bottom) / 2.0 < y)
+        .count();
+    from.is_none_or(|from| gap != from && gap != from + 1)
+        .then_some(gap)
 }
 
 // the native dialog blocks this frame, which is fine for a one-off pick and required on macos
@@ -583,7 +693,11 @@ fn ago(updated: u64) -> String {
     }
 }
 
-fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Option<u64>>) {
+fn chat_items(
+    transcript: &[AgentItem],
+    busy: bool,
+    provider: Provider,
+) -> (Vec<ChatItem>, Vec<Option<u64>>) {
     let mut items = Vec::new();
     let mut approvals = Vec::new();
     for entry in transcript {
@@ -634,17 +748,46 @@ fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Optio
                     }),
                 }));
             }
+            AgentItem::Subagent {
+                task,
+                kind,
+                background,
+                status,
+                activity,
+                steps,
+                result,
+                tokens,
+                ..
+            } => items.push(ChatItem::Subagent(chat::Subagent {
+                provider,
+                task: task.clone(),
+                kind: kind.clone(),
+                status: tool_status(*status),
+                background: *background,
+                activity: activity.clone(),
+                steps: steps
+                    .iter()
+                    .map(|step| ToolCall {
+                        kind: tool_kind(&step.name),
+                        target: match step.name.as_str() {
+                            "Bash" => shell_body(&step.detail),
+                            _ if step.detail.is_empty() => step.name.clone(),
+                            _ => step.detail.clone(),
+                        },
+                        status: tool_status(step.status),
+                        output: None,
+                    })
+                    .collect(),
+                result: result.clone(),
+                tokens: *tokens,
+            })),
             AgentItem::Tool {
                 name,
                 detail,
                 output,
                 status,
             } => items.push(ChatItem::Tool(ToolCall {
-                kind: match name.as_str() {
-                    "Read" | "NotebookRead" => ToolKind::Read,
-                    "Grep" | "Glob" | "WebSearch" | "WebFetch" | "LS" => ToolKind::Search,
-                    _ => ToolKind::Run,
-                },
+                kind: tool_kind(name),
                 target: if detail.is_empty() {
                     name.clone()
                 } else {
@@ -653,6 +796,9 @@ fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Optio
                 status: tool_status(*status),
                 output: (!output.is_empty()).then(|| output.clone()),
             })),
+            AgentItem::Compaction { status } => {
+                items.push(ChatItem::Compaction(tool_status(*status)))
+            }
             AgentItem::Error { message } => {
                 items.push(ChatItem::Assistant(format!("**Error:** {message}")))
             }
@@ -662,6 +808,15 @@ fn chat_items(transcript: &[AgentItem], busy: bool) -> (Vec<ChatItem>, Vec<Optio
     chat::set_thinking(&mut items, busy);
     approvals.resize(items.len(), None);
     (items, approvals)
+}
+
+fn tool_kind(name: &str) -> ToolKind {
+    match name {
+        "Read" | "NotebookRead" => ToolKind::Read,
+        "Grep" | "Glob" | "WebSearch" | "WebFetch" | "LS" => ToolKind::Search,
+        "Edit" | "MultiEdit" | "Write" => ToolKind::Edit,
+        _ => ToolKind::Run,
+    }
 }
 
 fn tool_status(status: ItemStatus) -> ToolStatus {
@@ -722,6 +877,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_dragged_group_lands_in_the_gap_under_the_pointer() {
+        let blocks = [(0.0, 40.0), (46.0, 200.0), (206.0, 240.0)];
+        // dragging the first group past the middle of the second puts it after the second
+        assert_eq!(group_gap(&blocks, 130.0, Some(0)), Some(2));
+        assert_eq!(group_gap(&blocks, 300.0, Some(0)), Some(3));
+        // its own gaps above and below leave it where it is
+        assert_eq!(group_gap(&blocks, 10.0, Some(0)), None);
+        assert_eq!(group_gap(&blocks, 100.0, Some(0)), None);
+        assert_eq!(group_gap(&blocks, 10.0, Some(2)), Some(0));
+    }
+
+    #[test]
     fn unwraps_shell_commands() {
         assert_eq!(
             shell_body("/usr/bin/bash -lc \"printf 'hi\\\\n' > hello.txt\""),
@@ -758,9 +925,10 @@ mod tests {
                 decision: None,
             },
         ];
-        let (items, approvals) = chat_items(&transcript, true);
-        assert_eq!(items.len(), 5, "user, two diffs, approval, thinking");
-        assert_eq!(approvals, vec![None, None, None, Some(9), None]);
+        let (items, approvals) = chat_items(&transcript, true, Provider::Codex);
+        // no thinking indicator while the approval waits on the user
+        assert_eq!(items.len(), 4, "user, two diffs, approval");
+        assert_eq!(approvals, vec![None, None, None, Some(9)]);
         let ChatItem::Diff(first) = &items[1] else {
             panic!()
         };

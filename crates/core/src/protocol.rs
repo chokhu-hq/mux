@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 14;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -87,6 +87,33 @@ pub enum AgentItem {
         output: String,
         status: ItemStatus,
     },
+    // older messages were summarised to free up the context window
+    Compaction {
+        status: ItemStatus,
+    },
+    // a helper agent the main one started, with what it did and what it reported back
+    Subagent {
+        task: String,
+        // the kind of helper, like general-purpose or explorer
+        kind: String,
+        prompt: String,
+        // keeps going after the main turn ends
+        background: bool,
+        status: ItemStatus,
+        // what it's doing right now, while it runs
+        activity: String,
+        steps: Vec<SubagentStep>,
+        result: String,
+        tokens: u64,
+    },
+}
+
+// one tool call a subagent made
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubagentStep {
+    pub name: String,
+    pub detail: String,
+    pub status: ItemStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -120,6 +147,41 @@ pub struct AgentSettings {
 pub struct ContextUsage {
     pub used: u64,
     pub window: u64,
+}
+
+// tokens spent, split the way providers bill them, where input excludes anything read from or written to the cache
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenTotals {
+    pub input: u64,
+    pub cached: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    // the part of output spent thinking, when the provider says
+    pub reasoning: u64,
+}
+
+impl TokenTotals {
+    pub fn total(&self) -> u64 {
+        self.input + self.cached + self.cache_write + self.output
+    }
+
+    pub fn add(&mut self, other: &TokenTotals) {
+        self.input += other.input;
+        self.cached += other.cached;
+        self.cache_write += other.cache_write;
+        self.output += other.output;
+        self.reasoning += other.reasoning;
+    }
+}
+
+// one model's tokens on one local day, read from the agent clis' own history
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageDay {
+    // days since the unix epoch in the server's local time
+    pub day: i64,
+    pub provider: Provider,
+    pub model: String,
+    pub tokens: TokenTotals,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +290,16 @@ pub enum ClientMsg {
         id: u64,
         settings: AgentSettings,
     },
+    AgentCompact {
+        id: u64,
+    },
+    // asks each agent cli for its plan limits again, since they go stale between turns
+    RefreshUsage,
+    // puts a group at a new place in the sidebar, counted before it's taken out
+    MoveGroup {
+        id: u64,
+        index: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -283,6 +355,11 @@ pub enum ServerMsg {
     AgentContext {
         id: u64,
         context: ContextUsage,
+    },
+    // the last month of token use, with which day counts as today
+    TokenHistory {
+        today: i64,
+        days: Vec<UsageDay>,
     },
 }
 

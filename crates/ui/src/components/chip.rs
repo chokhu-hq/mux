@@ -45,7 +45,12 @@ impl<'a> Chip<'a> {
         } else {
             0.0
         };
-        let width = space::SM + mark_w + galley.size().x + space::XS + icon::SM + space::SM;
+        let label_w = if self.label.is_empty() {
+            -space::XS
+        } else {
+            galley.size().x
+        };
+        let width = space::SM + mark_w + label_w + space::XS + icon::SM + space::SM;
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(width, control::SM), Sense::click());
         response.widget_info(|| WidgetInfo::labeled(egui::Role::ComboBox, true, self.label));

@@ -4,7 +4,7 @@ use egui::{
 };
 use mux_core::protocol::is_image;
 
-use crate::components::{TooltipExt, hover_t};
+use crate::components::{ImageViewer, TooltipExt, hover_t};
 use crate::icons;
 use crate::theme::{self, font, icon, radius, space, text};
 
@@ -38,22 +38,27 @@ pub fn pending(ui: &mut Ui, paths: &[String]) -> Option<usize> {
 
 // what was sent with a message, images as previews and other files as tiles
 pub fn sent(ui: &mut Ui, paths: &[String]) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+    // wraps onto more rows in a narrow chat instead of spilling past the column's left edge
+    let layout = egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true);
+    ui.with_layout(layout, |ui| {
+        ui.set_max_width(ui.available_width());
         ui.spacing_mut().item_spacing = Vec2::splat(space::SM);
+        let images: Vec<String> = paths.iter().filter(|p| is_image(p)).cloned().collect();
         for (i, path) in paths.iter().enumerate().rev() {
             ui.push_id(i, |ui| {
                 if is_image(path) {
-                    let size = fitted(ui, path, PREVIEW);
+                    let size = fitted(ui, path, PREVIEW.min(vec2(ui.available_width(), PREVIEW.y)));
                     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
                     picture(ui, path, rect, false);
                     let response = response
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .tip(mux_core::display_path(path));
                     if response.clicked() {
-                        open(path);
+                        let index = images.iter().position(|p| p == path).unwrap_or(0);
+                        ImageViewer::open(ui.ctx(), images.clone(), index);
                     }
                 } else if file(ui, path, 44.0).clicked() {
-                    open(path);
+                    open_externally(path);
                 }
             });
         }
@@ -205,8 +210,95 @@ fn remove_button(ui: &mut Ui, tile: &Response) -> bool {
     response.clicked()
 }
 
+// pulls attachments out of this frame's paste events, leaving ordinary text pastes for the text edit
+pub fn take_pasted(ui: &mut Ui) -> Vec<String> {
+    ui.input_mut(|input| {
+        let mut files = Vec::new();
+        // a browser copies a picture with its address as text, and the picture is what's wanted
+        let picture = input
+            .events
+            .iter()
+            .any(|e| matches!(e, egui::Event::PasteImage(_)));
+        input.events.retain(|event| match event {
+            egui::Event::PasteImage(image) => {
+                if let Some(path) = save_pasted(image) {
+                    files.push(path);
+                }
+                false
+            }
+            egui::Event::Paste(_) if picture => false,
+            egui::Event::Paste(text) => match pasted_paths(text) {
+                Some(paths) => {
+                    files.extend(paths);
+                    false
+                }
+                None => true,
+            },
+            _ => true,
+        });
+        files
+    })
+}
+
+// screenshots from the clipboard are kept with mux's data, since the agent reads them by path
+fn save_pasted(image: &egui::ColorImage) -> Option<String> {
+    let dir = mux_core::protocol::data_dir().join("pastes");
+    std::fs::create_dir_all(&dir).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = dir.join(format!("paste-{stamp}.png"));
+    crate::capture::save(&path, image).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+// text that is nothing but file uris or existing absolute paths, the way file managers copy files
+fn pasted_paths(text: &str) -> Option<Vec<String>> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            let path = match line.strip_prefix("file://") {
+                // a host part may come before the path, and a local copy always means this machine
+                Some(rest) => percent_decode(&rest[rest.find('/')?..]),
+                None => line.to_owned(),
+            };
+            let real = std::path::Path::new(&path);
+            (real.is_absolute() && real.exists()).then_some(path)
+        })
+        .collect()
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = text
+                .get(i + 1..i + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 // hands the file to the desktop's default app for it
-pub fn open(path: &str) {
+pub fn open_externally(path: &str) {
     #[cfg(target_os = "linux")]
     let program = "xdg-open";
     #[cfg(target_os = "macos")]
@@ -214,4 +306,24 @@ pub fn open(path: &str) {
     #[cfg(target_os = "windows")]
     let program = "explorer";
     let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pasted_paths;
+
+    #[test]
+    fn copied_files_become_paths_and_text_stays_text() {
+        let dir = std::env::temp_dir().join(format!("mux paste {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a b.txt");
+        std::fs::write(&file, "x").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let uri = format!("file://{}", path.replace(' ', "%20"));
+        assert_eq!(pasted_paths(&uri), Some(vec![path.clone()]));
+        assert_eq!(pasted_paths(&format!("{path}\n")), Some(vec![path]));
+        assert_eq!(pasted_paths("fix the bug in /etc/hosts"), None);
+        assert_eq!(pasted_paths("/no/such/file"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

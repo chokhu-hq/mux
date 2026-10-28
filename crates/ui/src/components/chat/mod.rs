@@ -6,6 +6,7 @@ mod markdown;
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
 use mux_core::protocol::ContextUsage;
 
+pub use attachments::open_externally;
 pub use cards::thinking;
 pub use composer::{Composer, ComposerAction, Controls};
 pub use markdown::markdown;
@@ -25,7 +26,24 @@ pub enum ChatItem {
     Tool(ToolCall),
     Diff(FileDiff),
     Permission(PermissionRequest),
+    Compaction(ToolStatus),
+    Subagent(Subagent),
     Thinking,
+}
+
+// a helper agent the main one started, with its own tool calls and final report
+pub struct Subagent {
+    // the agent cli it runs in, whose mark it wears
+    pub provider: mux_core::Provider,
+    pub task: String,
+    pub kind: String,
+    pub status: ToolStatus,
+    pub background: bool,
+    // what it's doing right now, while it runs
+    pub activity: String,
+    pub steps: Vec<ToolCall>,
+    pub result: String,
+    pub tokens: u64,
 }
 
 pub struct ToolCall {
@@ -84,7 +102,10 @@ pub enum ChatAction {
     Send(String),
     // the attach button was clicked, so the app should offer a file picker
     Attach,
+    // a link to a file was clicked, with its target as the agent wrote it
+    OpenLink(String),
     Stop,
+    Compact,
     Decide(usize, Decision),
 }
 
@@ -165,6 +186,7 @@ impl<'a> ChatView<'a> {
                 ComposerAction::Send(text) => ChatAction::Send(text),
                 ComposerAction::Attach => ChatAction::Attach,
                 ComposerAction::Stop => ChatAction::Stop,
+                ComposerAction::Compact => ChatAction::Compact,
             });
         }
         let measured = bottom.min_rect().height();
@@ -193,6 +215,12 @@ impl<'a> ChatView<'a> {
                         ui.set_width(width);
                         ui.spacing_mut().item_spacing.y = space::MD;
                         ui.add_space(space::LG);
+                        // each message gets its own word for the indicator, kept for the whole turn
+                        let turn = self
+                            .items
+                            .iter()
+                            .filter(|item| matches!(item, ChatItem::User { .. }))
+                            .count();
                         let mut i = 0;
                         while i < self.items.len() {
                             // consecutive tool calls are shown together as one activity group
@@ -215,7 +243,11 @@ impl<'a> ChatView<'a> {
                                 ChatItem::User { text, attachments } => {
                                     cards::user_message(ui, text, attachments)
                                 }
-                                ChatItem::Assistant(text) => markdown(ui, text),
+                                ChatItem::Assistant(text) => {
+                                    if let Some(target) = markdown(ui, text) {
+                                        action = Some(ChatAction::OpenLink(target));
+                                    }
+                                }
                                 ChatItem::Tool(tool) => cards::tool_call(ui, tool),
                                 ChatItem::Diff(diff) => cards::diff(ui, diff),
                                 ChatItem::Permission(request) => {
@@ -223,7 +255,13 @@ impl<'a> ChatView<'a> {
                                         action = Some(ChatAction::Decide(index, decision));
                                     }
                                 }
-                                ChatItem::Thinking => cards::thinking(ui),
+                                ChatItem::Compaction(status) => cards::compaction(ui, *status),
+                                ChatItem::Subagent(agent) => {
+                                    if let Some(target) = cards::subagent(ui, agent) {
+                                        action = Some(ChatAction::OpenLink(target));
+                                    }
+                                }
+                                ChatItem::Thinking => cards::thinking(ui, turn),
                             });
                         }
                         ui.add_space(space::SM);
@@ -239,7 +277,11 @@ impl<'a> ChatView<'a> {
 // keeps a single thinking indicator, always at the end of the conversation
 pub fn set_thinking(items: &mut Vec<ChatItem>, thinking: bool) {
     items.retain(|item| !matches!(item, ChatItem::Thinking));
-    if thinking {
+    // while a prompt waits on the user the agent isn't thinking, it's waiting
+    let waiting = items
+        .iter()
+        .any(|item| matches!(item, ChatItem::Permission(r) if r.decision.is_none()));
+    if thinking && !waiting {
         items.push(ChatItem::Thinking);
     }
 }

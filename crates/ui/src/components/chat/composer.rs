@@ -14,7 +14,11 @@ pub enum ComposerAction {
     Send(String),
     Stop,
     Attach,
+    Compact,
 }
+
+// how full the context window gets before the composer suggests compacting
+const NOTICE_AT: f32 = 0.75;
 
 pub type Controls<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
 
@@ -71,13 +75,27 @@ impl<'a> Composer<'a> {
         let p = theme::palette(ui);
         let edit_id = ui.scope_id().with("mux-composer");
         let focused = ui.memory(|m| m.has_focus(edit_id));
+        // pasted pictures and copied files become attachments, before the text edit sees the paste as text
+        if focused && let Some(attachments) = self.attachments.as_deref_mut() {
+            for path in super::attachments::take_pasted(ui) {
+                if !attachments.contains(&path) {
+                    attachments.push(path);
+                }
+            }
+        }
         // a message can be just the files, with nothing typed
         let has_files = self.attachments.as_ref().is_some_and(|a| !a.is_empty());
         // enter sends and shift+enter falls through to the text edit as a newline
-        let mut send = focused
-            && !self.running
-            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        // messages can go out while the agent works, the agent picks them up as it goes
+        let mut send = focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
         let mut action = None;
+
+        if let Some(context) = self.context
+            && !self.running
+            && compact_notice(ui, context)
+        {
+            action = Some(ComposerAction::Compact);
+        }
 
         let focus = spring_bool(ui.ctx(), edit_id.with("focus"), focused, Spring::QUICK);
         Frame::new()
@@ -139,7 +157,9 @@ impl<'a> Composer<'a> {
                         controls(ui);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.running {
+                        let ready = !self.draft.trim().is_empty() || has_files;
+                        // while the agent works an empty box offers stop, and typing turns it back into send
+                        if self.running && !ready {
                             if round_button(ui, icons::STOP, true, true)
                                 .tip("Stop")
                                 .clicked()
@@ -147,9 +167,13 @@ impl<'a> Composer<'a> {
                                 action = Some(ComposerAction::Stop);
                             }
                         } else {
-                            let ready = !self.draft.trim().is_empty() || has_files;
+                            let tip = if self.running {
+                                "Send now, the agent will pick it up"
+                            } else {
+                                "Send"
+                            };
                             if round_button(ui, icons::ARROW_UP, ready, false)
-                                .tip("Send")
+                                .tip(tip)
                                 .clicked()
                             {
                                 send = true;
@@ -157,7 +181,12 @@ impl<'a> Composer<'a> {
                         }
                         if let Some(context) = self.context {
                             ui.add_space(space::XS);
-                            ContextRing::new(context).show(ui);
+                            if ContextRing::new(context)
+                                .can_compact(!self.running)
+                                .show(ui)
+                            {
+                                action = Some(ComposerAction::Compact);
+                            }
                         }
                     });
                 });
@@ -167,6 +196,11 @@ impl<'a> Composer<'a> {
         if ui.memory(|m| m.focused().is_none()) {
             ui.memory_mut(|m| m.request_focus(edit_id));
         }
+        // the same command people type in the codex and claude clis
+        if send && !self.running && !has_files && self.draft.trim() == "/compact" {
+            self.draft.clear();
+            return Some(ComposerAction::Compact);
+        }
         if send && (!self.draft.trim().is_empty() || has_files) {
             let message = self.draft.trim().to_owned();
             self.draft.clear();
@@ -174,6 +208,61 @@ impl<'a> Composer<'a> {
         }
         action
     }
+}
+
+// shown above the composer once the context window is mostly full, so compacting is found when it matters
+fn compact_notice(ui: &mut Ui, context: ContextUsage) -> bool {
+    if context.window == 0 {
+        return false;
+    }
+    let used = context.used as f32 / context.window as f32;
+    if used < NOTICE_AT {
+        return false;
+    }
+    let p = theme::palette(ui);
+    let mut clicked = false;
+    theme::card(ui)
+        .inner_margin(Margin {
+            left: 12,
+            right: 4,
+            top: 4,
+            bottom: 4,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = space::SM;
+                ui.label(
+                    egui::RichText::new(icons::ARROWS_IN_LINE_VERTICAL.to_string())
+                        .font(font::icon(icon::SM))
+                        .color(crate::components::usage_ring::level_color(p, used)),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Context window {}% full",
+                        (used * 100.0).round() as u32
+                    ))
+                    .font(font::medium(text::SM + 1.0))
+                    .color(p.text),
+                );
+                if ui.available_width() > 360.0 {
+                    ui.label(
+                        egui::RichText::new("Compact to summarise older messages")
+                            .font(font::regular(text::SM + 1.0))
+                            .color(p.text_faint),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    clicked = crate::components::Button::new("Compact now")
+                        .size(crate::components::Size::Sm)
+                        .show(ui)
+                        .tip("Or type /compact")
+                        .clicked();
+                });
+            });
+        });
+    ui.add_space(space::SM);
+    clicked
 }
 
 fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response {

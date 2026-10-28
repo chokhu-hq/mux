@@ -10,6 +10,7 @@ alacritty_terminal.workspace = true
 png.workspace = true
 egui_extras.workspace = true
 image.workspace = true
+syntect.workspace = true
 
 [dev-dependencies]
 eframe.workspace = true

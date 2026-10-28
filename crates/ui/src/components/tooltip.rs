@@ -1,11 +1,8 @@
-use egui::{
-    Align2, CornerRadius, Frame, Id, KeyboardShortcut, Margin, Order, Response, Shadow, Stroke, Ui,
-    pos2,
-};
+use egui::{Align2, Id, KeyboardShortcut, Margin, Order, Response, Ui, pos2};
 
 use super::Kbd;
 use crate::motion::{Spring, spring_bool};
-use crate::theme::{self, font, radius, text};
+use crate::theme::{self, font, text};
 
 const DELAY: f64 = 0.5;
 // cards hold information you hovered on purpose to read, so they skip most of the wait
@@ -123,20 +120,8 @@ fn show_ui(response: Response, margin: Margin, delay: f64, add: impl FnOnce(&mut
         .constrain_to(ctx.content_rect().shrink(EDGE))
         .interactable(false)
         .show(&ctx, |ui| {
-            let p = theme::palette(ui);
             ui.multiply_opacity(t.min(1.0));
-            Frame::new()
-                .fill(p.elevated)
-                .stroke(Stroke::new(1.0, p.border_strong))
-                .corner_radius(CornerRadius::same(radius::MD))
-                .shadow(Shadow {
-                    offset: [0, 4],
-                    blur: 12,
-                    spread: 0,
-                    color: ui.visuals().popup_shadow.color,
-                })
-                .inner_margin(margin)
-                .show(ui, add);
+            theme::floating(ui).inner_margin(margin).show(ui, add);
         });
     response
 }

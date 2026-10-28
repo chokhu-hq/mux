@@ -98,11 +98,7 @@ fn details(ui: &mut Ui, provider: Option<Provider>, windows: &[UsageWindow]) {
     for (i, window) in windows.iter().enumerate() {
         ui.add_space(if i == 0 { space::MD } else { space::LG });
         let used = window.used.clamp(0.0, 1.0);
-        let (glyph, name) = match window.label.as_str() {
-            "5h" => (icons::CLOCK, "5-hour limit".to_owned()),
-            "7d" => (icons::CALENDAR_BLANK, "Weekly limit".to_owned()),
-            other => (icons::CLOCK, format!("{other} limit")),
-        };
+        let (glyph, name) = limit_name(&window.label);
         ui.horizontal(|ui| {
             let (slot, _) = ui.allocate_exact_size(Vec2::splat(icon::SM), Sense::hover());
             let name = ui.label(
@@ -152,6 +148,72 @@ fn details(ui: &mut Ui, provider: Option<Provider>, windows: &[UsageWindow]) {
                 p.text,
             );
         });
+    }
+}
+
+// every limit of a plan laid out in full, for the settings page
+pub fn usage_rows(ui: &mut Ui, windows: &[UsageWindow]) {
+    let p = theme::palette(ui);
+    for (i, window) in windows.iter().enumerate() {
+        if i > 0 {
+            let rect = ui.available_rect_before_wrap();
+            ui.painter()
+                .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
+        }
+        let used = window.used.clamp(0.0, 1.0);
+        let (glyph, name) = limit_name(&window.label);
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 76.0), Sense::hover());
+        let painter = ui.painter();
+        let top = rect.top() + 16.0;
+        painter.text(
+            pos2(rect.left() + icon::MD / 2.0, top + 8.0),
+            Align2::CENTER_CENTER,
+            glyph,
+            font::icon(icon::MD),
+            p.text_muted,
+        );
+        let left = rect.left() + icon::MD + space::SM;
+        painter.text(
+            pos2(left, top),
+            Align2::LEFT_TOP,
+            name,
+            font::medium(text::MD),
+            p.text,
+        );
+        let reset = resets_in(window.resets_at);
+        let detail = if reset.is_empty() {
+            "Reset time not reported".to_owned()
+        } else {
+            format!("Resets in {reset}")
+        };
+        painter.text(
+            pos2(left, top + 20.0),
+            Align2::LEFT_TOP,
+            detail,
+            font::regular(text::SM + 1.0),
+            p.text_faint,
+        );
+        painter.text(
+            pos2(rect.right(), top + 8.0),
+            Align2::RIGHT_CENTER,
+            format!("{}% used", (used * 100.0).round() as u32),
+            font::medium(text::MD),
+            level_color(p, used),
+        );
+        let track = Rect::from_min_max(
+            pos2(left, rect.bottom() - 16.0 - BAR),
+            pos2(rect.right(), rect.bottom() - 16.0),
+        );
+        bar(ui, track, used);
+    }
+}
+
+fn limit_name(label: &str) -> (char, String) {
+    match label {
+        "5h" => (icons::CLOCK, "5-hour limit".to_owned()),
+        "7d" => (icons::CALENDAR_BLANK, "Weekly limit".to_owned()),
+        other => (icons::CLOCK, format!("{other} limit")),
     }
 }
 

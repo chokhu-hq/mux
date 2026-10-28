@@ -116,6 +116,15 @@ impl Store {
             .as_deref()
     }
 
+    pub fn move_group(&mut self, id: u64, index: usize) {
+        let Some(at) = self.groups.iter().position(|g| g.id == id) else {
+            return;
+        };
+        let group = self.groups.remove(at);
+        let index = if at < index { index - 1 } else { index };
+        self.groups.insert(index.min(self.groups.len()), group);
+    }
+
     pub fn toggle_group(&mut self, id: u64) {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == id) {
             group.open = !group.open;
@@ -224,6 +233,19 @@ mod tests {
 
         store.move_session(three, b, 0);
         assert_eq!(order(&store), vec![vec![two, one], vec![three]]);
+    }
+
+    #[test]
+    fn groups_move_up_and_down() {
+        let mut store = Store::default();
+        let [a, b, c] = ["a", "b", "c"].map(|name| store.create_group(name, None));
+        let ids = |store: &Store| store.groups.iter().map(|g| g.id).collect::<Vec<_>>();
+        store.move_group(a, 3);
+        assert_eq!(ids(&store), [b, c, a]);
+        store.move_group(a, 0);
+        assert_eq!(ids(&store), [a, b, c]);
+        store.move_group(c, 1);
+        assert_eq!(ids(&store), [a, c, b]);
     }
 
     #[test]

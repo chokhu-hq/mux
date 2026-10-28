@@ -364,7 +364,7 @@ impl eframe::App for Gallery {
 
                                 section(ui, "Thinking", |ui| {
                                     ui.set_max_width(320.0);
-                                    chat::thinking(ui);
+                                    chat::thinking(ui, 0);
                                 });
 
                                 section(ui, "Chat", |ui| {
@@ -389,7 +389,7 @@ impl eframe::App for Gallery {
                                                         self.thinking = true;
                                                         chat::set_thinking(items, true);
                                                     }
-                                                    Some(ChatAction::Attach) => {}
+                                                    Some(ChatAction::Attach | ChatAction::OpenLink(_) | ChatAction::Compact) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;
                                                         chat::set_thinking(items, false);

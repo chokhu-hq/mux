@@ -17,6 +17,8 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{Event, usage};
 
+mod subagent;
+
 // long command output is cut down to its tail, which is the part people read
 const OUTPUT_LIMIT: usize = 32 * 1024;
 
@@ -38,7 +40,10 @@ enum Call {
     StartThread,
     ResumeThread,
     StartTurn,
+    // input added to a running turn, kept so it can start its own turn if that one already ended
+    Steer(String, Vec<String>),
     Interrupt,
+    Compact,
 }
 
 struct Process {
@@ -84,6 +89,16 @@ pub struct Agent {
     next_approval: u64,
     changed: BTreeSet<usize>,
     busy_changed: bool,
+    // messages claude has been sent but not answered yet, since it runs each queued one as its own turn
+    claude_turns: usize,
+    // a subagent's own tool calls by id, as its card and the step within it
+    sub_steps: HashMap<String, (usize, usize)>,
+    // claude's subagent task ids and codex's subagent threads, each pointing at its card
+    tasks: HashMap<String, usize>,
+    child_threads: HashMap<String, usize>,
+    // the compaction item still running, whether asked for or started by the agent itself
+    compacting: Option<usize>,
+    compact_queued: bool,
 }
 
 impl Agent {
@@ -96,7 +111,10 @@ impl Agent {
         // nothing from a previous process is still running or waiting on an answer
         for item in &mut items {
             match item {
-                AgentItem::Command { status, .. } | AgentItem::FileChange { status, .. }
+                AgentItem::Command { status, .. }
+                | AgentItem::FileChange { status, .. }
+                | AgentItem::Compaction { status }
+                | AgentItem::Subagent { status, .. }
                     if *status == ItemStatus::Running =>
                 {
                     *status = ItemStatus::Failed
@@ -131,6 +149,12 @@ impl Agent {
             next_approval: 0,
             changed: BTreeSet::new(),
             busy_changed: false,
+            claude_turns: 0,
+            sub_steps: HashMap::new(),
+            tasks: HashMap::new(),
+            child_threads: HashMap::new(),
+            compacting: None,
+            compact_queued: false,
         }
     }
 
@@ -195,40 +219,128 @@ impl Agent {
         cwd: PathBuf,
         events: &UnboundedSender<Event>,
     ) {
+        let was_busy = self.busy;
         self.push(AgentItem::User {
             text: text.clone(),
             attachments: attachments.clone(),
         });
         self.set_busy(true);
-        let provider = self.settings.provider;
-        // claude bakes model, effort and speed in at launch, so new settings mean relaunching with --resume
-        if provider == Provider::Claude && self.launched.as_ref() != Some(&self.settings) {
-            self.process = None;
-        }
-        if self.process.is_none()
-            && let Err(err) = self.start(session, generation, cwd, events)
-        {
-            let name = provider.label();
-            let message = if err.kind() == io::ErrorKind::NotFound {
-                format!("The {name} CLI wasn't found on PATH. Install it, then send again.")
-            } else {
-                format!("Couldn't start {name}: {err}")
-            };
-            self.push(AgentItem::Error { message });
-            self.set_busy(false);
+        if !self.launch(was_busy, session, generation, cwd, events) {
             return;
         }
-        if provider == Provider::Claude {
+        if self.settings.provider == Provider::Claude {
             let line = json!({
                 "type": "user",
                 "message": { "role": "user", "content": claude_content(&text, &attachments) }
             });
+            self.claude_turns += 1;
             self.write(line);
+        } else if let (true, true, Some(thread), Some(turn)) = (
+            was_busy,
+            self.thread_live,
+            self.thread_id.clone(),
+            self.turn_id.clone(),
+        ) {
+            // codex takes new input into the turn that's already running
+            let mut params = turn_params(&thread, &text, &attachments, &self.settings);
+            params =
+                json!({ "threadId": thread, "expectedTurnId": turn, "input": params["input"] });
+            self.call(Call::Steer(text, attachments), "turn/steer", params);
         } else if self.thread_live {
             self.start_turn(text, attachments);
         } else {
             self.queued.push((text, attachments));
         }
+    }
+
+    // summarises the conversation so far, which only makes sense between turns of a started one
+    pub fn compact(
+        &mut self,
+        session: u64,
+        generation: u64,
+        cwd: PathBuf,
+        events: &UnboundedSender<Event>,
+    ) {
+        let claude = self.settings.provider == Provider::Claude;
+        let started = if claude {
+            self.session_id.is_some()
+        } else {
+            self.thread_id.is_some()
+        };
+        if self.busy || !started {
+            return;
+        }
+        let index = self.push(AgentItem::Compaction {
+            status: ItemStatus::Running,
+        });
+        self.compacting = Some(index);
+        self.set_busy(true);
+        if !self.launch(false, session, generation, cwd, events) {
+            self.finish_compaction(ItemStatus::Failed);
+            return;
+        }
+        if claude {
+            self.claude_turns += 1;
+            self.write(json!({
+                "type": "user",
+                "message": { "role": "user", "content": "/compact" }
+            }));
+        } else if self.thread_live {
+            self.start_compaction();
+        } else {
+            self.compact_queued = true;
+        }
+    }
+
+    fn start_compaction(&mut self) {
+        if let Some(thread) = self.thread_id.clone() {
+            self.call(
+                Call::Compact,
+                "thread/compact/start",
+                json!({ "threadId": thread }),
+            );
+        }
+    }
+
+    fn finish_compaction(&mut self, done: ItemStatus) {
+        if let Some(index) = self.compacting.take()
+            && let Some(AgentItem::Compaction { status }) = self.items.get_mut(index)
+        {
+            *status = done;
+            self.changed.insert(index);
+        }
+    }
+
+    // starts the cli when it isn't running, reporting why when it can't be
+    fn launch(
+        &mut self,
+        busy: bool,
+        session: u64,
+        generation: u64,
+        cwd: PathBuf,
+        events: &UnboundedSender<Event>,
+    ) -> bool {
+        let provider = self.settings.provider;
+        // claude bakes model, effort and speed in at launch, so new settings mean relaunching with --resume,
+        // which waits for a quiet moment rather than cutting off a turn in progress
+        if provider == Provider::Claude && !busy && self.launched.as_ref() != Some(&self.settings) {
+            self.process = None;
+        }
+        if self.process.is_some() {
+            return true;
+        }
+        let Err(err) = self.start(session, generation, cwd, events) else {
+            return true;
+        };
+        let name = provider.label();
+        let message = if err.kind() == io::ErrorKind::NotFound {
+            format!("The {name} CLI wasn't found on PATH. Install it, then send again.")
+        } else {
+            format!("Couldn't start {name}: {err}")
+        };
+        self.push(AgentItem::Error { message });
+        self.set_busy(false);
+        false
     }
 
     pub fn error(&mut self, message: String) {
@@ -294,6 +406,10 @@ impl Agent {
         self.turn_id = None;
         self.live_text = None;
         self.launched = None;
+        self.claude_turns = 0;
+        self.compact_queued = false;
+        self.finish_compaction(ItemStatus::Failed);
+        self.fail_subagents();
         self.set_busy(false);
     }
 
@@ -415,6 +531,9 @@ impl Agent {
                 None => {
                     self.thread_id = msg["result"]["thread"]["id"].as_str().map(str::to_owned);
                     self.thread_live = true;
+                    if std::mem::take(&mut self.compact_queued) {
+                        self.start_compaction();
+                    }
                     let queued = std::mem::take(&mut self.queued);
                     if !queued.is_empty() {
                         let (texts, files): (Vec<_>, Vec<_>) = queued.into_iter().unzip();
@@ -426,7 +545,20 @@ impl Agent {
                 Some(message) => self.fail(format!("Codex didn't start the turn: {message}")),
                 None => self.turn_id = msg["result"]["turn"]["id"].as_str().map(str::to_owned),
             },
+            Call::Steer(text, attachments) => {
+                if error.is_some() {
+                    self.start_turn(text, attachments);
+                }
+            }
             Call::Interrupt => {}
+            Call::Compact => {
+                if let Some(message) = error {
+                    self.finish_compaction(ItemStatus::Failed);
+                    self.fail(format!(
+                        "Codex couldn't compact the conversation: {message}"
+                    ));
+                }
+            }
         }
     }
 
@@ -483,6 +615,9 @@ impl Agent {
     }
 
     fn notification(&mut self, method: &str, params: &Value) {
+        if self.codex_child(method, params) {
+            return;
+        }
         match method {
             "turn/started" => {
                 self.turn_id = params["turn"]["id"].as_str().map(str::to_owned);
@@ -500,6 +635,7 @@ impl Agent {
                 }
                 self.turn_id = None;
                 self.expire_approvals();
+                self.finish_compaction(ItemStatus::Failed);
                 self.set_busy(false);
             }
             "error" if params["willRetry"] != true => {
@@ -559,13 +695,34 @@ impl Agent {
                 changes: file_changes(item),
                 status: ItemStatus::Running,
             },
+            Some("collabAgentToolCall") => {
+                self.codex_collab(item);
+                return;
+            }
+            // a compaction mux asked for already has its item, and one codex started itself gets one
+            Some("contextCompaction") => match self.compacting {
+                Some(index) => {
+                    self.by_codex_id.insert(id, index);
+                    return;
+                }
+                None => AgentItem::Compaction {
+                    status: ItemStatus::Running,
+                },
+            },
             _ => return,
         };
         let index = self.push(entry);
+        if matches!(self.items[index], AgentItem::Compaction { .. }) {
+            self.compacting = Some(index);
+        }
         self.by_codex_id.insert(id, index);
     }
 
     fn item_completed(&mut self, item: &Value) {
+        if item["type"] == "collabAgentToolCall" {
+            self.codex_collab(item);
+            return;
+        }
         let Some(&index) = item["id"].as_str().and_then(|id| self.by_codex_id.get(id)) else {
             return;
         };
@@ -594,19 +751,58 @@ impl Agent {
                 *changes = file_changes(item);
                 *s = status;
             }
+            // the compaction item has no status, so finishing it is what says it worked
+            Some(AgentItem::Compaction { status: s }) => {
+                *s = ItemStatus::Done;
+                self.compacting = None;
+            }
             _ => return,
         }
         self.changed.insert(index);
     }
 
     fn handle_claude(&mut self, msg: &Value) {
-        // subagent traffic carries a parent tool id, and only the main conversation is shown
-        if msg["parent_tool_use_id"].is_string() {
+        // a subagent's own messages carry the id of the tool call that started it
+        if let Some(parent) = msg["parent_tool_use_id"].as_str() {
+            self.claude_subagent_message(parent, msg);
             return;
         }
         match msg["type"].as_str() {
+            Some("system")
+                if msg["subtype"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("task_")) =>
+            {
+                self.claude_task(msg)
+            }
             Some("system") if msg["subtype"] == "init" => {
                 self.session_id = msg["session_id"].as_str().map(str::to_owned);
+            }
+            // claude compacts on its own as the window fills, and says so before it starts
+            Some("system") if msg["subtype"] == "status" && msg["status"] == "compacting" => {
+                if self.compacting.is_none() {
+                    let index = self.push(AgentItem::Compaction {
+                        status: ItemStatus::Running,
+                    });
+                    self.compacting = Some(index);
+                }
+            }
+            Some("system") if msg["subtype"] == "status" && msg["compact_result"].is_string() => {
+                if msg["compact_result"] != "success" {
+                    self.finish_compaction(ItemStatus::Failed);
+                }
+            }
+            Some("system") if msg["subtype"] == "compact_boundary" => {
+                if self.compacting.is_none() {
+                    self.compacting = Some(self.push(AgentItem::Compaction {
+                        status: ItemStatus::Running,
+                    }));
+                }
+                self.finish_compaction(ItemStatus::Done);
+                if let Some(used) = msg["compact_metadata"]["post_tokens"].as_u64() {
+                    let window = self.context.map_or(0, |c| c.window);
+                    self.set_context(ContextUsage { used, window });
+                }
             }
             Some("stream_event") => {
                 let event = &msg["event"];
@@ -656,7 +852,7 @@ impl Agent {
             Some("user") => {
                 for block in msg["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] == "tool_result" {
-                        self.claude_tool_result(block);
+                        self.claude_tool_result(msg, block);
                     }
                 }
             }
@@ -686,7 +882,9 @@ impl Agent {
                 }
                 self.live_text = None;
                 self.expire_approvals();
-                self.set_busy(false);
+                self.finish_compaction(ItemStatus::Failed);
+                self.claude_turns = self.claude_turns.saturating_sub(1);
+                self.set_busy(self.claude_turns > 0);
             }
             _ => {}
         }
@@ -699,6 +897,10 @@ impl Agent {
         let input = &block["input"];
         let field = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
         let name = block["name"].as_str().unwrap_or_default();
+        if name == "Agent" || name == "Task" {
+            self.claude_subagent(id, input);
+            return;
+        }
         let entry = match name {
             "Bash" => AgentItem::Command {
                 command: field("command"),
@@ -724,13 +926,17 @@ impl Agent {
         self.by_codex_id.insert(id, index);
     }
 
-    fn claude_tool_result(&mut self, block: &Value) {
+    fn claude_tool_result(&mut self, msg: &Value, block: &Value) {
         let Some(&index) = block["tool_use_id"]
             .as_str()
             .and_then(|id| self.by_codex_id.get(id))
         else {
             return;
         };
+        if matches!(self.items.get(index), Some(AgentItem::Subagent { .. })) {
+            self.claude_subagent_result(index, msg, block);
+            return;
+        }
         let failed = block["is_error"] == true;
         let status = if failed {
             ItemStatus::Failed
@@ -884,6 +1090,10 @@ fn claude_content(text: &str, attachments: &[String]) -> Value {
     let mut content = Vec::new();
     for path in images {
         match fs::read(path) {
+            // claude turns away images over 5 MB, which would fail the whole message
+            Ok(bytes) if bytes.len() > 5 * 1024 * 1024 => {
+                text.push_str(&format!("\n\n(Skipped {path} because it is over 5 MB)"))
+            }
             Ok(bytes) => content.push(json!({ "type": "image", "source": {
                 "type": "base64",
                 "media_type": media_type(path),
@@ -1131,6 +1341,189 @@ mod tests {
 
     fn note(agent: &mut Agent, method: &str, params: Value) {
         agent.handle(json!({ "method": method, "params": params }));
+    }
+
+    #[test]
+    fn claude_stays_busy_until_every_queued_message_is_answered() {
+        let mut agent = claude_agent();
+        agent.claude_turns = 2;
+        agent.set_busy(true);
+        let result = json!({ "type": "result", "subtype": "success", "result": "ok" });
+        agent.handle(result.clone());
+        assert!(agent.busy, "the second message is still running");
+        agent.handle(result);
+        assert!(!agent.busy);
+    }
+
+    #[test]
+    fn claude_compaction_shows_in_the_transcript_and_shrinks_the_context() {
+        let mut agent = claude_agent();
+        agent.context = Some(ContextUsage {
+            used: 150_000,
+            window: 200_000,
+        });
+        agent.handle(json!({ "type": "system", "subtype": "status", "status": "compacting" }));
+        assert_eq!(
+            agent.items,
+            [AgentItem::Compaction {
+                status: ItemStatus::Running
+            }]
+        );
+        agent.handle(json!({ "type": "system", "subtype": "compact_boundary",
+            "compact_metadata": { "trigger": "auto", "pre_tokens": 150000, "post_tokens": 6000 } }));
+        assert_eq!(
+            agent.items,
+            [AgentItem::Compaction {
+                status: ItemStatus::Done
+            }]
+        );
+        assert_eq!(agent.context.map(|c| c.used), Some(6000));
+    }
+
+    #[test]
+    fn codex_compaction_reuses_the_item_mux_started() {
+        let mut agent = agent();
+        agent.compacting = Some(agent.push(AgentItem::Compaction {
+            status: ItemStatus::Running,
+        }));
+        let item = json!({ "item": { "id": "k1", "type": "contextCompaction" } });
+        note(&mut agent, "item/started", item.clone());
+        note(&mut agent, "item/completed", item);
+        assert_eq!(
+            agent.items,
+            [AgentItem::Compaction {
+                status: ItemStatus::Done
+            }]
+        );
+        assert_eq!(agent.compacting, None);
+    }
+
+    fn subagent(
+        agent: &Agent,
+        index: usize,
+    ) -> (
+        ItemStatus,
+        String,
+        Vec<mux_core::protocol::SubagentStep>,
+        String,
+    ) {
+        match &agent.items[index] {
+            AgentItem::Subagent {
+                status,
+                activity,
+                steps,
+                result,
+                ..
+            } => (*status, activity.clone(), steps.clone(), result.clone()),
+            other => panic!("not a subagent: {other:?}"),
+        }
+    }
+
+    // shapes taken from what claude 2.1.312 streamed for two subagents, one in the background
+    #[test]
+    fn claude_subagents_get_cards_with_their_own_steps() {
+        let mut agent = claude_agent();
+        agent.handle(json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "id": "t1", "name": "Agent", "input": {
+                "description": "List files", "prompt": "Use Glob", "subagent_type": "general-purpose" } },
+            { "type": "tool_use", "id": "t2", "name": "Agent", "input": {
+                "description": "Read a file", "prompt": "Use Read", "subagent_type": "general-purpose",
+                "run_in_background": true } }
+        ] } }));
+        agent.handle(json!({ "type": "system", "subtype": "task_started", "task_id": "k2", "tool_use_id": "t2" }));
+        agent.handle(json!({ "type": "assistant", "parent_tool_use_id": "t2", "message": { "content": [
+            { "type": "tool_use", "id": "s1", "name": "Read", "input": { "file_path": "/tmp/a.jsonl" } }
+        ] } }));
+        let (status, activity, steps, _) = subagent(&agent, 1);
+        assert_eq!(status, ItemStatus::Running);
+        assert_eq!(activity, "Read /tmp/a.jsonl");
+        assert_eq!(steps[0].status, ItemStatus::Running);
+        agent.handle(
+            json!({ "type": "user", "parent_tool_use_id": "t2", "message": { "content": [
+            { "type": "tool_result", "tool_use_id": "s1", "content": "line" }
+        ] } }),
+        );
+        // the background one's tool result only says it launched, so it keeps running
+        agent.handle(json!({ "type": "user", "message": { "content": [
+            { "type": "tool_result", "tool_use_id": "t2", "content": "Async agent launched successfully." }
+        ] } }));
+        assert_eq!(subagent(&agent, 1).0, ItemStatus::Running);
+        agent.handle(json!({ "type": "user", "tool_use_result": { "content": [{ "type": "text", "text": "a.jsonl" }] },
+            "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "[hand-back] a.jsonl" }] } }));
+        let (status, _, _, result) = subagent(&agent, 0);
+        assert_eq!((status, result.as_str()), (ItemStatus::Done, "a.jsonl"));
+        agent.handle(
+            json!({ "type": "assistant", "parent_tool_use_id": "t2", "message": { "content": [
+            { "type": "text", "text": "The first line is a system init." }
+        ] } }),
+        );
+        agent.handle(json!({ "type": "system", "subtype": "task_notification", "task_id": "k2", "tool_use_id": "t2", "status": "completed" }));
+        let (status, activity, steps, result) = subagent(&agent, 1);
+        assert_eq!(status, ItemStatus::Done);
+        assert!(activity.is_empty());
+        assert_eq!(steps[0].status, ItemStatus::Done);
+        assert_eq!(result, "The first line is a system init.");
+    }
+
+    #[test]
+    fn codex_subagent_threads_fill_their_card_and_leave_the_turn_alone() {
+        let mut agent = agent();
+        agent.thread_id = Some("main".into());
+        agent.set_busy(true);
+        note(
+            &mut agent,
+            "item/started",
+            json!({ "threadId": "main", "item": {
+            "id": "c1", "type": "collabAgentToolCall", "tool": "spawnAgent", "prompt": "Find the flaky test",
+            "receiverThreadIds": ["child"], "agentsStates": {}, "status": "inProgress" } }),
+        );
+        note(
+            &mut agent,
+            "turn/completed",
+            json!({ "threadId": "child", "turn": { "status": "completed" } }),
+        );
+        assert!(
+            agent.busy,
+            "a subagent's turn ending is not the main turn ending"
+        );
+        note(
+            &mut agent,
+            "item/started",
+            json!({ "threadId": "child", "item": {
+            "id": "x1", "type": "commandExecution", "command": "cargo test" } }),
+        );
+        note(
+            &mut agent,
+            "item/completed",
+            json!({ "threadId": "child", "item": {
+            "id": "x1", "type": "commandExecution", "status": "completed" } }),
+        );
+        note(
+            &mut agent,
+            "item/completed",
+            json!({ "threadId": "main", "item": {
+            "id": "c2", "type": "collabAgentToolCall", "tool": "wait",
+            "agentsStates": { "child": { "status": "completed", "message": "It's session_expiry." } } } }),
+        );
+        let (status, _, steps, result) = subagent(&agent, 0);
+        assert_eq!(status, ItemStatus::Done);
+        assert_eq!(steps[0].name, "Bash");
+        assert_eq!(steps[0].status, ItemStatus::Done);
+        assert_eq!(result, "It's session_expiry.");
+    }
+
+    #[test]
+    fn a_steer_that_misses_the_turn_starts_its_own() {
+        let mut agent = agent();
+        agent.thread_id = Some("th".into());
+        agent
+            .calls
+            .insert(4, Call::Steer("also this".into(), Vec::new()));
+        agent.handle(json!({ "id": 4, "error": { "message": "no active turn" } }));
+        assert!(
+            agent.calls.values().any(|c| matches!(c, Call::StartTurn)),
+            "the message goes out as a new turn"
+        );
     }
 
     // the message order below is what codex 0.164 sent for a turn that ran one approved command

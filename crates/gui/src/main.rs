@@ -129,7 +129,7 @@ struct App {
     // files dropped since the last frame, for the open agent to pick up
     dropped: Vec<String>,
     // which agent clis are on PATH, checked once for the welcome screen
-    installed: Option<[(Provider, bool); 2]>,
+    installed: Option<[(Provider, bool); 3]>,
     // the file opened from a chat link, kept while the panel slides shut
     viewer: Option<FileView>,
     viewer_open: bool,
@@ -910,6 +910,7 @@ fn cli(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "codex",
         Provider::Claude => "claude",
+        Provider::OpenCode => "opencode",
     }
 }
 
@@ -1117,15 +1118,16 @@ fn agent_controls(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             // a fixed width keeps the menu compact, since the list below would otherwise fill the window
-            ui.set_width(260.0);
+            ui.set_width(300.0);
             // the tabs pick which agent's models are listed, the model picked decides the agent
             let mut viewing = ui
                 .data(|d| d.get_temp::<Provider>(viewing_id))
                 .unwrap_or(settings.provider);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = space::XS;
-                // measured once, so both tabs split the row evenly
-                let width = (ui.available_width() - space::XS) / 2.0;
+                // measured once, so the tabs split the row evenly
+                let count = Provider::ALL.len() as f32;
+                let width = (ui.available_width() - space::XS * (count - 1.0)) / count;
                 // the highlight is drawn into this slot after the tabs, so it sits beneath their labels
                 let thumb = ui.painter().add(egui::Shape::Noop);
                 let mut tabs = Vec::new();

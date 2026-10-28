@@ -684,6 +684,8 @@ impl Server {
                     .await
                     .unwrap_or_default(),
                 Provider::Codex => skills::codex(&folder).await.unwrap_or_default(),
+                // opencode lists its commands itself once its session opens
+                Provider::OpenCode => return,
             };
             let _ = events.send(Event::Skills(id, provider, skills));
         });

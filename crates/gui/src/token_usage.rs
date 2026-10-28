@@ -168,12 +168,16 @@ fn tiles(ui: &mut egui::Ui, t: &TokenTotals) {
     });
 }
 
+// opencode keeps its history in a database rather than transcripts, so only these two are counted
+const CHARTED: [Provider; 2] = [Provider::Codex, Provider::Claude];
+
 // each agent keeps one colour wherever it appears, checked for colour blind separation against both surfaces
 fn series_color(p: &Palette, dark: bool, provider: Provider) -> Color32 {
     match (provider, dark) {
         (Provider::Codex, _) => p.accent,
         (Provider::Claude, true) => Color32::from_rgb(0xC9, 0x6A, 0x4C),
         (Provider::Claude, false) => mux_ui::CLAUDE_ORANGE,
+        (Provider::OpenCode, _) => p.text_muted,
     }
 }
 
@@ -189,7 +193,7 @@ fn chart(ui: &mut egui::Ui, days: &[UsageDay], first: i64, last: i64) {
     }
     let count = (last - first + 1) as usize;
     let split: Vec<[TokenTotals; 2]> = (first..=last)
-        .map(|day| Provider::ALL.map(|pr| per_day.get(&(day, pr)).copied().unwrap_or_default()))
+        .map(|day| CHARTED.map(|pr| per_day.get(&(day, pr)).copied().unwrap_or_default()))
         .collect();
     let totals: Vec<[u64; 2]> = split.iter().map(|t| t.map(|t| t.total())).collect();
     let peak = totals.iter().map(|t| t[0] + t[1]).max().unwrap_or(0);
@@ -203,7 +207,7 @@ fn chart(ui: &mut egui::Ui, days: &[UsageDay], first: i64, last: i64) {
                 .color(p.text),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            for provider in Provider::ALL.into_iter().rev() {
+            for provider in CHARTED.into_iter().rev() {
                 ui.label(
                     egui::RichText::new(provider.label())
                         .font(font::regular(text::SM + 1.0))
@@ -267,7 +271,7 @@ fn chart(ui: &mut egui::Ui, days: &[UsageDay], first: i64, last: i64) {
             painter.rect_filled(column, CornerRadius::same(theme::radius::SM), p.hover);
         }
         let mut base = plot.bottom();
-        let segments: Vec<(Provider, u64)> = Provider::ALL
+        let segments: Vec<(Provider, u64)> = CHARTED
             .into_iter()
             .zip(values.iter().copied())
             .filter(|(_, v)| *v > 0)
@@ -432,7 +436,7 @@ fn day_card(
     );
     y += 30.0 + space::SM;
 
-    for (provider, tokens) in Provider::ALL.into_iter().zip(split) {
+    for (provider, tokens) in CHARTED.into_iter().zip(split) {
         let mid = y + row / 2.0;
         painter.rect_filled(
             Rect::from_center_size(pos2(left + 4.0, mid), vec2(8.0, 8.0)),

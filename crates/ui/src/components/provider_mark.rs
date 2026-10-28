@@ -1,6 +1,6 @@
 use std::f32::consts::TAU;
 
-use egui::{Align2, Color32, Painter, Pos2, Stroke, vec2};
+use egui::{Align2, Color32, Painter, Pos2, Rect, Stroke, StrokeKind, vec2};
 use mux_core::Provider;
 
 use crate::icons;
@@ -9,7 +9,7 @@ use crate::theme::font;
 // claude's signature orange, which its mark keeps even in a quiet row
 pub const CLAUDE_ORANGE: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
 
-// draws an agent's logo: openai's from the icon font, and claude's starburst painted by hand since no font has it
+// draws an agent's logo: openai's from the icon font, and claude's and opencode's painted by hand since no font has them
 pub fn provider_mark(
     painter: &Painter,
     center: Pos2,
@@ -40,13 +40,28 @@ pub fn provider_mark(
                 painter.circle_filled(end, width / 2.0, color);
             }
         }
+        // opencode's mark is a tall frame with the lower half of its inside filled in a lighter shade
+        Provider::OpenCode => {
+            let frame = Rect::from_center_size(center, vec2(size * 0.7, size * 0.86));
+            let width = size * 0.14;
+            let inside = frame.shrink(width);
+            let lower =
+                Rect::from_min_max(egui::pos2(inside.left(), inside.center().y), inside.max);
+            painter.rect_filled(lower, 0.0, color.gamma_multiply(0.5));
+            painter.rect_stroke(
+                frame.shrink(width / 2.0),
+                0.0,
+                Stroke::new(width, color),
+                StrokeKind::Middle,
+            );
+        }
     }
 }
 
 // the colour a mark is drawn in when nothing needs attention
 pub fn provider_color(provider: Provider, quiet: Color32) -> Color32 {
     match provider {
-        Provider::Codex => quiet,
+        Provider::Codex | Provider::OpenCode => quiet,
         Provider::Claude => CLAUDE_ORANGE,
     }
 }

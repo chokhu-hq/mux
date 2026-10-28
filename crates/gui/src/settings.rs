@@ -41,8 +41,8 @@ pub struct Page<'a> {
     pub prefs: &'a mut Prefs,
     // transparency is only offered where the compositor can blur behind the window
     pub blur: bool,
-    pub agents: [(Provider, bool); 2],
-    pub usage: [(Provider, Vec<UsageWindow>); 2],
+    pub agents: [(Provider, bool); 3],
+    pub usage: [(Provider, Vec<UsageWindow>); 3],
     // the last month of tokens by day, once the server has read the clis' history
     pub tokens: Option<(i64, Vec<UsageDay>)>,
 }
@@ -234,14 +234,15 @@ fn general(ui: &mut egui::Ui, prefs: &mut Prefs, blur: bool, agents: &[(Provider
 }
 
 fn usage(ui: &mut egui::Ui, usage: &[(Provider, Vec<UsageWindow>)]) {
-    for (provider, windows) in usage {
+    // opencode has no plan of its own to report limits for
+    for (provider, windows) in usage.iter().filter(|(p, _)| *p != Provider::OpenCode) {
         section(ui, &format!("{} plan limits", provider.label()), |ui| {
             if windows.is_empty() {
                 let detail = match provider {
                     Provider::Claude => {
                         "Claude reports its limits as it replies, so they show after your next message"
                     }
-                    Provider::Codex => "Asking Codex for its limits…",
+                    Provider::Codex | Provider::OpenCode => "Asking Codex for its limits…",
                 };
                 setting(ui, "No usage reported yet", detail, |_| {});
             } else {

@@ -42,15 +42,17 @@ pub enum Provider {
     #[default]
     Codex,
     Claude,
+    OpenCode,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Claude];
+    pub const ALL: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::OpenCode];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+            Self::OpenCode => "OpenCode",
         }
     }
 }

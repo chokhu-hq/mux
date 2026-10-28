@@ -84,6 +84,8 @@ impl History {
             let record = match provider {
                 Provider::Claude => claude_line(&line),
                 Provider::Codex => codex_line(&line, &mut model),
+                // opencode keeps its history in a database, not transcripts, so none are scanned
+                Provider::OpenCode => None,
             };
             found.extend(record);
         }

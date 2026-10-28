@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 22;
+pub const PROTOCOL: u32 = 23;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {

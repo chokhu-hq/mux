@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use crate::{Event, usage};
 
 mod interaction;
+mod opencode;
 mod rewind;
 mod subagent;
 
@@ -55,6 +56,8 @@ enum Call {
     Steer(String, Vec<String>),
     Interrupt,
     Compact,
+    // an opencode session setting, like its model or mode
+    Configure,
 }
 
 struct Process {
@@ -144,6 +147,7 @@ pub struct Agent {
     // the compaction item still running, whether asked for or started by the agent itself
     compacting: Option<usize>,
     compact_queued: bool,
+    applied: opencode::Applied,
 }
 
 impl Agent {
@@ -218,6 +222,7 @@ impl Agent {
             queue_changed: false,
             compacting: None,
             compact_queued: false,
+            applied: opencode::Applied::default(),
         }
     }
 
@@ -421,6 +426,12 @@ impl Agent {
             });
             self.claude_waiting.push_back(text);
             self.write(line);
+        } else if self.settings.provider == Provider::OpenCode {
+            if self.thread_live {
+                self.opencode_send(text, attachments);
+            } else {
+                self.queued.push((text, attachments));
+            }
         } else if let (true, true, Some(thread), Some(turn)) = (
             steer,
             self.thread_live,
@@ -449,7 +460,8 @@ impl Agent {
         events: &UnboundedSender<Event>,
     ) {
         let claude = self.settings.provider == Provider::Claude;
-        let started = if claude {
+        let opencode = self.settings.provider == Provider::OpenCode;
+        let started = if claude || opencode {
             self.session_id.is_some()
         } else {
             self.thread_id.is_some()
@@ -473,6 +485,8 @@ impl Agent {
                 "type": "user",
                 "message": { "role": "user", "content": "/compact" }
             }));
+        } else if opencode {
+            self.opencode_compact();
         } else if self.thread_live {
             self.start_compaction();
         } else {
@@ -564,6 +578,8 @@ impl Agent {
                 "type": "control_response",
                 "response": { "subtype": "success", "request_id": pending.request, "response": answer }
             }));
+        } else if self.settings.provider == Provider::OpenCode {
+            self.opencode_choose(&pending.request, &pending.input, decision);
         } else {
             let answer = match decision {
                 Decision::Allow => "accept",
@@ -611,8 +627,8 @@ impl Agent {
                 if !self.busy || self.process.is_none() {
                     return Some(message);
                 }
-                if self.settings.provider == Provider::Claude {
-                    // claude can't take a message mid reply, so the reply stops and this one goes next
+                if self.settings.provider != Provider::Codex {
+                    // only codex can take a message mid reply, so the reply stops and this one goes next
                     self.queue.insert(0, message);
                     self.stop();
                     self.held = false;
@@ -651,6 +667,10 @@ impl Agent {
                 }));
                 self.next_call += 1;
             }
+            return;
+        }
+        if self.settings.provider == Provider::OpenCode {
+            self.opencode_stop();
             return;
         }
         if let (Some(thread), Some(turn)) = (self.thread_id.clone(), self.turn_id.clone()) {
@@ -698,7 +718,12 @@ impl Agent {
         events: &UnboundedSender<Event>,
     ) -> io::Result<()> {
         let claude = self.settings.provider == Provider::Claude;
-        let mut command = if claude {
+        let opencode = self.settings.provider == Provider::OpenCode;
+        let mut command = if opencode {
+            let mut command = Command::new("opencode");
+            command.arg("acp");
+            command
+        } else if claude {
             let mut command = Command::new("claude");
             command.args(claude_args(
                 &self.settings,
@@ -768,6 +793,10 @@ impl Agent {
             self.launched = Some(self.settings.clone());
             return Ok(());
         }
+        if opencode {
+            self.opencode_initialize();
+            return Ok(());
+        }
         self.call(
             Call::Initialize,
             "initialize",
@@ -783,6 +812,10 @@ impl Agent {
     pub fn handle(&mut self, msg: Value) {
         if self.settings.provider == Provider::Claude {
             self.handle_claude(&msg);
+            return;
+        }
+        if self.settings.provider == Provider::OpenCode {
+            self.handle_opencode(&msg);
             return;
         }
         let method = msg.get("method").and_then(Value::as_str).map(str::to_owned);
@@ -839,7 +872,7 @@ impl Agent {
                     self.start_turn(text, attachments);
                 }
             }
-            Call::Interrupt => {}
+            Call::Interrupt | Call::Configure => {}
             Call::Revert => {
                 if let Some(message) = error {
                     self.push(AgentItem::Error {

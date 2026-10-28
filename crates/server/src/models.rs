@@ -25,6 +25,7 @@ pub async fn fetch(provider: Provider) -> io::Result<Catalog> {
         match provider {
             Provider::Codex => list().await,
             Provider::Claude => list_claude().await,
+            Provider::OpenCode => list_opencode().await,
         }
     };
     tokio::time::timeout(Duration::from_secs(30), list)
@@ -94,6 +95,64 @@ async fn list() -> io::Result<Catalog> {
         }
     }
     Err(io::Error::other("codex exited before listing models"))
+}
+
+// opencode's background service lists every model it can reach, with the efforts each one takes
+async fn list_opencode() -> io::Result<Catalog> {
+    let output = Command::new("opencode")
+        .args(["api", "GET", "/api/model"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(io::Error::other("opencode couldn't list its models"));
+    }
+    let list: Value = serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+    Ok(Catalog {
+        models: parse_opencode(&list),
+        usage: None,
+    })
+}
+
+fn parse_opencode(list: &Value) -> Vec<ModelOption> {
+    let mut models: Vec<ModelOption> = list["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["enabled"] != false && m["status"] != "deprecated")
+        .filter_map(|m| {
+            let provider = m["providerID"].as_str()?;
+            let id = m["id"].as_str()?;
+            let efforts: Vec<String> = m["variants"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v["id"].as_str().map(str::to_owned))
+                .collect();
+            Some(ModelOption {
+                // opencode names a model by its provider and id together
+                id: format!("{provider}/{id}"),
+                name: m["name"].as_str().unwrap_or(id).to_owned(),
+                description: provider.to_owned(),
+                default_effort: efforts
+                    .iter()
+                    .find(|e| *e == "medium")
+                    .or(efforts.first())
+                    .cloned()
+                    .unwrap_or_default(),
+                efforts,
+                is_default: false,
+                fast: None,
+            })
+        })
+        .collect();
+    // opencode lists the model it starts sessions on first
+    if let Some(first) = models.first_mut() {
+        first.is_default = true;
+    }
+    models
 }
 
 // claude reports its models in the reply to the initialize control request, before any prompt is sent

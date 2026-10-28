@@ -235,3 +235,162 @@ fn agents_refuse_to_start_without_a_project_folder() {
     server.join().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// drives a real opencode turn through the server, so it needs opencode installed and signed in
+#[test]
+#[ignore]
+fn opencode_live_turn() {
+    use mux_core::protocol::{AgentSettings, Decision};
+    use mux_core::{Access, Provider};
+
+    let dir = std::env::temp_dir().join(format!("mux-it-opencode-{}", std::process::id()));
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("a.txt"), "hello\n").unwrap();
+    // asks before running commands, so the approval round trip is exercised too
+    std::fs::write(
+        project.join("opencode.json"),
+        r#"{"permission":{"bash":"ask","edit":"allow"}}"#,
+    )
+    .unwrap();
+    let socket = dir.join("mux.sock");
+    let _server = {
+        let (socket, state) = (socket.clone(), dir.join("state.json"));
+        std::thread::spawn(move || mux_server::run_at(socket, state))
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stream = loop {
+        match UnixStream::connect(&socket) {
+            Ok(stream) => break stream,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(err) => panic!("server never came up: {err}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
+    let send = |stream: &mut UnixStream, msg| protocol::write(stream, &msg).unwrap();
+    let recv = |stream: &mut UnixStream| protocol::read::<ServerMsg>(stream).unwrap();
+
+    send(&mut stream, ClientMsg::Hello { protocol: PROTOCOL });
+    send(
+        &mut stream,
+        ClientMsg::CreateGroup {
+            name: "oc".to_owned(),
+            path: Some(project.to_string_lossy().into_owned()),
+        },
+    );
+    let group = loop {
+        if let ServerMsg::State { groups } = recv(&mut stream)
+            && let Some(group) = groups.iter().find(|g| g.name == "oc")
+        {
+            break group.id;
+        }
+    };
+    send(
+        &mut stream,
+        ClientMsg::CreateSession {
+            group: Some(group),
+            title: "New agent".to_owned(),
+            kind: SessionKind::Agent,
+        },
+    );
+    let id = loop {
+        if let ServerMsg::Created { id } = recv(&mut stream) {
+            break id;
+        }
+    };
+    send(&mut stream, ClientMsg::AgentOpen { id });
+    let model = std::env::var("MUX_OPENCODE_MODEL").unwrap_or("opencode/big-pickle".to_owned());
+    send(
+        &mut stream,
+        ClientMsg::AgentConfigure {
+            id,
+            settings: AgentSettings {
+                provider: Provider::OpenCode,
+                model: Some(model),
+                access: Access::AutoEdits,
+                ..AgentSettings::default()
+            },
+        },
+    );
+    send(
+        &mut stream,
+        ClientMsg::AgentSend {
+            id,
+            text: "Use the shell tool to run `echo mux-ok`. Then append the line `world` to a.txt with an edit. Reply in one short line.".to_owned(),
+            attachments: Vec::new(),
+        },
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut items: Vec<AgentItem> = Vec::new();
+    let mut was_busy = false;
+    loop {
+        assert!(Instant::now() < deadline, "the turn never finished");
+        match recv(&mut stream) {
+            ServerMsg::AgentItem { index, item, .. } => {
+                if let AgentItem::Approval {
+                    id: approval,
+                    decision: None,
+                    title,
+                    detail,
+                } = &item
+                {
+                    eprintln!("approval: {title} {detail}");
+                    send(
+                        &mut stream,
+                        ClientMsg::AgentDecide {
+                            id,
+                            approval: *approval,
+                            decision: Decision::Allow,
+                        },
+                    );
+                }
+                if index >= items.len() {
+                    items.resize(
+                        index + 1,
+                        AgentItem::Error {
+                            message: String::new(),
+                        },
+                    );
+                }
+                items[index] = item;
+            }
+            ServerMsg::AgentBusy { busy: true, .. } => was_busy = true,
+            ServerMsg::AgentBusy { busy: false, .. } if was_busy => break,
+            _ => {}
+        }
+    }
+    for item in &items {
+        eprintln!("{item:?}");
+    }
+    assert!(items.iter().any(|i| matches!(
+        i,
+        AgentItem::Approval {
+            decision: Some(Decision::Allow),
+            ..
+        }
+    )));
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, AgentItem::Command { output, .. } if output.contains("mux-ok")))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, AgentItem::FileChange { changes, .. } if !changes.is_empty()))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, AgentItem::Assistant { text } if !text.is_empty()))
+    );
+    assert!(
+        std::fs::read_to_string(project.join("a.txt"))
+            .unwrap()
+            .contains("world")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

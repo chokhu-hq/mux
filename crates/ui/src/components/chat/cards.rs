@@ -371,8 +371,128 @@ fn one_line(text: &str) -> (String, usize) {
     (lines.join(" "), lines.len().saturating_sub(1))
 }
 
+// what the model thought, folded to how long it took, with the thoughts a click away when the cli shares them
+pub fn reasoning(ui: &mut Ui, text: &str, started: u64, ended: Option<u64>) {
+    let p = theme::palette(ui);
+    let id = ui.make_persistent_id("reasoning");
+    let text = text.trim();
+    let readable = !text.is_empty();
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let sense = if readable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), sense);
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    let t = if readable {
+        hover_t(ui, &response)
+    } else {
+        0.0
+    };
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(radius::MD),
+        p.hover.gamma_multiply(t),
+    );
+    let y = rect.center().y;
+    let turn = spring_bool(ui.ctx(), id.with("caret"), open, Spring::SMOOTH);
+    let mut x = rect.left() + space::SM;
+    // only thoughts that can be read open, so only they get a caret
+    if readable {
+        caret(ui, pos2(x + 6.0, y), turn, p.text_faint);
+    }
+    x += 12.0 + space::SM;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let label = match ended {
+        Some(ended) => format!("Thought for {}", duration(ended.saturating_sub(started))),
+        None => {
+            spinner(ui, pos2(x + icon::MD / 2.0, y), icon::MD, p.text_muted);
+            x += icon::MD + space::SM;
+            // the running time ticks over each second
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(1));
+            format!("Thinking for {}", duration(now.saturating_sub(started)))
+        }
+    };
+    ui.painter().text(
+        pos2(x, y),
+        Align2::LEFT_CENTER,
+        label,
+        font::medium(text::MD),
+        p.text_muted.lerp_to_gamma(p.text, t),
+    );
+    if readable {
+        response.on_hover_cursor(CursorIcon::PointingHand);
+    } else {
+        response.tip("The model doesn't share what it thought");
+    }
+
+    let guide_x = rect.left() + space::SM + 6.0;
+    reveal(ui, id.with("thoughts"), open && readable, |ui| {
+        let top = ui.cursor().top();
+        ui.horizontal_top(|ui| {
+            ui.add_space(space::LG + space::SM);
+            let mut job = LayoutJob::default();
+            for (i, line) in text.lines().enumerate() {
+                if i > 0 {
+                    job.append(
+                        "\n",
+                        0.0,
+                        TextFormat::simple(font::regular(text::MD), p.text_faint),
+                    );
+                }
+                // summaries title each step in bold, which reads better as a heading than as asterisks
+                let line = line.trim_end();
+                let heading = line.len() > 4 && line.starts_with("**") && line.ends_with("**");
+                let (shown, format) = if heading {
+                    (
+                        &line[2..line.len() - 2],
+                        TextFormat::simple(font::medium(text::MD), p.text_muted),
+                    )
+                } else {
+                    (
+                        line,
+                        TextFormat::simple(font::regular(text::MD), p.text_faint),
+                    )
+                };
+                job.append(shown, 0.0, format);
+            }
+            ui.vertical(|ui| ui.add(Label::new(job).wrap().selectable(true)));
+        });
+        // a guide down the left edge ties the thoughts to their summary
+        let bottom = ui.min_rect().bottom();
+        ui.painter().vline(
+            guide_x,
+            top..=bottom - space::XS,
+            Stroke::new(1.0, p.border),
+        );
+    });
+}
+
+fn duration(ms: u64) -> String {
+    let secs = (ms / 1000).max(1);
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
+}
+
 // a run of tool calls folds into one summary line, so routine work doesn't crowd the conversation
-pub fn activity(ui: &mut Ui, tools: &[&ToolCall]) {
+pub fn activity(ui: &mut Ui, steps: &[&super::ChatItem]) {
+    let tools: Vec<&ToolCall> = steps
+        .iter()
+        .filter_map(|step| match step {
+            super::ChatItem::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect();
     let p = theme::palette(ui);
     let id = ui.make_persistent_id("activity");
     let running = tools.iter().any(|t| t.status == ToolStatus::Running);
@@ -405,7 +525,7 @@ pub fn activity(ui: &mut Ui, tools: &[&ToolCall]) {
     ui.painter().text(
         pos2(x, y),
         Align2::LEFT_CENTER,
-        summary(tools),
+        summary(&tools),
         font::medium(text::MD),
         p.text_muted.lerp_to_gamma(p.text, t),
     );
@@ -419,8 +539,16 @@ pub fn activity(ui: &mut Ui, tools: &[&ToolCall]) {
             ui.vertical(|ui| {
                 // calls inside a group sit close together, unlike the paragraphs around them
                 ui.spacing_mut().item_spacing.y = 2.0;
-                for (i, tool) in tools.iter().enumerate() {
-                    ui.push_id(i, |ui| tool_call(ui, tool));
+                for (i, step) in steps.iter().enumerate() {
+                    ui.push_id(i, |ui| match step {
+                        super::ChatItem::Tool(tool) => tool_call(ui, tool),
+                        super::ChatItem::Reasoning {
+                            text,
+                            started,
+                            ended,
+                        } => reasoning(ui, text, *started, *ended),
+                        _ => {}
+                    });
                 }
             });
         });

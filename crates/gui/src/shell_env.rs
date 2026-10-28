@@ -28,7 +28,7 @@ pub fn adopt_login_path() {
 }
 
 fn login_path() -> Option<String> {
-    let shell = login_shell();
+    let shell = mux_core::login_shell();
     let script = if shell.ends_with("/fish") {
         format!("printf '{MARK}%s{MARK}' (string join : $PATH)")
     } else {
@@ -56,23 +56,6 @@ fn login_path() -> Option<String> {
     let mut output = String::new();
     child.stdout.take()?.read_to_string(&mut output).ok()?;
     marked(&output)
-}
-
-// the shell in the user's account is the one a terminal opens, and SHELL can be stale or missing
-fn login_shell() -> String {
-    // getpwuid reads the account record and hands back a pointer into libc's own buffer, copied out at once
-    let from_account = unsafe {
-        let entry = libc::getpwuid(libc::getuid());
-        (!entry.is_null() && !(*entry).pw_shell.is_null()).then(|| {
-            std::ffi::CStr::from_ptr((*entry).pw_shell)
-                .to_string_lossy()
-                .into_owned()
-        })
-    };
-    from_account
-        .filter(|shell| !shell.is_empty())
-        .or_else(|| std::env::var("SHELL").ok())
-        .unwrap_or_else(|| "/bin/sh".to_owned())
 }
 
 // a profile may print a greeting too, so only what sits between the marks counts

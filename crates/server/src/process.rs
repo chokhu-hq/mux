@@ -73,7 +73,7 @@ impl Process {
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         let mut cmd = match kind {
-            SessionKind::Shell => CommandBuilder::new_default_prog(),
+            SessionKind::Shell => login_shell(),
             SessionKind::Task => shell_command(title),
             SessionKind::Agent => shell_command(&agent_command()),
         };
@@ -207,18 +207,36 @@ impl Drop for Process {
     }
 }
 
+// the account's own shell as a login shell, since the server may have been started from a different one
+#[cfg(unix)]
+fn login_shell() -> CommandBuilder {
+    let shell = mux_core::login_shell();
+    let mut cmd = CommandBuilder::new(&shell);
+    cmd.arg("-l");
+    cmd.env("SHELL", shell);
+    cmd
+}
+
+#[cfg(windows)]
+fn login_shell() -> CommandBuilder {
+    CommandBuilder::new_default_prog()
+}
+
 // runs through the login shell so the user's PATH and aliases apply
+#[cfg(unix)]
 fn shell_command(command: &str) -> CommandBuilder {
-    if cfg!(windows) {
-        let mut cmd = CommandBuilder::new("cmd");
-        cmd.args(["/C", command]);
-        cmd
-    } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-        let mut cmd = CommandBuilder::new(shell);
-        cmd.args(["-l", "-c", command]);
-        cmd
-    }
+    let shell = mux_core::login_shell();
+    let mut cmd = CommandBuilder::new(&shell);
+    cmd.args(["-l", "-c", command]);
+    cmd.env("SHELL", shell);
+    cmd
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new("cmd");
+    cmd.args(["/C", command]);
+    cmd
 }
 
 // the agent cli to launch, overridable until there is a settings screen

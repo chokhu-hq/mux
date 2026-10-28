@@ -10,6 +10,10 @@ use crate::sessions::Sessions;
 
 const RETRY_SECONDS: f64 = 2.0;
 
+// each run of the app restarts a server from another build by itself only once,
+// so two different builds left open don't take turns restarting it forever
+static RESTARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub enum Link {
     Connecting {
         result: Receiver<io::Result<Connection>>,
@@ -81,7 +85,16 @@ impl Link {
                             outdated = Some(Some(protocol));
                             break;
                         }
-                        msg => sessions.apply(msg),
+                        ServerMsg::Build { id } => connection.server_build = Some(id),
+                        msg => {
+                            // a server that sends its state without saying its build is older than build ids
+                            if matches!(msg, ServerMsg::State { .. })
+                                && connection.server_build.is_none()
+                            {
+                                connection.server_build = Some("unknown".to_owned());
+                            }
+                            sessions.apply(msg)
+                        }
                     }
                 }
                 if outdated.is_none() && connection.is_unreadable() {
@@ -97,9 +110,26 @@ impl Link {
                         connection,
                         protocol,
                     }
+                } else if connection.is_stale()
+                    && local()
+                    && !sessions.is_busy()
+                    && !RESTARTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    // nothing is running in it, so it can be swapped for this build's without anyone losing work
+                    log::info!(
+                        "restarting the server from build {} into {}",
+                        connection.server_build.as_deref().unwrap_or_default(),
+                        mux_core::build_id()
+                    );
+                    sessions.outbox.clear();
+                    connection.send(&ClientMsg::Shutdown);
+                    Link::Stopping(connection)
                 } else {
-                    for msg in sessions.outbox.drain(..) {
-                        connection.send(&msg);
+                    // nothing is sent until the server's build is known, since one from another build may not read it
+                    if connection.server_build.is_some() {
+                        for msg in sessions.outbox.drain(..) {
+                            connection.send(&msg);
+                        }
                     }
                     if connection.is_closed() {
                         down("The connection to the Mux server was lost".to_owned())
@@ -146,6 +176,11 @@ impl Link {
         matches!(self, Link::Up(_))
     }
 
+    // a server from another build that's left running because something is running in it
+    pub fn is_stale(&self) -> bool {
+        matches!(self, Link::Up(connection) if connection.is_stale() && local())
+    }
+
     pub fn reconnect_now(&mut self, ctx: &egui::Context) {
         if matches!(self, Link::Down { .. }) {
             *self = Link::start(ctx);
@@ -159,13 +194,21 @@ impl Link {
             retry_at: 0.0,
         };
         *self = match std::mem::replace(self, placeholder) {
-            Link::Outdated { mut connection, .. } => {
+            Link::Outdated { mut connection, .. } | Link::Up(mut connection) => {
                 connection.send(&ClientMsg::Shutdown);
                 Link::Stopping(connection)
             }
             other => other,
         };
     }
+}
+
+// a server in wsl is installed from a release rather than run from this app's binary, so restarting it can't change its build
+fn local() -> bool {
+    #[cfg(windows)]
+    return mux_core::paths::wsl().is_none();
+    #[cfg(not(windows))]
+    true
 }
 
 // retrying while the server is down fails the same way every few seconds, so only a new reason is logged

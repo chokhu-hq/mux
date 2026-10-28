@@ -232,6 +232,9 @@ impl Agent {
                     }
                 }
             }
+            Some("agent_thought_chunk") => {
+                self.reason(update["content"]["text"].as_str().unwrap_or_default());
+            }
             Some("tool_call") => self.opencode_tool(update),
             Some("tool_call_update") => self.opencode_tool_update(update),
             Some("plan") => {
@@ -630,6 +633,8 @@ mod tests {
         agent.record("hi", &[], false);
         agent.transmit("hi".into(), Vec::new(), false);
 
+        agent.handle(update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Need to " } })));
+        agent.handle(update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "run it." } })));
         agent.handle(update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Run" } })));
         agent.handle(update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "ning it." } })));
         agent.handle(update(json!({ "sessionUpdate": "tool_call", "toolCallId": "c", "kind": "execute", "status": "pending", "rawInput": {} })));
@@ -647,13 +652,16 @@ mod tests {
         ));
         agent.handle(json!({ "jsonrpc": "2.0", "id": 2, "result": { "stopReason": "end_turn" } }));
 
-        assert!(matches!(&agent.items[1], AgentItem::Assistant { text } if text == "Running it."));
         assert!(
-            matches!(&agent.items[2], AgentItem::Command { command, output, status: ItemStatus::Done, .. }
+            matches!(&agent.items[1], AgentItem::Reasoning { text, ended: Some(_), .. } if text == "Need to run it.")
+        );
+        assert!(matches!(&agent.items[2], AgentItem::Assistant { text } if text == "Running it."));
+        assert!(
+            matches!(&agent.items[3], AgentItem::Command { command, output, status: ItemStatus::Done, .. }
             if command == "ls" && output == "a.txt")
         );
         assert!(matches!(
-            &agent.items[3],
+            &agent.items[4],
             AgentItem::Approval {
                 decision: Some(Decision::Allow),
                 ..

@@ -191,17 +191,33 @@ impl Sessions {
             return;
         };
         let group = &self.groups[g];
-        let shell = group
+        let shells: Vec<&SessionInfo> = group
             .sessions
             .iter()
-            .find(|s| s.kind == SessionKind::Shell && Some(s.id) != self.selected)
-            .map(|s| s.id);
-        match shell {
-            Some(id) => self.split = Some(id),
-            None => {
+            .filter(|s| s.kind == SessionKind::Shell && Some(s.id) != self.selected)
+            .collect();
+        // a running shell is reused first, then one that exited is started again, and only then is one made
+        let live = shells.iter().find(|s| !ended(s.status)).map(|s| s.id);
+        let exited = shells.first().map(|s| s.id);
+        match (live, exited) {
+            (Some(id), _) => self.split = Some(id),
+            (None, Some(id)) => {
+                self.restart(id);
+                self.split = Some(id);
+            }
+            (None, None) => {
                 let group = group.id;
                 self.request(Some(group), "Shell", SessionKind::Shell, true);
             }
+        }
+    }
+
+    // runs a terminal's command again, dropping what the old run printed so it's attached afresh
+    pub fn restart(&mut self, id: u64) {
+        self.outbox.push(ClientMsg::Restart { id });
+        if let Some(local) = self.locals.get_mut(&id) {
+            local.terminal = None;
+            local.attaching = false;
         }
     }
 
@@ -236,7 +252,7 @@ impl Sessions {
 
     pub fn apply(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { .. } => {}
+            ServerMsg::Welcome { .. } | ServerMsg::Build { .. } => {}
             ServerMsg::State { groups } => {
                 let before: HashMap<u64, SessionStatus> =
                     self.infos().map(|s| (s.id, s.status)).collect();
@@ -378,6 +394,26 @@ impl Sessions {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    // whether restarting the server would cut something off: a terminal or agent at work, or a command an agent left
+    // running, and until the server's sessions are known that's assumed
+    pub fn is_busy(&self) -> bool {
+        if !self.loaded {
+            return true;
+        }
+        let working = self
+            .groups
+            .iter()
+            .flat_map(|g| &g.sessions)
+            .any(|s| matches!(s.status, SessionStatus::Running | SessionStatus::Waiting));
+        let background = self.locals.values().any(|local| {
+            local
+                .background
+                .iter()
+                .any(|task| task.state == wire::BackgroundState::Running)
+        });
+        working || background
     }
 
     pub fn tokens(&self) -> Option<&(i64, Vec<UsageDay>)> {
@@ -1109,6 +1145,15 @@ fn chat_items(
                 });
             }
             AgentItem::Todos { steps } => items.push(ChatItem::Todos(steps.clone())),
+            AgentItem::Reasoning {
+                text,
+                started,
+                ended,
+            } => items.push(ChatItem::Reasoning {
+                text: text.clone(),
+                started: *started,
+                ended: *ended,
+            }),
             AgentItem::Error { message } => {
                 items.push(ChatItem::Assistant(format!("**Error:** {message}")))
             }
@@ -1230,6 +1275,10 @@ fn diff_lines(diff: &str) -> Vec<DiffLine> {
             }
         })
         .collect()
+}
+
+pub fn ended(status: SessionStatus) -> bool {
+    matches!(status, SessionStatus::Done | SessionStatus::Failed)
 }
 
 #[cfg(test)]

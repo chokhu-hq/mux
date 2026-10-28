@@ -1,10 +1,10 @@
 use egui::{
-    Align2, CornerRadius, CursorIcon, Margin, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui,
-    pos2, vec2,
+    Align2, Color32, CornerRadius, CursorIcon, Margin, Response, Sense, Stroke, StrokeKind,
+    TextEdit, Ui, pos2, vec2,
 };
 use mux_core::protocol::{QueueAction, Queued};
 
-use crate::components::{Button, Size, TooltipExt, hover_t};
+use crate::components::{TooltipExt, hover_t};
 use crate::icons;
 use crate::theme::{self, font, icon, radius, space, text};
 
@@ -20,23 +20,19 @@ pub fn queue(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent>
     let mut editing: Option<(usize, String)> = ui.data(|d| d.get_temp(editing_id));
     let mut event = None;
     if held {
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if Button::new("Resume")
-                    .size(Size::Sm)
-                    .show(ui)
-                    .tip("Send the waiting messages")
-                    .clicked()
-                {
-                    event = Some(QueueEvent::Resume);
-                }
-                ui.label(
-                    RichText::new("Waiting until you resume")
-                        .font(font::regular(text::SM + 1.0))
-                        .color(p.text_faint),
-                );
-            });
-        });
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+        let y = row.center().y;
+        let (resume, x) = action(ui, row.right(), y, icons::PLAY, Some("Resume"), None);
+        if resume.tip("Send the waiting messages").clicked() {
+            event = Some(QueueEvent::Resume);
+        }
+        ui.painter().text(
+            pos2(x - space::XS, y),
+            Align2::RIGHT_CENTER,
+            "Waiting until you resume",
+            font::regular(text::SM),
+            p.text_faint,
+        );
     }
     for (i, message) in messages.iter().enumerate() {
         ui.push_id(i, |ui| {
@@ -50,26 +46,26 @@ pub fn queue(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent>
                         .margin(Margin::symmetric(12, 8)),
                 );
                 crate::components::edit_menu(&field, draft);
-                ui.add_space(space::XS);
-                let mut done = false;
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if Button::new("Save")
-                        .primary()
-                        .size(Size::Sm)
-                        .show(ui)
-                        .clicked()
-                    {
-                        event = Some(QueueEvent::Change(
-                            *index,
-                            QueueAction::Edit(draft.trim().to_owned()),
-                        ));
-                        done = true;
-                    }
-                    if Button::new("Cancel").size(Size::Sm).show(ui).clicked() {
-                        done = true;
-                    }
-                });
-                if done {
+                // the same quiet actions as under a waiting message, with saving in the accent since it's the one that counts
+                let (row, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+                let y = row.center().y;
+                let (save, x) = action(
+                    ui,
+                    row.right(),
+                    y,
+                    icons::CHECK,
+                    Some("Save"),
+                    Some(p.accent),
+                );
+                let (cancel, _) = action(ui, x, y, icons::X, Some("Cancel"), None);
+                if save.tip("Save the edit").clicked() {
+                    event = Some(QueueEvent::Change(
+                        *index,
+                        QueueAction::Edit(draft.trim().to_owned()),
+                    ));
+                    editing = None;
+                } else if cancel.tip("Keep it as it was").clicked() {
                     editing = None;
                 }
                 return;
@@ -96,63 +92,29 @@ pub fn queue(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent>
             // a quiet row of what can be done with it, under the bubble
             let y = bubble.bottom() + 13.0;
             let mut x = bubble.right();
-            for (glyph, label, action) in [
-                (icons::X, "Remove", QueueAction::Remove),
+            for (glyph, label, tip, action_kind) in [
+                (icons::X, "Remove", "Remove it", QueueAction::Remove),
                 (
                     icons::PENCIL_SIMPLE,
                     "Edit",
+                    "Edit before it's sent",
                     QueueAction::Edit(String::new()),
                 ),
-                (icons::ARROW_UP, "Send now", QueueAction::SendNow),
+                (
+                    icons::ARROW_UP,
+                    "Send now",
+                    "Send it now instead of waiting for the agent to finish",
+                    QueueAction::SendNow,
+                ),
             ] {
-                let width = if label == "Send now" { 74.0 } else { 22.0 };
-                let rect = egui::Rect::from_min_max(pos2(x - width, y - 10.0), pos2(x, y + 10.0));
-                x -= width + space::XS;
-                let response = ui.interact(rect, ui.scope_id().with(label), Sense::click());
-                let t = hover_t(ui, &response);
-                ui.painter().rect_filled(
-                    rect,
-                    CornerRadius::same(radius::MD),
-                    p.hover.gamma_multiply(t),
-                );
-                let color = p.text_faint.lerp_to_gamma(p.text, t);
-                if label == "Send now" {
-                    ui.painter().text(
-                        pos2(rect.left() + 6.0 + icon::SM / 2.0, y),
-                        Align2::CENTER_CENTER,
-                        glyph,
-                        font::icon(icon::SM),
-                        color,
-                    );
-                    ui.painter().text(
-                        pos2(rect.left() + 6.0 + icon::SM + space::XS, y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        font::regular(text::SM + 1.0),
-                        color,
-                    );
-                } else {
-                    ui.painter().text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        glyph,
-                        font::icon(icon::SM),
-                        color,
-                    );
-                }
-                let tip = match label {
-                    "Send now" => "Send it now instead of waiting for the agent to finish",
-                    "Edit" => "Edit before it's sent",
-                    _ => "Remove it",
-                };
-                if response
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .tip(tip)
-                    .clicked()
-                {
-                    match action {
+                // only sending has words, so the row stays short
+                let shown = (label == "Send now").then_some(label);
+                let (response, next) = action(ui, x, y, glyph, shown, None);
+                x = next;
+                if response.tip(tip).clicked() {
+                    match action_kind {
                         QueueAction::Edit(_) => editing = Some((i, message.text.clone())),
-                        action => event = Some(QueueEvent::Change(i, action)),
+                        action_kind => event = Some(QueueEvent::Change(i, action_kind)),
                     }
                 }
             }
@@ -174,4 +136,71 @@ pub fn queue(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent>
         }
     });
     event
+}
+
+// one quiet action, an icon with or without words, laid right to left from `right`,
+// returning its response and where the next one to its left ends
+fn action(
+    ui: &mut Ui,
+    right: f32,
+    y: f32,
+    glyph: char,
+    label: Option<&str>,
+    color: Option<Color32>,
+) -> (Response, f32) {
+    let p = theme::palette(ui);
+    let words = label.map(|label| {
+        ui.painter().layout_no_wrap(
+            label.to_owned(),
+            font::regular(text::SM + 1.0),
+            Color32::PLACEHOLDER,
+        )
+    });
+    let width = match &words {
+        Some(words) => 6.0 + icon::SM + space::XS + words.size().x + 8.0,
+        None => 22.0,
+    };
+    let rect = egui::Rect::from_min_max(pos2(right - width, y - 10.0), pos2(right, y + 10.0));
+    let id = ui.scope_id().with(("queue-action", glyph));
+    let response = ui.interact(rect, id, Sense::click());
+    let t = hover_t(ui, &response);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(radius::MD),
+        p.hover.gamma_multiply(t),
+    );
+    let rest = color.unwrap_or(p.text_faint);
+    let tint = rest.lerp_to_gamma(color.unwrap_or(p.text), t);
+    match words {
+        Some(words) => {
+            ui.painter().text(
+                pos2(rect.left() + 6.0 + icon::SM / 2.0, y),
+                Align2::CENTER_CENTER,
+                glyph,
+                font::icon(icon::SM),
+                tint,
+            );
+            ui.painter().galley(
+                pos2(
+                    rect.left() + 6.0 + icon::SM + space::XS,
+                    y - words.size().y / 2.0,
+                ),
+                words,
+                tint,
+            );
+        }
+        None => {
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                glyph,
+                font::icon(icon::SM),
+                tint,
+            );
+        }
+    }
+    (
+        response.on_hover_cursor(CursorIcon::PointingHand),
+        rect.left() - space::XS,
+    )
 }

@@ -75,8 +75,9 @@ pub fn run_at(socket: PathBuf, state: PathBuf) -> io::Result<()> {
 async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     let listener = listener::Listener::bind(&socket)?;
     log::info!(
-        "mux server {} on {} {} listening on {}",
+        "mux server {} ({}) on {} {} listening on {}",
         mux_core::VERSION,
+        mux_core::build_id(),
         std::env::consts::OS,
         std::env::consts::ARCH,
         listener.describe()
@@ -203,6 +204,9 @@ impl Server {
             Event::Connected(client, tx) => {
                 log::info!("client {client} connected");
                 let _ = tx.send(ServerMsg::Welcome { protocol: PROTOCOL });
+                let _ = tx.send(ServerMsg::Build {
+                    id: mux_core::build_id().to_owned(),
+                });
                 let _ = tx.send(self.state_msg());
                 for (provider, models) in &self.models {
                     let _ = tx.send(ServerMsg::AgentModels {

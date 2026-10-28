@@ -2,8 +2,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Rect, UiBuilder, pos2, vec2};
+use mux_core::SessionKind;
 use mux_core::protocol::{ClientMsg, PROTOCOL};
-use mux_core::{SessionKind, SessionStatus};
 use mux_ui::motion::{self, Spring};
 use mux_ui::shortcut;
 use mux_ui::theme::{self, font, icon, space, text};
@@ -266,11 +266,9 @@ impl App {
         if let Ok(update) = self.updates.try_recv() {
             self.update = Some(update);
         }
-        let update_height = if self.update.is_some() {
-            FOOTER_ROW
-        } else {
-            0.0
-        };
+        let stale = self.link.is_stale();
+        let update_height =
+            FOOTER_ROW * (usize::from(self.update.is_some()) + usize::from(stale)) as f32;
         let footer_height = FOOTER_ROW + update_height + space::SM + 1.0;
         let list = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - footer_height));
         let footer = Rect::from_min_max(pos2(rect.min.x, list.max.y), rect.max);
@@ -299,9 +297,22 @@ impl App {
             .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
         ui_footer.add_space(space::SM + 1.0);
         if let Some(update) = &self.update
-            && update_row(&mut ui_footer, update).clicked()
+            && notice_row(&mut ui_footer, icons::ARROW_CIRCLE_UP, "Update available")
+                .tip(format!(
+                    "{} is out. Open the release page to download it.",
+                    update.version
+                ))
+                .clicked()
         {
             mux_ui::chat::open_externally(&update.url);
+        }
+        // the server waits for a click here while something runs in it, since restarting it stops that
+        if stale
+            && notice_row(&mut ui_footer, icons::ARROW_CLOCKWISE, "Restart server")
+                .tip("The background server is from another build of Mux, so recent fixes aren't in it yet. Restarting it stops the terminals and agent turns running now.")
+                .clicked()
+        {
+            self.link.restart_server();
         }
         // only shown when something is wrong, a working connection needs no badge
         let status = match &self.link {
@@ -367,7 +378,7 @@ impl App {
 
         let rect = ui.max_rect();
         // an agent that finished its turn is just waiting for the next message, not ended
-        let ended = matches!(session.status, SessionStatus::Done | SessionStatus::Failed);
+        let ended = sessions::ended(session.status);
         let agent = session.kind == SessionKind::Agent;
         // an agent names its model rather than just its cli
         let model = models
@@ -1611,7 +1622,8 @@ fn slash_commands(
 const FOOTER_ROW: f32 = 32.0;
 
 // a quiet row above settings, there only while a newer release is out
-fn update_row(ui: &mut egui::Ui, update: &update::Update) -> egui::Response {
+// a row above settings that asks for a click, like an update to download
+fn notice_row(ui: &mut egui::Ui, glyph: char, label: &str) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_ROW), egui::Sense::click());
@@ -1631,23 +1643,18 @@ fn update_row(ui: &mut egui::Ui, update: &update::Update) -> egui::Response {
     ui.painter().text(
         pos2(x + icon::MD / 2.0, y),
         egui::Align2::CENTER_CENTER,
-        icons::ARROW_CIRCLE_UP,
+        glyph,
         font::icon(icon::MD),
         p.accent,
     );
     ui.painter().text(
         pos2(x + icon::MD + space::SM, y),
         egui::Align2::LEFT_CENTER,
-        "Update available",
+        label,
         font::medium(text::MD),
         p.text_muted.lerp_to_gamma(p.text, hover),
     );
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .tip(format!(
-            "{} is out. Open the release page to download it.",
-            update.version
-        ))
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 // the sidebar's last row: settings, with plan usage at its end, or the connection when it isn't up
@@ -1962,11 +1969,22 @@ impl App {
                 .font(font::medium(text::MD))
                 .color(p.text_muted),
         );
+        let ended = sessions::ended(info.status);
+        // a shell that exits takes its pane with it, the way it closes a terminal tab
+        if ended && info.kind == SessionKind::Shell {
+            close = true;
+        }
+        let mut restart = false;
         head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            close = IconButton::new(icons::X, "Close")
+            close |= IconButton::new(icons::X, "Close")
                 .show(ui)
                 .tip_with_shortcut("Close the terminal", TERMINAL)
                 .clicked();
+            restart = ended
+                && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
+                    .show(ui)
+                    .tip("Run it again")
+                    .clicked();
         });
         pane.painter().hline(
             header.x_range(),
@@ -1993,6 +2011,9 @@ impl App {
                 response.request_focus();
                 self.split_focused = Some(id);
             }
+        }
+        if restart {
+            self.sessions.restart(id);
         }
         if close {
             self.sessions.split = None;

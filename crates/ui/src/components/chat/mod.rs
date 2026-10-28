@@ -47,6 +47,12 @@ pub enum ChatItem {
         actionable: bool,
     },
     Todos(Vec<mux_core::protocol::TodoStep>),
+    // the model's reasoning, timed in unix milliseconds and still going while it has no end
+    Reasoning {
+        text: String,
+        started: u64,
+        ended: Option<u64>,
+    },
     Thinking,
 }
 
@@ -298,16 +304,14 @@ impl<'a> ChatView<'a> {
                         let mut i = 0;
                         while i < self.items.len() {
                             // consecutive tool calls are shown together as one activity group
-                            let tools: Vec<&ToolCall> = self.items[i..]
+                            let steps = activity_steps(&self.items[i..]);
+                            let tools = steps
                                 .iter()
-                                .map_while(|item| match item {
-                                    ChatItem::Tool(tool) => Some(tool),
-                                    _ => None,
-                                })
-                                .collect();
-                            if tools.len() > 1 {
-                                ui.push_id(i, |ui| cards::activity(ui, &tools));
-                                i += tools.len();
+                                .filter(|s| matches!(s, ChatItem::Tool(_)))
+                                .count();
+                            if tools > 1 {
+                                ui.push_id(i, |ui| cards::activity(ui, &steps));
+                                i += steps.len();
                                 continue;
                             }
                             let item = &self.items[i];
@@ -386,6 +390,11 @@ impl<'a> ChatView<'a> {
                                         action = Some(ChatAction::OpenLink(target));
                                     }
                                 }
+                                ChatItem::Reasoning {
+                                    text,
+                                    started,
+                                    ended,
+                                } => cards::reasoning(ui, text, *started, *ended),
                                 ChatItem::Thinking => cards::thinking(ui, turn),
                             });
                         }
@@ -411,13 +420,32 @@ impl<'a> ChatView<'a> {
 }
 
 // keeps a single thinking indicator, always at the end of the conversation
+// the tool calls that run together from the start of `items`, taking in the finished thoughts between them,
+// since an agent that reasons before each command would otherwise split every group apart
+fn activity_steps(items: &[ChatItem]) -> Vec<&ChatItem> {
+    let mut steps = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let between = matches!(item, ChatItem::Reasoning { ended: Some(_), .. })
+            && !steps.is_empty()
+            && matches!(items.get(i + 1), Some(ChatItem::Tool(_)));
+        if matches!(item, ChatItem::Tool(_)) || between {
+            steps.push(item);
+        } else {
+            break;
+        }
+    }
+    steps
+}
+
 pub fn set_thinking(items: &mut Vec<ChatItem>, thinking: bool) {
     items.retain(|item| !matches!(item, ChatItem::Thinking));
     // while a prompt waits on the user the agent isn't thinking, it's waiting
     let waiting = items
         .iter()
         .any(|item| matches!(item, ChatItem::Permission(r) if r.decision.is_none()));
-    if thinking && !waiting {
+    // reasoning still streaming already says the model is thinking
+    let reasoning = matches!(items.last(), Some(ChatItem::Reasoning { ended: None, .. }));
+    if thinking && !waiting && !reasoning {
         items.push(ChatItem::Thinking);
     }
 }

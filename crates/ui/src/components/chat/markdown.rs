@@ -140,6 +140,14 @@ impl Builder {
         self.link = None;
     }
 
+    fn add_link(&mut self, url: &str, add: impl FnOnce(&mut Self)) {
+        let run = self.run();
+        run.links.push(url.to_owned());
+        self.link = Some(run.links.len() - 1);
+        add(self);
+        self.link = None;
+    }
+
     fn add(&mut self, text: &str) {
         let (style, link) = (self.style, self.link);
         let run = self.run();
@@ -305,11 +313,25 @@ fn parse(source: &str) -> Vec<Block> {
                 TagEnd::Link => b.link = None,
                 _ => {}
             },
+            Event::Text(text) if b.link.is_none() && b.image.is_none() => {
+                for (piece, url) in split_urls(&text) {
+                    if url {
+                        b.add_link(piece, |b| b.add(piece));
+                    } else {
+                        b.add(piece);
+                    }
+                }
+            }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => b.add(&text),
             Event::Code(text) => {
                 let style = b.style;
                 b.style.code = true;
-                b.add(&text);
+                // code that is nothing but an address, like a local server's, is as clickable as one in prose
+                if b.link.is_none() && split_urls(&text) == [(&*text, true)] {
+                    b.add_link(&text, |b| b.add(&text));
+                } else {
+                    b.add(&text);
+                }
                 b.style = style;
             }
             Event::SoftBreak => b.add(" "),
@@ -502,6 +524,70 @@ fn table(ui: &mut Ui, head: &[Run], rows: &[Vec<Run>], clicked: &mut Option<Stri
         });
 }
 
+// one rectangle per stretch of code on each row, so code that wraps gets a chip on each line
+fn code_chips(galley: &egui::Galley, code: &[bool]) -> Vec<egui::Rect> {
+    let mut chips = Vec::new();
+    let mut index = 0;
+    for row in &galley.rows {
+        let mut chip: Option<egui::Rect> = None;
+        for glyph in &row.row.glyphs {
+            let rect = glyph.logical_rect().translate(row.pos.to_vec2());
+            let is_code = code.get(index).copied().unwrap_or(false);
+            index += 1;
+            if is_code {
+                chip = Some(chip.map_or(rect, |c| c.union(rect)));
+            } else if let Some(done) = chip.take() {
+                chips.push(done);
+            }
+        }
+        chips.extend(chip);
+        // the newline that ends a row is a character with no glyph
+        if row.ends_with_newline {
+            index += 1;
+        }
+    }
+    chips
+}
+
+// splits prose into plain text and the web addresses written in it bare, which markdown leaves unlinked
+fn split_urls(text: &str) -> Vec<(&str, bool)> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while let Some(start) = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| rest.find(scheme))
+        .min()
+    {
+        let tail = &rest[start..];
+        let mut end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`'))
+            .unwrap_or(tail.len());
+        // punctuation that ends a sentence, or a bracket closing around the address, isn't part of it
+        while let Some(last) = tail[..end].chars().last() {
+            let unbalanced_close = match last {
+                ')' => tail[..end].matches('(').count() < tail[..end].matches(')').count(),
+                ']' => tail[..end].matches('[').count() < tail[..end].matches(']').count(),
+                _ => false,
+            };
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*') || unbalanced_close {
+                end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let scheme_only = tail[..end].trim_end_matches('/').ends_with(':');
+        if start > 0 {
+            pieces.push((&rest[..start], false));
+        }
+        pieces.push((&tail[..end], !scheme_only));
+        rest = &tail[end..];
+    }
+    if !rest.is_empty() {
+        pieces.push((rest, false));
+    }
+    pieces
+}
+
 struct Link {
     // characters of the laid out text the link covers
     chars: std::ops::Range<usize>,
@@ -522,9 +608,8 @@ fn layout(p: &Palette, run: &Run, size: f32, bold: bool) -> (LayoutJob, Vec<Link
         let mut format = if span.style.code {
             TextFormat {
                 font_id: font::mono(text::MONO_SM),
-                color: p.text,
+                color,
                 background: p.hover,
-                expand_bg: 3.0,
                 // the smaller mono font would otherwise sit on the bottom of the taller prose line
                 valign: egui::Align::Center,
                 ..Default::default()
@@ -580,6 +665,25 @@ fn text_with_links(ui: &mut Ui, mut job: LayoutJob, links: &[Link], wrap: bool) 
     } else {
         f32::INFINITY
     };
+    // egui's own text backgrounds are square, so code gets its background painted here with rounded corners
+    let code_fill = job
+        .sections
+        .iter()
+        .map(|s| s.format.background)
+        .find(|bg| *bg != egui::Color32::TRANSPARENT);
+    let mut code = vec![false; job.text.chars().count()];
+    for section in &mut job.sections {
+        if std::mem::replace(&mut section.format.background, egui::Color32::TRANSPARENT)
+            != egui::Color32::TRANSPARENT
+        {
+            let from = job.text[..section.byte_range.start.0].chars().count();
+            let len = job.text[section.byte_range.start.0..section.byte_range.end.0]
+                .chars()
+                .count();
+            code[from..from + len].fill(true);
+        }
+    }
+    let backdrop = ui.painter().add(egui::Shape::Noop);
     let galley = ui.painter().layout_job(job);
     let sense = if links.is_empty() {
         egui::Sense::hover()
@@ -587,6 +691,20 @@ fn text_with_links(ui: &mut Ui, mut job: LayoutJob, links: &[Link], wrap: bool) 
         egui::Sense::click()
     };
     let response = ui.add(Label::new(galley.clone()).sense(sense));
+    if let Some(fill) = code_fill {
+        let chips = code_chips(&galley, &code)
+            .into_iter()
+            .map(|rect| {
+                egui::Shape::rect_filled(
+                    rect.translate(response.rect.min.to_vec2())
+                        .expand2(vec2(3.5, 1.5)),
+                    radius::SM,
+                    fill,
+                )
+            })
+            .collect();
+        ui.painter().set(backdrop, egui::Shape::Vec(chips));
+    }
     if links.is_empty() {
         return None;
     }
@@ -737,6 +855,36 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_web_addresses_become_links() {
+        assert_eq!(
+            split_urls("Open http://localhost:3000/docs (or the panel)."),
+            [
+                ("Open ", false),
+                ("http://localhost:3000/docs", true),
+                (" (or the panel).", false),
+            ]
+        );
+        assert_eq!(
+            split_urls("see https://en.wikipedia.org/wiki/Rust_(language), ok"),
+            [
+                ("see ", false),
+                ("https://en.wikipedia.org/wiki/Rust_(language)", true),
+                (", ok", false),
+            ]
+        );
+        assert_eq!(split_urls("no links here"), [("no links here", false)]);
+        let blocks =
+            parse("It's running at **http://localhost:3000** or `http://127.0.0.1:3000/`.");
+        let Block::Paragraph(run) = &blocks[0] else {
+            panic!("not a paragraph");
+        };
+        assert_eq!(
+            run.links,
+            ["http://localhost:3000", "http://127.0.0.1:3000/"]
+        );
+    }
 
     fn text(run: &Run) -> String {
         run.spans.iter().map(|s| s.text.as_str()).collect()

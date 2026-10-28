@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 24;
+pub const PROTOCOL: u32 = 25;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -151,6 +151,13 @@ pub enum AgentItem {
     // the agent's running checklist for the turn
     Todos {
         steps: Vec<TodoStep>,
+    },
+    // what the model thought before acting, as much of it as its cli shares, timed in unix milliseconds
+    Reasoning {
+        text: String,
+        started: u64,
+        // none while it's still thinking
+        ended: Option<u64>,
     },
 }
 
@@ -534,6 +541,10 @@ pub enum ServerMsg {
     TokenHistory {
         today: i64,
         days: Vec<UsageDay>,
+    },
+    // which build the server is, sent between the welcome and the state so a client can check before it says anything
+    Build {
+        id: String,
     },
 }
 

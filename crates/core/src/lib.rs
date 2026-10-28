@@ -13,6 +13,44 @@ pub fn home_dir() -> std::path::PathBuf {
         .unwrap_or_default()
 }
 
+// tells builds apart: the commit a release was made from, or when a local build's binary was written,
+// read once so a binary replaced while running still reports the build that started
+pub fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        if let Some(commit) = option_env!("MUX_COMMIT") {
+            return commit.to_owned();
+        }
+        let written = std::env::current_exe()
+            .and_then(|exe| exe.metadata())
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        match written {
+            Some(time) => format!("local-{}", time.as_millis()),
+            None => "local".to_owned(),
+        }
+    })
+}
+
+// the shell in the user's account is the one a terminal opens, and SHELL can be stale or missing
+#[cfg(unix)]
+pub fn login_shell() -> String {
+    // getpwuid reads the account record and hands back a pointer into libc's own buffer, copied out at once
+    let from_account = unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        (!entry.is_null() && !(*entry).pw_shell.is_null()).then(|| {
+            std::ffi::CStr::from_ptr((*entry).pw_shell)
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    from_account
+        .filter(|shell| !shell.is_empty())
+        .or_else(|| std::env::var("SHELL").ok())
+        .unwrap_or_else(|| "/bin/sh".to_owned())
+}
+
 // a program to run, found the way a shell would and kept from opening a console window on windows
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[cfg(windows)]

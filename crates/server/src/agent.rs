@@ -111,6 +111,8 @@ pub struct Agent {
     session_id: Option<String>,
     // the assistant reply claude is streaming into, if any
     live_text: Option<usize>,
+    // the reasoning still being streamed, which ends when anything else arrives
+    live_reasoning: Option<usize>,
     // the settings claude was launched with, since changing them means relaunching
     launched: Option<AgentSettings>,
     queued: Vec<(String, Vec<String>)>,
@@ -207,6 +209,7 @@ impl Agent {
             process: None,
             session_id: saved.session_id,
             live_text: None,
+            live_reasoning: None,
             launched: None,
             queued: Vec::new(),
             next_call: 0,
@@ -1042,6 +1045,17 @@ impl Agent {
             }
             "item/started" => self.item_started(&params["item"]),
             "item/completed" => self.item_completed(&params["item"]),
+            "item/reasoning/summaryTextDelta" => {
+                if let Some(AgentItem::Reasoning { text, .. }) = self.target_mut(params) {
+                    text.push_str(params["delta"].as_str().unwrap_or_default());
+                }
+            }
+            // each new part of a summary is its own paragraph
+            "item/reasoning/summaryPartAdded" if params["summaryIndex"].as_u64() > Some(0) => {
+                if let Some(AgentItem::Reasoning { text, .. }) = self.target_mut(params) {
+                    text.push_str("\n\n");
+                }
+            }
             "item/agentMessage/delta" => {
                 if let Some(AgentItem::Assistant { text }) = self.target_mut(params) {
                     text.push_str(params["delta"].as_str().unwrap_or_default());
@@ -1089,6 +1103,11 @@ impl Agent {
             Some("plan") => AgentItem::Plan {
                 text: item["text"].as_str().unwrap_or_default().to_owned(),
             },
+            Some("reasoning") => {
+                let index = self.reason("");
+                self.by_codex_id.insert(id, index);
+                return;
+            }
             // a compaction mux asked for already has its item, and one codex started itself gets one
             Some("contextCompaction") => match self.compacting {
                 Some(index) => {
@@ -1143,6 +1162,21 @@ impl Agent {
             }
             Some(AgentItem::Plan { text }) => {
                 *text = item["text"].as_str().unwrap_or_default().to_owned();
+            }
+            // the finished summary is authoritative over what streamed in
+            Some(AgentItem::Reasoning { text, .. }) => {
+                let summary: Vec<&str> = item["summary"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                if !summary.is_empty() {
+                    *text = summary.join("\n\n");
+                }
+                if self.live_reasoning == Some(index) {
+                    self.end_reasoning();
+                }
             }
             // the compaction item has no status, so finishing it is what says it worked
             Some(AgentItem::Compaction { status: s }) => {
@@ -1221,6 +1255,12 @@ impl Agent {
                         });
                         self.live_text = Some(index);
                     }
+                    Some("content_block_start") if event["content_block"]["type"] == "thinking" => {
+                        self.reason("");
+                    }
+                    Some("content_block_delta") if event["delta"]["type"] == "thinking_delta" => {
+                        self.reason(event["delta"]["thinking"].as_str().unwrap_or_default());
+                    }
                     Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
                         if let Some(index) = self.live_text
                             && let Some(AgentItem::Assistant { text }) = self.items.get_mut(index)
@@ -1258,6 +1298,23 @@ impl Agent {
                             }
                         }
                         Some("tool_use") => self.claude_tool(block),
+                        // the whole thought arrives once it's done, and fills in a stream that carried no words
+                        Some("thinking") => {
+                            let full = block["thinking"].as_str().unwrap_or_default();
+                            let last = self
+                                .items
+                                .iter()
+                                .rposition(|i| matches!(i, AgentItem::Reasoning { .. }));
+                            if !full.is_empty()
+                                && let Some(index) = last
+                                && let Some(AgentItem::Reasoning { text, .. }) =
+                                    self.items.get_mut(index)
+                                && text.is_empty()
+                            {
+                                *text = full.to_owned();
+                                self.changed.insert(index);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1542,13 +1599,47 @@ impl Agent {
     }
 
     fn push(&mut self, item: AgentItem) -> usize {
+        // the model has moved on from thinking once it replies or acts
+        if !matches!(item, AgentItem::Reasoning { .. }) {
+            self.end_reasoning();
+        }
         self.items.push(item);
         let index = self.items.len() - 1;
         self.changed.insert(index);
         index
     }
 
+    // streamed reasoning joins the thought in progress, or starts one
+    fn reason(&mut self, chunk: &str) -> usize {
+        if let Some(index) = self.live_reasoning
+            && let Some(AgentItem::Reasoning { text, .. }) = self.items.get_mut(index)
+        {
+            text.push_str(chunk);
+            self.changed.insert(index);
+            return index;
+        }
+        let index = self.push(AgentItem::Reasoning {
+            text: chunk.to_owned(),
+            started: now_ms(),
+            ended: None,
+        });
+        self.live_reasoning = Some(index);
+        index
+    }
+
+    fn end_reasoning(&mut self) {
+        if let Some(index) = self.live_reasoning.take()
+            && let Some(AgentItem::Reasoning { ended, .. }) = self.items.get_mut(index)
+        {
+            *ended = Some(now_ms());
+            self.changed.insert(index);
+        }
+    }
+
     fn set_busy(&mut self, busy: bool) {
+        if !busy {
+            self.end_reasoning();
+        }
         if self.busy != busy {
             self.busy = busy;
             self.busy_changed = true;
@@ -1560,6 +1651,12 @@ impl Agent {
         self.changed.insert(index);
         self.items.get_mut(index)
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 // sent on every turn, so a change in the picker applies to the very next message
@@ -1666,6 +1763,8 @@ fn turn_params(
     }
     // "priority" is codex's fast tier, and "default" turns it back off explicitly
     params["serviceTierForTurn"] = json!(if settings.fast { "priority" } else { "default" });
+    // codex leaves its reasoning out unless a summary of it is asked for
+    params["summary"] = json!("auto");
     // these override the thread's defaults for this turn and the ones after it, so a switch applies right away
     let (approval, reviewer, sandbox) = match settings.access {
         Access::Supervised => ("untrusted", "user", "readOnly"),
@@ -1932,6 +2031,57 @@ mod tests {
 
     fn note(agent: &mut Agent, method: &str, params: Value) {
         agent.handle(json!({ "method": method, "params": params }));
+    }
+
+    // codex 0.x with a summary asked for: a reasoning item, its streamed summary, then the finished one
+    #[test]
+    fn codex_reasoning_streams_then_takes_the_finished_summary() {
+        let mut agent = agent();
+        let item = json!({ "type": "reasoning", "id": "rs_1", "summary": [], "content": [] });
+        note(&mut agent, "item/started", json!({ "item": item }));
+        note(
+            &mut agent,
+            "item/reasoning/summaryTextDelta",
+            json!({ "itemId": "rs_1", "delta": "**Counting**" }),
+        );
+        note(
+            &mut agent,
+            "item/reasoning/summaryPartAdded",
+            json!({ "itemId": "rs_1", "summaryIndex": 1 }),
+        );
+        note(
+            &mut agent,
+            "item/reasoning/summaryTextDelta",
+            json!({ "itemId": "rs_1", "delta": "Then check." }),
+        );
+        assert!(
+            matches!(&agent.items[0], AgentItem::Reasoning { text, ended: None, .. } if text == "**Counting**\n\nThen check.")
+        );
+        let done = json!({ "type": "reasoning", "id": "rs_1", "summary": ["**Counting**", "Then check twice."], "content": [] });
+        note(&mut agent, "item/completed", json!({ "item": done }));
+        assert!(
+            matches!(&agent.items[0], AgentItem::Reasoning { text, ended: Some(_), .. } if text == "**Counting**\n\nThen check twice.")
+        );
+    }
+
+    // claude streams a thinking block, often with no words in it, then its reply
+    #[test]
+    fn claude_thinking_ends_when_the_reply_starts() {
+        let mut agent = claude_agent();
+        let event = |e: Value| json!({ "type": "stream_event", "event": e });
+        agent.handle(event(json!({ "type": "content_block_start", "content_block": { "type": "thinking", "thinking": "" } })));
+        agent.handle(event(json!({ "type": "content_block_delta", "delta": { "type": "thinking_delta", "thinking": "" } })));
+        assert!(matches!(
+            &agent.items[0],
+            AgentItem::Reasoning { ended: None, .. }
+        ));
+        agent.handle(event(
+            json!({ "type": "content_block_start", "content_block": { "type": "text" } }),
+        ));
+        assert!(
+            matches!(&agent.items[0], AgentItem::Reasoning { text, ended: Some(_), .. } if text.is_empty())
+        );
+        assert!(matches!(&agent.items[1], AgentItem::Assistant { .. }));
     }
 
     // the order claude 2.1.312 sent things in when two messages arrived during a turn and were answered together

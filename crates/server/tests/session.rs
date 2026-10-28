@@ -55,7 +55,8 @@ fn shell_round_trip() {
         &mut stream,
         ClientMsg::Input {
             id,
-            data: b"echo mux-$((40+2))\r".to_vec(),
+            // quotes joined to a word work in every shell, and the typed line itself never shows the joined text
+            data: b"echo mux-'round'trip\r".to_vec(),
         },
     );
 
@@ -72,7 +73,7 @@ fn shell_round_trip() {
             }
             _ => {}
         }
-        if String::from_utf8_lossy(&output).contains("mux-42") {
+        if String::from_utf8_lossy(&output).contains("mux-roundtrip") {
             break true;
         }
     };

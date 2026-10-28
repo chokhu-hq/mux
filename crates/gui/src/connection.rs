@@ -16,6 +16,8 @@ pub struct Connection {
     inbox: Receiver<ServerMsg>,
     closed: Arc<AtomicBool>,
     unreadable: Arc<AtomicBool>,
+    // the server's build once it has said, or "unknown" when its first state came without one
+    pub server_build: Option<String>,
 }
 
 impl Connection {
@@ -62,6 +64,7 @@ impl Connection {
             inbox,
             closed,
             unreadable,
+            server_build: None,
         };
         connection.send(&ClientMsg::Hello { protocol: PROTOCOL });
         Ok(connection)
@@ -80,6 +83,13 @@ impl Connection {
     // the server sent something this build can't read, which only happens across versions
     pub fn is_unreadable(&self) -> bool {
         self.unreadable.load(Ordering::Relaxed)
+    }
+
+    // a server from another build may not read everything this one sends, and runs older code besides
+    pub fn is_stale(&self) -> bool {
+        self.server_build
+            .as_deref()
+            .is_some_and(|build| build != mux_core::build_id())
     }
 
     // callers drain messages first, so anything the server sent before closing is already handled

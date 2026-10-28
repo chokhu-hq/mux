@@ -7,3 +7,6 @@ edition.workspace = true
 serde.workspace = true
 postcard.workspace = true
 log.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

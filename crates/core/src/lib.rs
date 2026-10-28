@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod logging;
+pub mod paths;
 pub mod protocol;
 pub mod transport;
 

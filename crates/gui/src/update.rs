@@ -32,6 +32,23 @@ pub fn check(ctx: &egui::Context) -> Receiver<Update> {
     rx
 }
 
+// the release this build came from, as a name for its server in wsl and the place to download it
+#[cfg(windows)]
+pub fn server_release() -> Option<(String, String)> {
+    let base = "https://github.com/chokhu-hq/mux/releases/download";
+    match (CHANNEL?, COMMIT) {
+        ("experimental", Some(commit)) => Some((
+            format!("experimental-{}", &commit[..commit.len().min(7)]),
+            format!("{base}/experimental"),
+        )),
+        ("experimental", None) => None,
+        _ => {
+            let version = env!("CARGO_PKG_VERSION");
+            Some((format!("v{version}"), format!("{base}/v{version}")))
+        }
+    }
+}
+
 // how this build was made, for the log and for anyone reading it
 pub fn build() -> String {
     match (CHANNEL, COMMIT) {

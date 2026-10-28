@@ -36,6 +36,8 @@ mod settings;
 mod terminal;
 mod token_usage;
 mod update;
+#[cfg(windows)]
+mod wsl;
 
 fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--server") {
@@ -158,6 +160,9 @@ struct App {
     // a newer release, once the check at launch finds one
     update: Option<update::Update>,
     updates: std::sync::mpsc::Receiver<update::Update>,
+    // on windows, the wsl distributions installed, read once when settings first open
+    #[cfg(windows)]
+    distros: Option<Vec<String>>,
 }
 
 struct TitleBar {
@@ -174,6 +179,10 @@ struct TitleBar {
 
 impl App {
     fn new(ctx: &egui::Context) -> Self {
+        let prefs = Prefs::load();
+        // the server's paths are translated for this app once it's known to run in wsl
+        #[cfg(windows)]
+        mux_core::paths::set_wsl(prefs.wsl.clone());
         let app = Self {
             palette: CommandPalette::default(),
             sidebar: Sidebar::default(),
@@ -181,7 +190,7 @@ impl App {
             focused: None,
             link: Link::start(ctx),
             titlebar: None,
-            prefs: Prefs::load(),
+            prefs,
             settings_open: false,
             settings_tab: settings::Tab::default(),
             usage_requested: false,
@@ -203,6 +212,8 @@ impl App {
             opened: std::sync::mpsc::channel(),
             update: None,
             updates: update::check(ctx),
+            #[cfg(windows)]
+            distros: None,
         };
         app.prefs.apply(ctx);
         app
@@ -311,9 +322,7 @@ impl App {
             return;
         }
         if !self.sessions.has_groups() {
-            let installed = *self
-                .installed
-                .get_or_insert_with(|| Provider::ALL.map(installed));
+            let installed = *self.installed.get_or_insert_with(installed_agents);
             if welcome(ui, &installed) {
                 *run = Some("new-group");
             }
@@ -454,6 +463,11 @@ impl App {
                     // a file moved or deleted since it was attached is left out rather than failing the turn
                     let mut attachments = std::mem::take(&mut local.attachments);
                     attachments.retain(|path| std::path::Path::new(path).exists());
+                    // picked here, but the agent opens them where the server runs
+                    let attachments = attachments
+                        .iter()
+                        .map(|path| mux_core::paths::remote(path))
+                        .collect();
                     outbox.push(ClientMsg::AgentSend {
                         id,
                         text,
@@ -462,7 +476,8 @@ impl App {
                 }
                 Some(ChatAction::Attach) => {
                     let folder = group.as_ref().and_then(|g| g.1.as_deref());
-                    for path in sessions::pick_files(folder) {
+                    let folder = folder.map(mux_core::paths::local);
+                    for path in sessions::pick_files(folder.as_deref()) {
                         if !local.attachments.contains(&path) {
                             local.attachments.push(path);
                         }
@@ -472,9 +487,10 @@ impl App {
                     let folder = group.as_ref().and_then(|g| g.1.as_deref());
                     match link_target(&target, folder) {
                         Some((path, _)) if mux_core::protocol::is_image(&path) => {
-                            ImageViewer::open(ui.ctx(), vec![path], 0);
+                            ImageViewer::open(ui.ctx(), vec![mux_core::paths::local(&path)], 0);
                         }
                         Some((path, lines)) => {
+                            let path = mux_core::paths::local(&path);
                             self.viewer = Some(FileView::open(path, lines));
                             self.viewer_open = true;
                         }
@@ -735,10 +751,9 @@ impl App {
         let blur = matches!(self.blur, Some(Ok(_)));
         #[cfg(not(target_os = "linux"))]
         let blur = false;
-        let agents = *self
-            .installed
-            .get_or_insert_with(|| Provider::ALL.map(installed));
+        let agents = *self.installed.get_or_insert_with(installed_agents);
         let mut prefs = self.prefs.clone();
+        let distros = self.distros();
         let close = settings::Page {
             tab: &mut self.settings_tab,
             prefs: &mut prefs,
@@ -746,16 +761,43 @@ impl App {
             agents,
             usage: Provider::ALL.map(|p| (p, self.sessions.usage(p).to_vec())),
             tokens: self.sessions.tokens().cloned(),
+            distros,
         }
         .show(ui);
         if close {
             self.settings_open = false;
         }
         if prefs != self.prefs {
+            let moved = prefs.wsl != self.prefs.wsl;
             prefs.apply(&ctx);
             prefs.save();
             self.prefs = prefs;
+            if moved {
+                self.switch_server(&ctx);
+            }
         }
+    }
+
+    // a server elsewhere has its own projects and sessions, so everything shown is fetched again from it
+    fn switch_server(&mut self, ctx: &egui::Context) {
+        log::info!(
+            "switching the server to {}",
+            self.prefs.wsl.as_deref().map_or("windows", |d| d)
+        );
+        mux_core::paths::set_wsl(self.prefs.wsl.clone());
+        self.sessions = Sessions::default();
+        self.installed = None;
+        self.link = Link::start(ctx);
+    }
+
+    #[cfg(windows)]
+    fn distros(&mut self) -> Option<Vec<String>> {
+        Some(self.distros.get_or_insert_with(wsl::distros).clone())
+    }
+
+    #[cfg(not(windows))]
+    fn distros(&mut self) -> Option<Vec<String>> {
+        None
     }
 
     fn link_view(&mut self, ui: &mut egui::Ui) {
@@ -949,11 +991,8 @@ fn cli(provider: Provider) -> &'static str {
 // a path the agent reported, made absolute against the project when it's relative
 fn resolve(path: &str, folder: Option<&str>) -> String {
     match folder {
-        Some(folder) if !std::path::Path::new(path).is_absolute() => std::path::Path::new(folder)
-            .join(path)
-            .to_string_lossy()
-            .into_owned(),
-        _ => path.to_owned(),
+        Some(folder) => mux_core::paths::join(folder, path),
+        None => path.to_owned(),
     }
 }
 
@@ -985,13 +1024,13 @@ fn changed_files(chat: &[ChatItem], folder: Option<&str>) -> Vec<(String, String
 }
 
 // the file's changes since the last commit, falling back to the agent's own hunks outside a repository
+// git runs where the server does, so it reads the same repository the agent changed
 fn file_diff(path: &str, fallback: &str) -> String {
-    let file = std::path::Path::new(path);
-    let dir = file.parent().unwrap_or(file);
+    let dir = mux_core::paths::parent(path);
     let git = |args: &[&str]| {
-        mux_core::command("git")
+        mux_core::paths::command("git")
             .arg("-C")
-            .arg(dir)
+            .arg(&dir)
             .args(args)
             .output()
             .ok()
@@ -1011,7 +1050,7 @@ fn file_diff(path: &str, fallback: &str) -> String {
     let tracked =
         git(&["ls-files", "--error-unmatch", "--", path]).is_some_and(|o| o.status.success());
     if !tracked
-        && file.is_file()
+        && std::path::Path::new(&mux_core::paths::local(path)).is_file()
         && let Some(out) = git(&["diff", "--no-color", "--no-index", "--", "/dev/null", path])
         && !out.stdout.is_empty()
     {
@@ -1066,6 +1105,16 @@ fn shell_quote(path: &str) -> String {
     } else {
         format!("'{}'", path.replace('\'', "'\\''"))
     }
+}
+
+// the clis are looked for where the server runs, since that's where it starts them
+fn installed_agents() -> [(Provider, bool); 3] {
+    #[cfg(windows)]
+    if let Some(distro) = mux_core::paths::wsl() {
+        let found = wsl::installed(&distro, &Provider::ALL.map(cli));
+        return Provider::ALL.map(|provider| (provider, found.contains(&cli(provider))));
+    }
+    Provider::ALL.map(installed)
 }
 
 // the server runs agents with the same PATH, so finding the cli here means it can start
@@ -1847,7 +1896,7 @@ impl App {
         let Some((path, fallback)) = self.diffs.get(index) else {
             return;
         };
-        let mut view = FileView::diff(path.clone(), &file_diff(path, fallback));
+        let mut view = FileView::diff(mux_core::paths::local(path), &file_diff(path, fallback));
         view.step = Some((index, self.diffs.len()));
         self.viewer = Some(view);
         self.viewer_open = true;

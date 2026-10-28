@@ -24,7 +24,10 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
 
 // the address file holds the port and the secret a client proves itself with, as `port secret`
 pub fn read_address(path: &Path) -> io::Result<(u16, String)> {
-    let text = std::fs::read_to_string(path)?;
+    parse_address(&std::fs::read_to_string(path)?)
+}
+
+pub fn parse_address(text: &str) -> io::Result<(u16, String)> {
     let mut parts = text.split_whitespace();
     let port = parts.next().and_then(|p| p.parse().ok());
     let secret = parts.next().filter(|s| !s.is_empty());
@@ -41,7 +44,21 @@ pub fn write_address(path: &Path, port: u16, secret: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, format!("{port} {secret}\n"))
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // the secret is all that stands between another account and this user's shells, so it's private from the start
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    options
+        .open(path)?
+        .write_all(format!("{port} {secret}\n").as_bytes())
 }
 
 // each RandomState is keyed from the os's random source, enough for a secret that never leaves this machine

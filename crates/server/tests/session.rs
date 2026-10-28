@@ -397,3 +397,64 @@ fn opencode_live_turn() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// an app on another system, like windows reaching into wsl, connects over a port with the secret the server wrote
+#[test]
+fn port_clients_need_the_secret() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let dir = std::env::temp_dir().join(format!("mux-it-port-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_mux-server"))
+        .env("MUX_LISTEN", "1")
+        .env("MUX_DATA_DIR", &dir)
+        .env("MUX_SOCKET", dir.join("mux.sock"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let address = dir.join("server.address");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (port, secret) = loop {
+        if let Ok(found) = mux_core::transport::read_address(&address) {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server never wrote its address"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&address).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "the address file holds a secret");
+
+    let hello = |stream: &mut TcpStream| {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        protocol::write(stream, &ClientMsg::Hello { protocol: PROTOCOL }).unwrap();
+        protocol::read::<ServerMsg>(stream)
+    };
+
+    let mut stranger = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stranger.write_all(b"not-the-secret\n").unwrap();
+    assert!(
+        hello(&mut stranger).is_err(),
+        "a wrong secret must be turned away"
+    );
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.write_all(format!("{secret}\n").as_bytes()).unwrap();
+    assert!(matches!(
+        hello(&mut client).unwrap(),
+        ServerMsg::Welcome { protocol: PROTOCOL }
+    ));
+
+    server.kill().unwrap();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}

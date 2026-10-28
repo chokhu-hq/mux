@@ -21,31 +21,15 @@ pub struct Connection {
 impl Connection {
     // connects to the running server, starting one in the background when there is none
     pub fn open(ctx: &egui::Context) -> io::Result<Self> {
-        let path = protocol::socket_path();
-        let stream = match transport::connect(&path) {
-            Ok(stream) => stream,
-            Err(_) => {
-                start_server()?;
-                let deadline = Instant::now() + Duration::from_secs(3);
-                loop {
-                    match transport::connect(&path) {
-                        Ok(stream) => break stream,
-                        Err(_) if Instant::now() < deadline => {
-                            thread::sleep(Duration::from_millis(25))
-                        }
-                        Err(_) => {
-                            let log = protocol::data_dir().join("server.log");
-                            return Err(io::Error::other(format!(
-                                "Started a server but nothing answered at {}. Its log is at {}",
-                                mux_core::display_path(&path.to_string_lossy()),
-                                mux_core::display_path(&log.to_string_lossy()),
-                            )));
-                        }
-                    }
-                }
-            }
-        };
+        #[cfg(windows)]
+        if let Some(distro) = mux_core::paths::wsl() {
+            return Self::over(crate::wsl::connect(&distro)?, ctx);
+        }
+        Self::over(local()?, ctx)
+    }
 
+    // the reader thread and handshake, whichever way the stream was reached
+    fn over(stream: Stream, ctx: &egui::Context) -> io::Result<Self> {
         let mut reader = stream.try_clone()?;
         let (tx, inbox) = mpsc::channel();
         let closed = Arc::new(AtomicBool::new(false));
@@ -101,6 +85,32 @@ impl Connection {
     // callers drain messages first, so anything the server sent before closing is already handled
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+}
+
+// the server beside the app, started in the background when there is none
+fn local() -> io::Result<Stream> {
+    let path = protocol::socket_path();
+    match transport::connect(&path) {
+        Ok(stream) => Ok(stream),
+        Err(_) => {
+            start_server()?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match transport::connect(&path) {
+                    Ok(stream) => return Ok(stream),
+                    Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+                    Err(_) => {
+                        let log = protocol::data_dir().join("server.log");
+                        return Err(io::Error::other(format!(
+                            "Started a server but nothing answered at {}. Its log is at {}",
+                            mux_core::display_path(&path.to_string_lossy()),
+                            mux_core::display_path(&log.to_string_lossy()),
+                        )));
+                    }
+                }
+            }
+        }
     }
 }
 

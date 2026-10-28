@@ -779,12 +779,14 @@ pub fn pick_files(start: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+// the dialog shows this computer's folders, and the server is told the folder as it names it
 fn pick_folder(start: Option<&str>) -> Option<String> {
     let mut dialog = rfd::FileDialog::new().set_title("Choose a project folder");
     if let Some(start) = start {
-        dialog = dialog.set_directory(start);
+        dialog = dialog.set_directory(mux_core::paths::local(start));
     }
-    Some(dialog.pick_folder()?.to_string_lossy().into_owned())
+    let picked = dialog.pick_folder()?.to_string_lossy().into_owned();
+    Some(mux_core::paths::remote(&picked))
 }
 
 // the line above a row's title: what needs attention first, otherwise where it is
@@ -1021,7 +1023,10 @@ fn chat_items(
                 ..
             } => items.push(ChatItem::User {
                 text: text.clone(),
-                attachments: attachments.clone(),
+                attachments: attachments
+                    .iter()
+                    .map(|path| mux_core::paths::local(path))
+                    .collect(),
                 queued: *queued,
             }),
             // a reply that has started but not streamed any words yet shows as thinking instead

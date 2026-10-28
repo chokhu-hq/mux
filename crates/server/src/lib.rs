@@ -1,5 +1,6 @@
 mod agent;
 mod history;
+mod listener;
 mod models;
 mod process;
 mod skills;
@@ -65,13 +66,13 @@ pub fn run_at(socket: PathBuf, state: PathBuf) -> io::Result<()> {
 }
 
 async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
-    let listener = bind(&socket)?;
+    let listener = listener::Listener::bind(&socket)?;
     log::info!(
         "mux server {} on {} {} listening on {}",
         mux_core::VERSION,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        socket.display()
+        listener.describe()
     );
 
     let (events, inbox) = mpsc::unbounded_channel();
@@ -108,112 +109,11 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
             _ = stopped.recv() => break,
         }
     }
-    let _ = std::fs::remove_file(&socket);
+    listener.remove();
     Ok(())
 }
 
-#[cfg(unix)]
-struct Listener(tokio::net::UnixListener);
-
-#[cfg(unix)]
-impl Listener {
-    async fn accept(&self) -> io::Result<tokio::net::UnixStream> {
-        Ok(self.0.accept().await?.0)
-    }
-
-    fn serve(&self, stream: tokio::net::UnixStream, id: u64, events: UnboundedSender<Event>) {
-        tokio::spawn(connection(stream, id, events));
-    }
-}
-
-// windows listens on a loopback port, and a client has to open with the secret from the address file
-#[cfg(windows)]
-struct Listener {
-    tcp: tokio::net::TcpListener,
-    secret: std::sync::Arc<String>,
-}
-
-#[cfg(windows)]
-impl Listener {
-    async fn accept(&self) -> io::Result<tokio::net::TcpStream> {
-        Ok(self.tcp.accept().await?.0)
-    }
-
-    fn serve(&self, mut stream: tokio::net::TcpStream, id: u64, events: UnboundedSender<Event>) {
-        let secret = self.secret.clone();
-        tokio::spawn(async move {
-            let proven =
-                tokio::time::timeout(std::time::Duration::from_secs(5), read_secret(&mut stream))
-                    .await;
-            if matches!(proven, Ok(Some(given)) if given == *secret) {
-                connection(stream, id, events).await;
-            }
-        });
-    }
-}
-
-// the first line a windows client sends, read a byte at a time so nothing after it is swallowed
-#[cfg(windows)]
-async fn read_secret(stream: &mut tokio::net::TcpStream) -> Option<String> {
-    let mut line = Vec::new();
-    loop {
-        let byte = stream.read_u8().await.ok()?;
-        if byte == b'\n' {
-            return String::from_utf8(line).ok();
-        }
-        if line.len() > 128 {
-            return None;
-        }
-        line.push(byte);
-    }
-}
-
-#[cfg(windows)]
-fn bind(path: &Path) -> io::Result<Listener> {
-    if mux_core::transport::connect(path).is_ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!(
-                "a mux server is already running, as {} says",
-                path.display()
-            ),
-        ));
-    }
-    let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    std_listener.set_nonblocking(true)?;
-    let port = std_listener.local_addr()?.port();
-    let secret = mux_core::transport::secret();
-    // the data folder sits under the user's own profile, which other accounts can't read
-    mux_core::transport::write_address(path, port, &secret)?;
-    Ok(Listener {
-        tcp: tokio::net::TcpListener::from_std(std_listener)?,
-        secret: std::sync::Arc::new(secret),
-    })
-}
-
-#[cfg(unix)]
-fn bind(path: &Path) -> io::Result<Listener> {
-    if path.exists() {
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!("a mux server is already running on {}", path.display()),
-            ));
-        }
-        // nobody answered, so this is a leftover from a server that did not shut down cleanly
-        std::fs::remove_file(path)?;
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let listener = tokio::net::UnixListener::bind(path)?;
-    use std::os::unix::fs::PermissionsExt;
-    // the socket gives full control of the user's shells, so only the owner may connect
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(Listener(listener))
-}
-
-async fn connection<S>(stream: S, id: u64, events: UnboundedSender<Event>)
+pub(crate) async fn connection<S>(stream: S, id: u64, events: UnboundedSender<Event>)
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {

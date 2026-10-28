@@ -40,6 +40,9 @@ pub struct Prefs {
     pub reduced_motion: bool,
     #[serde(default)]
     pub transparency: Transparency,
+    // on windows, the wsl distribution the server runs in, or none to run it on windows itself
+    #[serde(default)]
+    pub wsl: Option<String>,
 }
 
 impl Prefs {

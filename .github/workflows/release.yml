@@ -41,9 +41,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxcb1-dev
       - name: Build
-        run: cargo build --release --locked -p mux-gui
+        run: cargo build --release --locked -p mux-gui -p mux-server
       - name: Package
         run: |
+          # the bare server is what the windows app installs into wsl, named as `uname -m` reports
+          cp target/release/mux-server mux-server-linux-${{ matrix.arch }}
           dir=mux-linux-${{ matrix.arch }}
           mkdir -p $dir/icons
           cp target/release/mux-gui $dir/
@@ -54,7 +56,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: mux-linux-${{ matrix.arch }}
-          path: mux-linux-${{ matrix.arch }}.tar.gz
+          path: |
+            mux-linux-${{ matrix.arch }}.tar.gz
+            mux-server-linux-${{ matrix.arch }}
 
   macos:
     runs-on: macos-14

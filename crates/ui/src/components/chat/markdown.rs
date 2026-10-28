@@ -203,7 +203,8 @@ fn parse(source: &str) -> Vec<Block> {
                 // a picture on this machine is shown, anything else becomes a link to it
                 if path.starts_with('/') && mux_core::protocol::is_image(&path) {
                     b.close_text();
-                    b.push(Block::Image(path));
+                    // the agent names the picture where the server runs, which may not be where this app does
+                    b.push(Block::Image(mux_core::paths::local(&path)));
                 } else {
                     let link = b.run().links.len();
                     b.run().links.push(dest.clone());

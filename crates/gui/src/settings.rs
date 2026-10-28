@@ -48,6 +48,8 @@ pub struct Page<'a> {
     pub usage: [(Provider, Vec<UsageWindow>); 3],
     // the last month of tokens by day, once the server has read the clis' history
     pub tokens: Option<(i64, Vec<UsageDay>)>,
+    // on windows, the wsl distributions the server could run in instead
+    pub distros: Option<Vec<String>>,
 }
 
 impl Page<'_> {
@@ -104,7 +106,13 @@ impl Page<'_> {
             .show(&mut content_ui, |ui| {
                 ui.set_width(content.width());
                 match *self.tab {
-                    Tab::General => general(ui, self.prefs, self.blur, &self.agents),
+                    Tab::General => general(
+                        ui,
+                        self.prefs,
+                        self.blur,
+                        &self.agents,
+                        self.distros.as_deref(),
+                    ),
                     Tab::Usage => {
                         crate::token_usage::show(ui, self.tokens.as_ref());
                         usage(ui, &self.usage);
@@ -155,8 +163,17 @@ fn nav_item(ui: &mut egui::Ui, tab: Tab, selected: bool) -> egui::Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn general(ui: &mut egui::Ui, prefs: &mut Prefs, blur: bool, agents: &[(Provider, bool)]) {
+fn general(
+    ui: &mut egui::Ui,
+    prefs: &mut Prefs,
+    blur: bool,
+    agents: &[(Provider, bool)],
+    distros: Option<&[String]>,
+) {
     let p = theme::palette(ui);
+    if let Some(distros) = distros {
+        server(ui, prefs, distros);
+    }
     section(ui, "Appearance", |ui| {
         setting(ui, "Theme", "Follow the system, or always use one", |ui| {
             Segmented::new(
@@ -280,6 +297,48 @@ fn about(ui: &mut egui::Ui) {
             {
                 mux_ui::chat::open_externally(&data);
             }
+        });
+    });
+}
+
+// where the server and its agents run on windows: beside the app, or inside a wsl distribution
+fn server(ui: &mut egui::Ui, prefs: &mut Prefs, distros: &[String]) {
+    section(ui, "Server", |ui| {
+        let detail = if distros.is_empty() {
+            "Install WSL to run agents on Linux instead"
+        } else {
+            "WSL runs agents and their tools on Linux"
+        };
+        setting(ui, "Run agents in", detail, |ui| {
+            let current = prefs
+                .wsl
+                .as_deref()
+                .map_or("Windows".to_owned(), |d| format!("WSL: {d}"));
+            let button = mux_ui::Button::new(current).size(mux_ui::Size::Sm).show(ui);
+            egui::Popup::menu(&button)
+                .align(egui::RectAlign::BOTTOM_END)
+                .gap(space::XS)
+                .show(|ui| {
+                    ui.set_width(220.0);
+                    if mux_ui::MenuItem::new("Windows")
+                        .checked(prefs.wsl.is_none())
+                        .show(ui)
+                        .clicked()
+                    {
+                        prefs.wsl = None;
+                    }
+                    for distro in distros {
+                        let label = format!("WSL: {distro}");
+                        let chosen = prefs.wsl.as_deref() == Some(distro.as_str());
+                        if mux_ui::MenuItem::new(&label)
+                            .checked(chosen)
+                            .show(ui)
+                            .clicked()
+                        {
+                            prefs.wsl = Some(distro.clone());
+                        }
+                    }
+                });
         });
     });
 }

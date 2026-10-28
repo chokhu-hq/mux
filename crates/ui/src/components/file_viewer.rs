@@ -715,10 +715,10 @@ pub fn link_target(target: &str, base: Option<&str>) -> Option<(String, Option<(
     }
     let target = target.strip_prefix("file://").unwrap_or(target);
     let (path, lines) = split_lines(target);
-    let path = if Path::new(path).is_absolute() {
+    let path = if path.starts_with('/') || Path::new(path).is_absolute() {
         path.to_owned()
     } else {
-        Path::new(base?).join(path).to_string_lossy().into_owned()
+        mux_core::paths::join(base?, path)
     };
     Some((path, lines))
 }

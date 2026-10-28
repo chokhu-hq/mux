@@ -136,11 +136,9 @@ fn read(ctx: &egui::Context) -> Arc<Vec<Entry>> {
         return entries;
     }
     let mut entries = Vec::new();
-    for (source, file) in [("app", "app.log"), ("server", "server.log")] {
-        entries.extend(parse(
-            source,
-            &logging::tail(&logging::path(file), READ_BYTES),
-        ));
+    let files = [("app", logging::path("app.log")), ("server", server_log())];
+    for (source, file) in files {
+        entries.extend(parse(source, &logging::tail(&file, READ_BYTES)));
     }
     // timestamps lead each line in the same format, so they sort as text
     entries.sort_by(|a, b| a.time().cmp(b.time()));
@@ -149,6 +147,17 @@ fn read(ctx: &egui::Context) -> Arc<Vec<Entry>> {
     ctx.data_mut(|d| d.insert_temp(id, (now, entries.clone())));
     ctx.request_repaint_after(std::time::Duration::from_secs(1));
     entries
+}
+
+// a server in wsl keeps its log in its own data folder, which windows reads through the wsl share
+fn server_log() -> std::path::PathBuf {
+    #[cfg(windows)]
+    if mux_core::paths::wsl().is_some()
+        && let Some(folder) = crate::wsl::data_dir()
+    {
+        return mux_core::paths::local(&format!("{folder}/server.log")).into();
+    }
+    logging::path("server.log")
 }
 
 // an entry starts with its timestamp, and the indented lines after it belong to it
@@ -178,8 +187,10 @@ fn report(entries: &[Entry], agents: &[(Provider, bool)]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let server =
+        mux_core::paths::wsl().map_or("beside the app".to_owned(), |d| format!("in WSL ({d})"));
     let mut report = format!(
-        "Mux {} ({}) on {} {}\nAgents: {found}\n\n",
+        "Mux {} ({}) on {} {}\nServer: {server}\nAgents: {found}\n\n",
         mux_core::VERSION,
         crate::update::build(),
         std::env::consts::OS,

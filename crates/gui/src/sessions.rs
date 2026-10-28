@@ -222,16 +222,12 @@ impl Sessions {
     }
 
     // the session for the pane on the right, which may still be fading out after it was closed
-    pub fn split_session(
-        &mut self,
-        id: u64,
-    ) -> Option<(&SessionInfo, &mut Local, &mut Vec<ClientMsg>)> {
-        let Some(info) = self
-            .groups
-            .iter()
-            .flat_map(|g| &g.sessions)
-            .find(|s| s.id == id)
-        else {
+    pub fn split_session(&mut self, id: u64) -> Option<SplitSession<'_>> {
+        let found = self.groups.iter().find_map(|g| {
+            let info = g.sessions.iter().find(|s| s.id == id)?;
+            Some((info, g.path.clone()))
+        });
+        let Some((info, folder)) = found else {
             // removed elsewhere, so there's nothing left to show
             if self.split == Some(id) {
                 self.split = None;
@@ -239,7 +235,7 @@ impl Sessions {
             return None;
         };
         let local = self.locals.entry(id).or_default();
-        Some((info, local, &mut self.outbox))
+        Some((info, local, &mut self.outbox, &self.models, folder))
     }
 
     pub fn selected_id(&self) -> Option<u64> {
@@ -565,6 +561,7 @@ impl Sessions {
                     .inner;
                 if !input.has_focus() && !input.lost_focus() {
                     input.request_focus();
+                    select_all(ui.ctx(), input.id, draft);
                 }
                 let (enter, escape) =
                     ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
@@ -680,6 +677,36 @@ impl Sessions {
                 rows.spacing_mut().item_spacing.y = 0.0;
                 for (i, session) in group.sessions.iter().enumerate() {
                     rows.add_space(ROW_GAP);
+                    if let Some((id, draft)) = &mut self.renaming
+                        && *id == session.id
+                    {
+                        // the field takes the row's place at the row's height, so nothing below it moves
+                        let (rect, _) = rows
+                            .allocate_exact_size(vec2(width, SessionRow::HEIGHT), Sense::hover());
+                        let field = Rect::from_center_size(
+                            rect.center(),
+                            vec2(width, mux_ui::theme::control::MD),
+                        );
+                        let input = rows
+                            .scope_builder(
+                                UiBuilder::new().max_rect(field).id_salt(session.id),
+                                |ui| TextInput::new(draft).show(ui),
+                            )
+                            .inner;
+                        if !input.has_focus() && !input.lost_focus() {
+                            input.request_focus();
+                            select_all(rows.ctx(), input.id, draft);
+                        }
+                        let (enter, escape) =
+                            rows.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+                        if input.lost_focus() {
+                            if enter && !escape {
+                                actions.push(Action::Rename(session.id, std::mem::take(draft)));
+                            }
+                            actions.push(Action::EndRename);
+                        }
+                        continue;
+                    }
                     let is_dragged = dragging == Some(session.id);
                     let row = rows
                         .push_id(session.id, |ui| {
@@ -713,6 +740,9 @@ impl Sessions {
                     if row.clicked() {
                         actions.push(Action::Select(session.id));
                     }
+                    if row.double_clicked() {
+                        actions.push(Action::StartRename(session.id, session.title.clone()));
+                    }
                     if row.drag_started()
                         && let Some(pos) = row.interact_pointer_pos()
                     {
@@ -727,9 +757,15 @@ impl Sessions {
                         if let Some(branch) = session.branch.as_ref().or(group.branch.as_ref()) {
                             mux_ui::copy_item(ui, "Copy branch name", branch);
                         }
-                        let terminal = session.kind != SessionKind::Agent;
-                        if terminal
-                            && self.selected != Some(session.id)
+                        if MenuItem::new("Rename")
+                            .icon(icons::PENCIL_SIMPLE)
+                            .show(ui)
+                            .clicked()
+                        {
+                            actions.push(Action::StartRename(session.id, session.title.clone()));
+                            ui.close();
+                        }
+                        if self.selected != Some(session.id)
                             && MenuItem::new("Open on the right")
                                 .icon(icons::SIDEBAR_SIMPLE)
                                 .show(ui)
@@ -812,7 +848,15 @@ impl Sessions {
                     self.request(Some(group), "Shell", SessionKind::Shell, false)
                 }
                 Action::StartRename(id, name) => self.renaming = Some((id, name)),
-                Action::Rename(id, name) => self.outbox.push(ClientMsg::RenameGroup { id, name }),
+                // groups and sessions share one run of ids, so the id says which is being renamed
+                Action::Rename(id, name) => {
+                    let group = self.groups.iter().any(|g| g.id == id);
+                    self.outbox.push(if group {
+                        ClientMsg::RenameGroup { id, name }
+                    } else {
+                        ClientMsg::RenameSession { id, title: name }
+                    });
+                }
                 Action::EndRename => self.renaming = None,
                 Action::ChangeFolder(id) => self.set_group_folder(id),
                 Action::RemoveGroup(id) => self.outbox.push(ClientMsg::DeleteGroup { id }),
@@ -1276,6 +1320,28 @@ fn diff_lines(diff: &str) -> Vec<DiffLine> {
         })
         .collect()
 }
+
+// a name being changed starts out selected, so typing replaces it the way renaming a file does
+fn select_all(ctx: &egui::Context, id: Id, text: &str) {
+    let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    let end = egui::text::CCursor::new(text.chars().count());
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            end,
+        )));
+    state.store(ctx, id);
+}
+
+// a session on the right: its info and local state, the outbox, the model lists and its project folder
+pub type SplitSession<'a> = (
+    &'a SessionInfo,
+    &'a mut Local,
+    &'a mut Vec<ClientMsg>,
+    &'a Models,
+    Option<String>,
+);
 
 pub fn ended(status: SessionStatus) -> bool {
     matches!(status, SessionStatus::Done | SessionStatus::Failed)

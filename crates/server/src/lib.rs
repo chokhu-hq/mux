@@ -585,6 +585,15 @@ impl Server {
                 self.agent(id).answer(question, answers);
                 self.agent_changed(id);
             }
+            ClientMsg::RenameSession { id, title } => {
+                // a name given by hand stays, since only an agent still called "New agent" is named automatically
+                if let Some(info) = self.store.session_mut(id)
+                    && !title.trim().is_empty()
+                {
+                    info.title = title.trim().to_owned();
+                    self.changed();
+                }
+            }
         }
     }
 

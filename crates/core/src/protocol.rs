@@ -465,6 +465,10 @@ pub enum ClientMsg {
         question: u64,
         answers: Vec<Vec<String>>,
     },
+    RenameSession {
+        id: u64,
+        title: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

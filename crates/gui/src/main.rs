@@ -408,10 +408,6 @@ impl App {
                 }
             }
         }
-        let first_diff = local
-            .chat
-            .iter()
-            .position(|item| matches!(item, ChatItem::Diff(_)));
         self.titlebar = Some(TitleBar {
             id: session.id,
             provider: agent.then_some(session.provider),
@@ -437,106 +433,30 @@ impl App {
                 }
                 return;
             }
-            if !local.opened {
-                outbox.push(ClientMsg::AgentOpen { id });
-                local.opened = true;
-            }
-            let body = rect;
-            let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
-            let settings = local.settings.clone();
-            let started = local.has_started();
-            let mut configure = None;
-            for path in std::mem::take(&mut self.dropped) {
-                if !local.attachments.contains(&path) {
-                    local.attachments.push(path);
-                }
-            }
-            let commands = slash_commands(
-                local.settings.provider,
-                &local.skills,
-                local.busy,
-                first_diff.is_some(),
-            );
-            let action = ChatView::new(&local.chat, &mut local.draft)
-                .commands(&commands)
-                .queue(&local.queue, local.held)
-                .background(&local.background)
-                .attachments(&mut local.attachments)
-                .dropping(self.dropping)
-                .running(local.busy)
-                .context(local.context)
-                .controls(|ui| configure = agent_controls(ui, models, &settings, started))
-                .show(&mut body_ui);
-            let action = action.or(first_diff.filter(|_| review).map(ChatAction::OpenDiff));
-            // mux's own slash commands are the same actions the buttons around the chat take
-            let action = match action {
-                Some(ChatAction::Command(name)) => match name.as_str() {
-                    "compact" => Some(ChatAction::Compact),
-                    "review" => first_diff.map(ChatAction::OpenDiff),
-                    "stop" => Some(ChatAction::Stop),
-                    "plan" => {
-                        let mut settings = local.settings.clone();
-                        settings.plan = !settings.plan;
-                        local.settings = settings.clone();
-                        outbox.push(ClientMsg::AgentConfigure { id, settings });
-                        None
-                    }
-                    "new" => {
-                        *run = Some("new-agent");
-                        None
-                    }
-                    _ => None,
+            let folder = group.as_ref().and_then(|g| g.1.clone());
+            let mut body_ui = ui.new_child(UiBuilder::new().max_rect(rect));
+            let dropped = std::mem::take(&mut self.dropped);
+            let action = agent_chat(
+                &mut body_ui,
+                AgentPane {
+                    id,
+                    local,
+                    outbox,
+                    models,
+                    folder: folder.as_deref(),
                 },
-                action => action,
-            };
-            if let Some(settings) = configure {
-                local.settings = settings.clone();
-                outbox.push(ClientMsg::AgentConfigure { id, settings });
-            }
+                self.dropping,
+                dropped,
+                review,
+            );
             match action {
-                Some(ChatAction::Send(text)) => {
-                    // a file moved or deleted since it was attached is left out rather than failing the turn
-                    let mut attachments = std::mem::take(&mut local.attachments);
-                    attachments.retain(|path| std::path::Path::new(path).exists());
-                    // picked here, but the agent opens them where the server runs
-                    let attachments = attachments
-                        .iter()
-                        .map(|path| mux_core::paths::remote(path))
-                        .collect();
-                    outbox.push(ClientMsg::AgentSend {
-                        id,
-                        text,
-                        attachments,
-                    });
-                }
-                Some(ChatAction::Attach) => {
-                    let folder = group.as_ref().and_then(|g| g.1.as_deref());
-                    let folder = folder.map(mux_core::paths::local);
-                    for path in sessions::pick_files(folder.as_deref()) {
-                        if !local.attachments.contains(&path) {
-                            local.attachments.push(path);
-                        }
-                    }
-                }
                 Some(ChatAction::OpenLink(target)) => {
-                    let folder = group.as_ref().and_then(|g| g.1.as_deref());
-                    match link_target(&target, folder) {
-                        Some((path, _)) if mux_core::protocol::is_image(&path) => {
-                            ImageViewer::open(ui.ctx(), vec![mux_core::paths::local(&path)], 0);
-                        }
-                        Some((path, lines)) => {
-                            let path = mux_core::paths::local(&path);
-                            self.viewer = Some(FileView::open(path, lines));
-                            self.viewer_open = true;
-                        }
-                        None => {}
-                    }
+                    self.open_link(ui.ctx(), &target, folder.as_deref())
                 }
                 Some(ChatAction::OpenDiff(index)) => {
-                    let folder = group.as_ref().and_then(|g| g.1.as_deref());
-                    self.diffs = changed_files(&local.chat, folder);
+                    self.diffs = changed_files(&local.chat, folder.as_deref());
                     let clicked = match local.chat.get(index) {
-                        Some(ChatItem::Diff(diff)) => Some(resolve(&diff.path, folder)),
+                        Some(ChatItem::Diff(diff)) => Some(resolve(&diff.path, folder.as_deref())),
                         _ => None,
                     };
                     if let Some(at) = clicked.and_then(|p| self.diffs.iter().position(|d| d.0 == p))
@@ -544,75 +464,8 @@ impl App {
                         self.show_diff(at);
                     }
                 }
-                Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
-                // already turned into one of the actions above
-                Some(ChatAction::Command(_)) => {}
-                Some(ChatAction::Queue(index, action)) => {
-                    outbox.push(ClientMsg::AgentQueue { id, index, action })
-                }
-                Some(ChatAction::Resume) => outbox.push(ClientMsg::AgentResume { id }),
-                Some(ChatAction::StopBackground(task)) => {
-                    outbox.push(ClientMsg::AgentStopBackground { id, task })
-                }
-                Some(ChatAction::Answer(index, answers)) => {
-                    if let Some(Some(question)) = local.approvals.get(index) {
-                        outbox.push(ClientMsg::AgentAnswer {
-                            id,
-                            question: *question,
-                            answers,
-                        });
-                    }
-                }
-                // the message goes back in the composer, after anything already typed there, and the chat winds back
-                Some(ChatAction::Rewind(index)) => {
-                    let message = local.chat[..index]
-                        .iter()
-                        .filter(|item| matches!(item, ChatItem::User { .. }))
-                        .count();
-                    if let Some(ChatItem::User {
-                        text, attachments, ..
-                    }) = local.chat.get(index)
-                    {
-                        local.draft = if local.draft.trim().is_empty() {
-                            text.clone()
-                        } else {
-                            format!("{}\n\n{text}", local.draft.trim_end())
-                        };
-                        for path in attachments {
-                            if !local.attachments.contains(path) {
-                                local.attachments.push(path.clone());
-                            }
-                        }
-                        outbox.push(ClientMsg::AgentRewind { id, message });
-                    }
-                }
-                // carrying out a plan leaves plan mode first, so the agent is free to make the changes
-                Some(ChatAction::ImplementPlan) => {
-                    let mut settings = local.settings.clone();
-                    settings.plan = false;
-                    local.settings = settings.clone();
-                    outbox.push(ClientMsg::AgentConfigure { id, settings });
-                    outbox.push(ClientMsg::AgentSend {
-                        id,
-                        text: "Go ahead and carry out the plan.".to_owned(),
-                        attachments: Vec::new(),
-                    });
-                }
-                Some(ChatAction::Compact) => outbox.push(ClientMsg::AgentCompact { id }),
-                Some(ChatAction::Decide(index, decision)) => {
-                    if let Some(Some(approval)) = local.approvals.get(index) {
-                        outbox.push(ClientMsg::AgentDecide {
-                            id,
-                            approval: *approval,
-                            decision: match decision {
-                                Decision::Allow => wire::Decision::Allow,
-                                Decision::AlwaysAllow => wire::Decision::AlwaysAllow,
-                                Decision::Deny => wire::Decision::Deny,
-                            },
-                        });
-                    }
-                }
-                None => {}
+                Some(ChatAction::Command(_)) => *run = Some("new-agent"),
+                _ => {}
             }
             self.focused = None;
             return;
@@ -648,6 +501,21 @@ impl App {
         if self.focused != Some(id) || idle {
             response.request_focus();
             self.focused = Some(id);
+        }
+    }
+
+    // a link in a chat opens a picture in the viewer and anything else in the file panel
+    fn open_link(&mut self, ctx: &egui::Context, target: &str, folder: Option<&str>) {
+        match link_target(target, folder) {
+            Some((path, _)) if mux_core::protocol::is_image(&path) => {
+                ImageViewer::open(ctx, vec![mux_core::paths::local(&path)], 0);
+            }
+            Some((path, lines)) => {
+                let path = mux_core::paths::local(&path);
+                self.viewer = Some(FileView::open(path, lines));
+                self.viewer_open = true;
+            }
+            None => {}
         }
     }
 
@@ -1945,7 +1813,7 @@ impl App {
 
         let header = Rect::from_min_size(panel.min, vec2(full, FOOTER_ROW + space::SM));
         let mut close = false;
-        let Some((info, local, outbox)) = self.sessions.split_session(id) else {
+        let Some((info, local, outbox, models, folder)) = self.sessions.split_session(id) else {
             self.split_shown = None;
             return main;
         };
@@ -1955,15 +1823,28 @@ impl App {
                 .max_rect(header.shrink2(vec2(space::MD, 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        let glyph = match info.kind {
-            SessionKind::Task => icons::PLAY,
-            _ => icons::TERMINAL,
-        };
-        head.label(
-            egui::RichText::new(glyph.to_string())
-                .font(font::icon(icon::MD))
-                .color(p.text_faint),
-        );
+        let agent = info.kind == SessionKind::Agent;
+        if agent {
+            let (mark, _) =
+                head.allocate_exact_size(vec2(icon::MD, icon::MD), egui::Sense::hover());
+            provider_mark(
+                head.painter(),
+                mark.center(),
+                icon::MD,
+                info.provider,
+                provider_color(info.provider, p.text_muted),
+            );
+        } else {
+            let glyph = match info.kind {
+                SessionKind::Task => icons::PLAY,
+                _ => icons::TERMINAL,
+            };
+            head.label(
+                egui::RichText::new(glyph.to_string())
+                    .font(font::icon(icon::MD))
+                    .color(p.text_faint),
+            );
+        }
         head.label(
             egui::RichText::new(&info.title)
                 .font(font::medium(text::MD))
@@ -1978,9 +1859,10 @@ impl App {
         head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             close |= IconButton::new(icons::X, "Close")
                 .show(ui)
-                .tip_with_shortcut("Close the terminal", TERMINAL)
+                .tip_with_shortcut("Close the pane", TERMINAL)
                 .clicked();
             restart = ended
+                && !agent
                 && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
                     .show(ui)
                     .tip("Run it again")
@@ -1992,6 +1874,50 @@ impl App {
             egui::Stroke::new(1.0, p.border),
         );
 
+        if agent {
+            let body = Rect::from_min_max(pos2(panel.left(), header.bottom()), panel.max);
+            let mut body_ui = pane.new_child(UiBuilder::new().id_salt("split-body").max_rect(body));
+            let action = agent_chat(
+                &mut body_ui,
+                AgentPane {
+                    id,
+                    local,
+                    outbox,
+                    models,
+                    folder: folder.as_deref(),
+                },
+                false,
+                Vec::new(),
+                false,
+            );
+            match action {
+                Some(ChatAction::OpenLink(target)) => {
+                    self.open_link(&ctx, &target, folder.as_deref())
+                }
+                Some(ChatAction::OpenDiff(index)) => {
+                    let chat = self.sessions.split_session(id).map(|s| &s.1.chat);
+                    if let Some(chat) = chat {
+                        self.diffs = changed_files(chat, folder.as_deref());
+                        let clicked = match chat.get(index) {
+                            Some(ChatItem::Diff(diff)) => {
+                                Some(resolve(&diff.path, folder.as_deref()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(at) =
+                            clicked.and_then(|p| self.diffs.iter().position(|d| d.0 == p))
+                        {
+                            self.show_diff(at);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if close {
+                self.sessions.split = None;
+            }
+            return Rect::from_min_max(main.min, pos2(edge, main.bottom()));
+        }
         // attaching starts the process on the server if it has not run yet, then streams it here
         if local.terminal.is_none() && !local.attaching {
             outbox.push(ClientMsg::Attach { id });
@@ -2293,6 +2219,184 @@ impl eframe::App for App {
         }
         self.link.tick(&ctx, &mut self.sessions);
     }
+}
+
+// an agent session's chat on screen, wherever it's shown
+struct AgentPane<'a> {
+    id: u64,
+    local: &'a mut sessions::Local,
+    outbox: &'a mut Vec<ClientMsg>,
+    models: &'a sessions::Models,
+    folder: Option<&'a str>,
+}
+
+// draws an agent's chat and carries out what only concerns that agent, handing back links, diffs and a new agent
+fn agent_chat(
+    ui: &mut egui::Ui,
+    pane: AgentPane,
+    dropping: bool,
+    dropped: Vec<String>,
+    review: bool,
+) -> Option<ChatAction> {
+    let AgentPane {
+        id,
+        local,
+        outbox,
+        models,
+        folder,
+    } = pane;
+    let first_diff = local
+        .chat
+        .iter()
+        .position(|item| matches!(item, ChatItem::Diff(_)));
+    if !local.opened {
+        outbox.push(ClientMsg::AgentOpen { id });
+        local.opened = true;
+    }
+    let settings = local.settings.clone();
+    let started = local.has_started();
+    let mut configure = None;
+    for path in dropped {
+        if !local.attachments.contains(&path) {
+            local.attachments.push(path);
+        }
+    }
+    let commands = slash_commands(
+        local.settings.provider,
+        &local.skills,
+        local.busy,
+        first_diff.is_some(),
+    );
+    let action = ChatView::new(&local.chat, &mut local.draft)
+        .commands(&commands)
+        .queue(&local.queue, local.held)
+        .background(&local.background)
+        .attachments(&mut local.attachments)
+        .dropping(dropping)
+        .running(local.busy)
+        .context(local.context)
+        .controls(|ui| configure = agent_controls(ui, models, &settings, started))
+        .show(ui);
+    let action = action.or(first_diff.filter(|_| review).map(ChatAction::OpenDiff));
+    // mux's own slash commands are the same actions the buttons around the chat take
+    let action = match action {
+        Some(ChatAction::Command(name)) => match name.as_str() {
+            "compact" => Some(ChatAction::Compact),
+            "review" => first_diff.map(ChatAction::OpenDiff),
+            "stop" => Some(ChatAction::Stop),
+            "plan" => {
+                let mut settings = local.settings.clone();
+                settings.plan = !settings.plan;
+                local.settings = settings.clone();
+                outbox.push(ClientMsg::AgentConfigure { id, settings });
+                None
+            }
+            "new" => Some(ChatAction::Command(name)),
+            _ => None,
+        },
+        action => action,
+    };
+    if let Some(settings) = configure {
+        local.settings = settings.clone();
+        outbox.push(ClientMsg::AgentConfigure { id, settings });
+    }
+    match action {
+        Some(ChatAction::Send(text)) => {
+            // a file moved or deleted since it was attached is left out rather than failing the turn
+            let mut attachments = std::mem::take(&mut local.attachments);
+            attachments.retain(|path| std::path::Path::new(path).exists());
+            // picked here, but the agent opens them where the server runs
+            let attachments = attachments
+                .iter()
+                .map(|path| mux_core::paths::remote(path))
+                .collect();
+            outbox.push(ClientMsg::AgentSend {
+                id,
+                text,
+                attachments,
+            });
+        }
+        Some(ChatAction::Attach) => {
+            let folder = folder.map(mux_core::paths::local);
+            for path in sessions::pick_files(folder.as_deref()) {
+                if !local.attachments.contains(&path) {
+                    local.attachments.push(path);
+                }
+            }
+        }
+        // these reach beyond this one chat, so the caller carries them out
+        action @ Some(ChatAction::OpenLink(_) | ChatAction::OpenDiff(_)) => return action,
+        Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
+        // only a new agent is left, which the caller starts
+        action @ Some(ChatAction::Command(_)) => return action,
+        Some(ChatAction::Queue(index, action)) => {
+            outbox.push(ClientMsg::AgentQueue { id, index, action })
+        }
+        Some(ChatAction::Resume) => outbox.push(ClientMsg::AgentResume { id }),
+        Some(ChatAction::StopBackground(task)) => {
+            outbox.push(ClientMsg::AgentStopBackground { id, task })
+        }
+        Some(ChatAction::Answer(index, answers)) => {
+            if let Some(Some(question)) = local.approvals.get(index) {
+                outbox.push(ClientMsg::AgentAnswer {
+                    id,
+                    question: *question,
+                    answers,
+                });
+            }
+        }
+        // the message goes back in the composer, after anything already typed there, and the chat winds back
+        Some(ChatAction::Rewind(index)) => {
+            let message = local.chat[..index]
+                .iter()
+                .filter(|item| matches!(item, ChatItem::User { .. }))
+                .count();
+            if let Some(ChatItem::User {
+                text, attachments, ..
+            }) = local.chat.get(index)
+            {
+                local.draft = if local.draft.trim().is_empty() {
+                    text.clone()
+                } else {
+                    format!("{}\n\n{text}", local.draft.trim_end())
+                };
+                for path in attachments {
+                    if !local.attachments.contains(path) {
+                        local.attachments.push(path.clone());
+                    }
+                }
+                outbox.push(ClientMsg::AgentRewind { id, message });
+            }
+        }
+        // carrying out a plan leaves plan mode first, so the agent is free to make the changes
+        Some(ChatAction::ImplementPlan) => {
+            let mut settings = local.settings.clone();
+            settings.plan = false;
+            local.settings = settings.clone();
+            outbox.push(ClientMsg::AgentConfigure { id, settings });
+            outbox.push(ClientMsg::AgentSend {
+                id,
+                text: "Go ahead and carry out the plan.".to_owned(),
+                attachments: Vec::new(),
+            });
+        }
+        Some(ChatAction::Compact) => outbox.push(ClientMsg::AgentCompact { id }),
+        Some(ChatAction::Decide(index, decision)) => {
+            if let Some(Some(approval)) = local.approvals.get(index) {
+                outbox.push(ClientMsg::AgentDecide {
+                    id,
+                    approval: *approval,
+                    decision: match decision {
+                        Decision::Allow => wire::Decision::Allow,
+                        Decision::AlwaysAllow => wire::Decision::AlwaysAllow,
+                        Decision::Deny => wire::Decision::Deny,
+                    },
+                });
+            }
+        }
+        None => {}
+    }
+    None
 }
 
 #[cfg(test)]

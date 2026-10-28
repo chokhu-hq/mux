@@ -6,8 +6,8 @@ use std::process::Stdio;
 
 use base64::Engine;
 use mux_core::protocol::{
-    AgentItem, AgentSettings, AgentSummary, ContextUsage, Decision, FileChange, ItemStatus, Skill,
-    UsageWindow, is_image,
+    AgentItem, AgentSettings, AgentSummary, ContextUsage, Decision, FileChange, ItemStatus,
+    QueueAction, Queued, Skill, UsageWindow, is_image,
 };
 use mux_core::{Access, Provider, SessionStatus};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use crate::{Event, usage};
 
 mod interaction;
+mod rewind;
 mod subagent;
 
 // long command output is cut down to its tail, which is the part people read
@@ -37,6 +38,10 @@ struct Saved {
     context: Option<ContextUsage>,
     #[serde(default)]
     commands: Vec<String>,
+    #[serde(default)]
+    claude_head: Option<String>,
+    #[serde(default)]
+    queue: Vec<Queued>,
 }
 
 enum Call {
@@ -44,6 +49,8 @@ enum Call {
     StartThread,
     ResumeThread,
     StartTurn,
+    // winding codex's thread back for a rewound conversation
+    Revert,
     // input added to a running turn, kept so it can start its own turn if that one already ended
     Steer(String, Vec<String>),
     Interrupt,
@@ -52,8 +59,18 @@ enum Call {
 
 struct Process {
     stdin: UnboundedSender<String>,
-    // held so the process is killed when the agent is dropped or restarted
-    _child: Child,
+    // held so the process is killed when the agent is dropped or restarted, and absent in tests
+    _child: Option<Child>,
+}
+
+#[cfg(test)]
+impl Process {
+    fn fake(stdin: UnboundedSender<String>) -> Self {
+        Self {
+            stdin,
+            _child: None,
+        }
+    }
 }
 
 // an approval the person hasn't answered yet, with what claude needs echoed back on allow
@@ -113,6 +130,17 @@ pub struct Agent {
     todos: Option<usize>,
     // codex's default model, which plan mode needs named when none was picked
     pub default_model: Option<String>,
+    // claude's latest reply, which a message sent now would be rewound to
+    claude_head: Option<String>,
+    // where claude's next launch picks the session up, after a rewind
+    resume_at: Option<String>,
+    // a rewind for codex waiting for its thread to open
+    pending_revert: Option<String>,
+    // messages sent while the agent worked, waiting with mux until it's free
+    pub queue: Vec<Queued>,
+    // a stop holds the queue back until the person sends again or resumes it
+    pub held: bool,
+    queue_changed: bool,
     // the compaction item still running, whether asked for or started by the agent itself
     compacting: Option<usize>,
     compact_queued: bool,
@@ -181,6 +209,13 @@ impl Agent {
             questions: HashMap::new(),
             todos: None,
             default_model: None,
+            claude_head: saved.claude_head,
+            resume_at: None,
+            pending_revert: None,
+            // nothing runs a saved queue until the person asks, since the agent it was meant for has gone
+            held: !saved.queue.is_empty(),
+            queue: saved.queue,
+            queue_changed: false,
             compacting: None,
             compact_queued: false,
         }
@@ -265,6 +300,8 @@ impl Agent {
             settings: self.settings.clone(),
             context: self.context,
             commands: self.commands.clone(),
+            claude_head: self.claude_head.clone(),
+            queue: self.queue.clone(),
         };
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
@@ -337,34 +374,55 @@ impl Agent {
         cwd: PathBuf,
         events: &UnboundedSender<Event>,
     ) {
-        let was_busy = self.busy;
-        // a new message starts a new checklist
-        self.todos = None;
-        // claude runs a message sent mid turn after the current one, and codex waits for its thread to open
-        let claude = self.settings.provider == Provider::Claude;
-        let queued = if claude {
-            was_busy
-        } else {
-            !self.thread_live && self.process.is_some()
-        };
-        self.push(AgentItem::User {
-            text: text.clone(),
-            attachments: attachments.clone(),
-            queued,
-        });
-        self.set_busy(true);
-        if !self.launch(was_busy, session, generation, cwd, events) {
+        // while the agent works a message waits with mux, where it can still be changed, until its turn
+        if self.busy && self.process.is_some() {
+            self.queue.push(Queued { text, attachments });
+            self.held = false;
+            self.queue_changed = true;
             return;
         }
+        self.held = false;
+        self.record(&text, &attachments, false);
+        if !self.launch(false, session, generation, cwd, events) {
+            return;
+        }
+        self.transmit(text, attachments, false);
+    }
+
+    // puts the message in the transcript, noting where the agent's history stood so it can be rewound to here
+    fn record(&mut self, text: &str, attachments: &[String], steer: bool) {
+        // a new message starts a new checklist
+        self.todos = None;
+        let claude = self.settings.provider == Provider::Claude;
+        // codex waits for its thread to open before it takes a message
+        let queued = !claude && !self.thread_live && self.process.is_some();
+        // claude's latest reply, or the codex turn a steered message joins, filled in once it starts otherwise
+        let rewind = if claude {
+            Some(self.claude_head.clone().unwrap_or_default())
+        } else if steer {
+            self.turn_id.clone()
+        } else {
+            None
+        };
+        self.push(AgentItem::User {
+            text: text.to_owned(),
+            attachments: attachments.to_vec(),
+            queued,
+            rewind,
+        });
+        self.set_busy(true);
+    }
+
+    fn transmit(&mut self, text: String, attachments: Vec<String>, steer: bool) {
         if self.settings.provider == Provider::Claude {
             let line = json!({
                 "type": "user",
                 "message": { "role": "user", "content": claude_content(&text, &attachments, &self.skills()) }
             });
-            self.claude_waiting.push_back(text.clone());
+            self.claude_waiting.push_back(text);
             self.write(line);
         } else if let (true, true, Some(thread), Some(turn)) = (
-            was_busy,
+            steer,
             self.thread_live,
             self.thread_id.clone(),
             self.turn_id.clone(),
@@ -520,7 +578,70 @@ impl Agent {
         }
     }
 
+    // the queue when it changed since the last call, with whether it's held
+    pub fn take_queue(&mut self) -> Option<(Vec<Queued>, bool)> {
+        std::mem::take(&mut self.queue_changed).then(|| (self.queue.clone(), self.held))
+    }
+
+    // the next waiting message goes out once a turn ends, one turn each
+    fn next_queued(&mut self) {
+        if self.held || self.busy || self.queue.is_empty() || self.process.is_none() {
+            return;
+        }
+        let next = self.queue.remove(0);
+        self.queue_changed = true;
+        self.record(&next.text, &next.attachments, false);
+        self.transmit(next.text, next.attachments, false);
+    }
+
+    // edits, drops or hurries one waiting message, returning one to send through a fresh start when the agent is idle
+    pub fn change_queue(&mut self, index: usize, action: QueueAction) -> Option<Queued> {
+        if index >= self.queue.len() {
+            return None;
+        }
+        self.queue_changed = true;
+        match action {
+            QueueAction::Edit(text) => self.queue[index].text = text,
+            QueueAction::Remove => {
+                self.queue.remove(index);
+            }
+            QueueAction::SendNow => {
+                let message = self.queue.remove(index);
+                self.held = false;
+                if !self.busy || self.process.is_none() {
+                    return Some(message);
+                }
+                if self.settings.provider == Provider::Claude {
+                    // claude can't take a message mid reply, so the reply stops and this one goes next
+                    self.queue.insert(0, message);
+                    self.stop();
+                    self.held = false;
+                } else {
+                    self.record(&message.text, &message.attachments, true);
+                    self.transmit(message.text, message.attachments, true);
+                }
+            }
+        }
+        None
+    }
+
+    // carries on with a held queue, returning the first message when there's no running agent to hand it to
+    pub fn resume(&mut self) -> Option<Queued> {
+        self.held = false;
+        self.queue_changed = true;
+        if self.process.is_none() && !self.busy && !self.queue.is_empty() {
+            return Some(self.queue.remove(0));
+        }
+        self.next_queued();
+        None
+    }
+
     pub fn stop(&mut self) {
+        // stopping holds anything waiting, so it doesn't start the moment the agent stops
+        if !self.queue.is_empty() {
+            self.held = true;
+            self.queue_changed = true;
+        }
         if self.settings.provider == Provider::Claude {
             if self.busy {
                 self.write(json!({
@@ -543,6 +664,10 @@ impl Agent {
 
     pub fn exited(&mut self) {
         self.process = None;
+        if !self.queue.is_empty() {
+            self.held = true;
+            self.queue_changed = true;
+        }
         self.thread_live = false;
         self.calls.clear();
         if self.busy {
@@ -575,7 +700,11 @@ impl Agent {
         let claude = self.settings.provider == Provider::Claude;
         let mut command = if claude {
             let mut command = Command::new("claude");
-            command.args(claude_args(&self.settings, self.session_id.as_deref()));
+            command.args(claude_args(
+                &self.settings,
+                self.session_id.as_deref(),
+                self.resume_at.take().as_deref(),
+            ));
             command
         } else {
             let mut command = Command::new("codex");
@@ -631,7 +760,7 @@ impl Agent {
         self.generation = generation;
         self.process = Some(Process {
             stdin: tx,
-            _child: child,
+            _child: Some(child),
         });
         self.cwd = Some(cwd);
         if claude {
@@ -687,6 +816,9 @@ impl Agent {
                 None => {
                     self.thread_id = msg["result"]["thread"]["id"].as_str().map(str::to_owned);
                     self.thread_live = true;
+                    if let Some(turn) = self.pending_revert.take() {
+                        self.revert(turn);
+                    }
                     if std::mem::take(&mut self.compact_queued) {
                         self.start_compaction();
                     }
@@ -708,6 +840,13 @@ impl Agent {
                 }
             }
             Call::Interrupt => {}
+            Call::Revert => {
+                if let Some(message) = error {
+                    self.push(AgentItem::Error {
+                        message: format!("Codex couldn't wind back to that message: {message}"),
+                    });
+                }
+            }
             Call::Compact => {
                 if let Some(message) = error {
                     self.finish_compaction(ItemStatus::Failed);
@@ -782,6 +921,9 @@ impl Agent {
         match method {
             "turn/started" => {
                 self.turn_id = params["turn"]["id"].as_str().map(str::to_owned);
+                if let Some(turn) = self.turn_id.clone() {
+                    self.mark_turn(&turn);
+                }
                 self.set_busy(true);
             }
             "turn/completed" => {
@@ -799,6 +941,7 @@ impl Agent {
                 self.expire_questions();
                 self.finish_compaction(ItemStatus::Failed);
                 self.set_busy(false);
+                self.next_queued();
             }
             "error" if params["willRetry"] != true => {
                 let message = params["error"]["message"]
@@ -1007,6 +1150,10 @@ impl Agent {
             }
             Some("assistant") => {
                 self.claude_turn = true;
+                // the latest reply is where a message sent next would be rewound to
+                if let Some(uuid) = msg["uuid"].as_str() {
+                    self.claude_head = Some(uuid.to_owned());
+                }
                 if let Some(used) = claude_context(&msg["message"]["usage"]) {
                     let window = self.context.map_or(0, |c| c.window);
                     self.set_context(ContextUsage { used, window });
@@ -1070,6 +1217,7 @@ impl Agent {
                 self.claude_turn = false;
                 // messages it hasn't echoed yet will start a turn of their own
                 self.set_busy(!self.claude_waiting.is_empty());
+                self.next_queued();
             }
             _ => {}
         }
@@ -1433,7 +1581,7 @@ fn turn_params(
     params
 }
 
-fn claude_args(settings: &AgentSettings, session: Option<&str>) -> Vec<String> {
+fn claude_args(settings: &AgentSettings, session: Option<&str>, at: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -1477,6 +1625,10 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>) -> Vec<String> {
     }
     if let Some(session) = session {
         args.extend(["--resume".to_owned(), session.to_owned()]);
+        // a rewound conversation carries on from the reply before the edited message
+        if let Some(at) = at {
+            args.extend(["--resume-session-at".to_owned(), at.to_owned()]);
+        }
     }
     args
 }
@@ -1616,6 +1768,7 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
             queued: false,
+            rewind: None,
         };
         agent.items = vec![user("count")];
         agent.claude_waiting = VecDeque::from(["count".to_owned()]);
@@ -1629,6 +1782,7 @@ mod tests {
                 text: text.into(),
                 attachments: Vec::new(),
                 queued: true,
+                rewind: None,
             });
             agent.claude_waiting.push_back(text.into());
         }
@@ -1816,6 +1970,7 @@ mod tests {
                 text: "fix it".into(),
                 attachments: Vec::new(),
                 queued: false,
+                rewind: None,
             },
             AgentItem::FileChange {
                 changes: vec![FileChange {
@@ -1932,12 +2087,102 @@ mod tests {
     }
 
     #[test]
+    fn messages_sent_mid_turn_wait_with_mux_and_go_one_per_turn() {
+        let mut agent = claude_agent();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        agent.process = Some(Process::fake(tx));
+        agent.set_busy(true);
+        let queue = |agent: &mut Agent, text: &str| {
+            agent.queue.push(Queued {
+                text: text.into(),
+                attachments: Vec::new(),
+            })
+        };
+        queue(&mut agent, "first");
+        queue(&mut agent, "second");
+        assert_eq!(
+            agent.change_queue(1, QueueAction::Edit("second, edited".into())),
+            None
+        );
+        let result = json!({ "type": "result", "subtype": "success", "result": "ok" });
+        agent.handle(result.clone());
+        // the turn ending sends just the next one
+        assert!(
+            matches!(agent.items.last(), Some(AgentItem::User { text, .. }) if text == "first")
+        );
+        assert_eq!(agent.queue.len(), 1);
+        // a stop holds what's left
+        agent.stop();
+        assert!(agent.held);
+        agent.claude_waiting.clear();
+        agent.handle(result.clone());
+        assert_eq!(agent.queue.len(), 1, "held messages don't go out");
+        agent.resume();
+        assert!(
+            matches!(agent.items.last(), Some(AgentItem::User { text, .. }) if text == "second, edited")
+        );
+        assert!(agent.queue.is_empty());
+        // removing drops it without sending
+        queue(&mut agent, "never");
+        agent.change_queue(0, QueueAction::Remove);
+        assert!(agent.queue.is_empty());
+    }
+
+    #[test]
+    fn rewinding_cuts_the_chat_and_points_each_agent_back() {
+        let user = |rewind: Option<&str>| AgentItem::User {
+            text: "go".into(),
+            attachments: Vec::new(),
+            queued: false,
+            rewind: rewind.map(str::to_owned),
+        };
+        let reply = AgentItem::Assistant {
+            text: "done".into(),
+        };
+
+        let mut claude = claude_agent();
+        claude.session_id = Some("s1".into());
+        claude.items = vec![
+            user(Some("")),
+            reply.clone(),
+            user(Some("r1")),
+            reply.clone(),
+        ];
+        assert!(claude.rewind(1));
+        assert_eq!(claude.items, [user(Some("")), reply.clone()]);
+        assert_eq!(claude.resume_at.as_deref(), Some("r1"));
+        let args = claude_args(&claude.settings, Some("s1"), Some("r1")).join(" ");
+        assert!(args.contains("--resume s1 --resume-session-at r1"));
+        // back to before the first message starts claude afresh
+        assert!(claude.rewind(0));
+        assert!(claude.items.is_empty());
+        assert_eq!(claude.session_id, None);
+
+        let mut codex = agent();
+        codex.items = vec![user(None), reply.clone()];
+        note(
+            &mut codex,
+            "turn/started",
+            json!({ "turn": { "id": "turn-1" } }),
+        );
+        assert_eq!(codex.items[0], user(Some("turn-1")));
+        codex.set_busy(false);
+        codex.thread_id = Some("th".into());
+        assert!(codex.rewind(0));
+        assert_eq!(codex.pending_revert.as_deref(), Some("turn-1"));
+
+        codex.set_busy(true);
+        assert!(!codex.rewind(0), "nothing is rewound while the agent works");
+    }
+
+    #[test]
     fn claude_messages_sent_mid_turn_wait_their_turn() {
         let mut agent = claude_agent();
         let user = |queued| AgentItem::User {
             text: String::new(),
             attachments: Vec::new(),
             queued,
+            rewind: None,
         };
         agent.items = vec![user(false), user(true), user(true)];
         agent.claude_waiting = VecDeque::from(["a".to_owned(), "b".to_owned()]);
@@ -2302,7 +2547,7 @@ mod tests {
             worktree: false,
             plan: false,
         };
-        let args = claude_args(&settings, Some("s1")).join(" ");
+        let args = claude_args(&settings, Some("s1"), None).join(" ");
         assert!(args.contains("--permission-prompt-tool stdio"));
         assert!(args.contains("--permission-mode acceptEdits"));
         assert!(args.contains("--model opus") && args.contains("--effort high"));
@@ -2313,7 +2558,7 @@ mod tests {
             access: Access::Full,
             ..settings
         };
-        let args = claude_args(&full, None).join(" ");
+        let args = claude_args(&full, None, None).join(" ");
         assert!(
             args.contains(
                 "--permission-mode bypassPermissions --allow-dangerously-skip-permissions"

@@ -384,6 +384,7 @@ impl App {
             );
             let action = ChatView::new(&local.chat, &mut local.draft)
                 .commands(&commands)
+                .queue(&local.queue, local.held)
                 .attachments(&mut local.attachments)
                 .dropping(self.dropping)
                 .running(local.busy)
@@ -463,6 +464,10 @@ impl App {
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
                 // already turned into one of the actions above
                 Some(ChatAction::Command(_)) => {}
+                Some(ChatAction::Queue(index, action)) => {
+                    outbox.push(ClientMsg::AgentQueue { id, index, action })
+                }
+                Some(ChatAction::Resume) => outbox.push(ClientMsg::AgentResume { id }),
                 Some(ChatAction::Answer(index, answers)) => {
                     if let Some(Some(question)) = local.approvals.get(index) {
                         outbox.push(ClientMsg::AgentAnswer {
@@ -470,6 +475,29 @@ impl App {
                             question: *question,
                             answers,
                         });
+                    }
+                }
+                // the message goes back in the composer, after anything already typed there, and the chat winds back
+                Some(ChatAction::Rewind(index)) => {
+                    let message = local.chat[..index]
+                        .iter()
+                        .filter(|item| matches!(item, ChatItem::User { .. }))
+                        .count();
+                    if let Some(ChatItem::User {
+                        text, attachments, ..
+                    }) = local.chat.get(index)
+                    {
+                        local.draft = if local.draft.trim().is_empty() {
+                            text.clone()
+                        } else {
+                            format!("{}\n\n{text}", local.draft.trim_end())
+                        };
+                        for path in attachments {
+                            if !local.attachments.contains(path) {
+                                local.attachments.push(path.clone());
+                            }
+                        }
+                        outbox.push(ClientMsg::AgentRewind { id, message });
                     }
                 }
                 // carrying out a plan leaves plan mode first, so the agent is free to make the changes
@@ -1041,38 +1069,28 @@ fn agent_controls(
             .gap(space::XS)
     };
 
-    // a narrow composer drops labels in steps, permissions first and then the model name
+    // the model chip carries the effort too, and drops the model's name first when the composer is narrow
     let label = current.map_or(settings.provider.label(), |m| m.name.as_str());
-    let access = settings.access;
-    let gap = ui.spacing().item_spacing.x;
-    let effort_text = current
+    let effort = current
         .filter(|m| !m.efforts.is_empty())
         .map(|m| effort_label(settings.effort.as_deref().unwrap_or(&m.default_effort)));
-    let rest = effort_text
-        .as_deref()
-        .map_or(0.0, |e| Chip::new(e).width(ui) + gap)
-        + current
-            .filter(|m| m.fast.is_some())
-            .map_or(0.0, |_| theme::control::SM + gap);
-    let width = |label: &str, icon: bool| {
-        let chip = Chip::new(label);
-        let chip = if icon {
-            chip.icon(icons::LIGHTNING)
-        } else {
-            chip
-        };
-        chip.width(ui) + gap
+    let full_label = match &effort {
+        Some(effort) => format!("{label} · {effort}"),
+        None => label.to_owned(),
     };
-    let budget = ui.available_width();
-    // before the first message there's also the choice of where it works
-    let rest = rest + if locked { 0.0 } else { width("Worktree", true) };
-    let full = width(label, true) + rest + width(access.label(), true) <= budget;
-    let named = width(label, true) + rest + width("", true) <= budget;
-    let shown = if named { label } else { "" };
-    let chip = Chip::new(shown)
+    let gap = ui.spacing().item_spacing.x;
+    let options_width = Chip::new("Plan · Fast").icon(icons::LIGHTNING).width(ui) + gap;
+    let fits = Chip::new(&full_label).provider(settings.provider).width(ui) + gap + options_width
+        <= ui.available_width();
+    let shown = if fits {
+        full_label.clone()
+    } else {
+        effort.clone().unwrap_or_default()
+    };
+    let chip = Chip::new(&shown)
         .provider(settings.provider)
         .show(ui)
-        .tip(format!("Agent and model: {label}"));
+        .tip(format!("Model: {full_label}"));
     let viewing_id = chip.id.with("viewing");
     // tabs and the more models row act inside the menu, so only picking a model or clicking away closes it
     menu(&chip)
@@ -1221,67 +1239,54 @@ fn agent_controls(
                     ui.data_mut(|d| d.insert_temp(more_id, !expanded));
                 }
             }
-        });
 
-    let Some(current) = current else {
-        return next;
-    };
-    if !current.efforts.is_empty() {
-        let effort = settings
-            .effort
-            .clone()
-            .unwrap_or_else(|| current.default_effort.clone());
-        let chip = Chip::new(&effort_label(&effort))
-            .show(ui)
-            .tip("Reasoning effort");
-        menu(&chip).show(|ui| {
-            ui.set_width(200.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.add_space(space::XS);
-            ui.horizontal(|ui| {
-                ui.add_space(space::SM);
-                ui.label(
-                    egui::RichText::new("Reasoning effort")
-                        .font(font::medium(text::SM))
-                        .color(p.text_faint),
-                );
-            });
-            ui.add_space(space::XS);
-            let total = current.efforts.len();
-            for (i, option) in current.efforts.iter().enumerate() {
-                if MenuItem::new(&effort_label(option))
-                    .meter(i + 1, total)
-                    .checked(*option == effort)
-                    .show(ui)
-                    .clicked()
-                {
-                    let mut changed = settings.clone();
-                    changed.effort = Some(option.clone());
-                    next = Some(changed);
-                    ui.close();
+            // the current model's effort sits under the list, so model and effort are picked in one place
+            if let Some(model) = current.filter(|m| !m.efforts.is_empty()) {
+                let chosen = settings
+                    .effort
+                    .clone()
+                    .unwrap_or_else(|| model.default_effort.clone());
+                menu_divider(ui);
+                menu_caption(ui, "Reasoning effort");
+                let total = model.efforts.len();
+                for (i, option) in model.efforts.iter().enumerate() {
+                    if MenuItem::new(&effort_label(option))
+                        .meter(i + 1, total)
+                        .checked(*option == chosen)
+                        .show(ui)
+                        .clicked()
+                    {
+                        let mut changed = settings.clone();
+                        changed.effort = Some(option.clone());
+                        next = Some(changed);
+                        ui.close();
+                    }
                 }
             }
         });
-    }
 
-    let label = if full { access.label() } else { "" };
-    let chip = Chip::new(label)
+    // everything else about how the agent works lives in one menu, with only what's switched on named
+    let fast = current.and_then(|m| m.fast.clone());
+    let access = settings.access;
+    let mut on = Vec::new();
+    if settings.plan {
+        on.push("Plan");
+    }
+    if settings.fast && fast.is_some() {
+        on.push("Fast");
+    }
+    if settings.worktree {
+        on.push("Worktree");
+    }
+    let summary = on.join(" · ");
+    let chip = Chip::new(&summary)
         .icon(access_icon(access))
         .show(ui)
         .tip(format!("Permissions: {}", access.label()));
     menu(&chip).show(|ui| {
-        ui.set_width(320.0);
+        ui.set_width(300.0);
         ui.spacing_mut().item_spacing.y = 0.0;
-        ui.add_space(space::XS);
-        ui.horizontal(|ui| {
-            ui.add_space(space::SM);
-            ui.label(
-                egui::RichText::new("Permissions")
-                    .font(font::medium(text::SM))
-                    .color(p.text_faint),
-            );
-        });
-        ui.add_space(space::XS);
+        menu_caption(ui, "Permissions");
         for option in Access::ALL {
             if MenuItem::new(option.label())
                 .icon(access_icon(option))
@@ -1296,36 +1301,10 @@ fn agent_controls(
                 ui.close();
             }
         }
-    });
-
-    // where the agent works can only be chosen before it starts
-    if !locked {
-        let place = if settings.worktree {
-            "Worktree"
-        } else {
-            "Local"
-        };
-        let chip = Chip::new(if full { place } else { "" })
-            .icon(if settings.worktree {
-                icons::GIT_BRANCH
-            } else {
-                icons::FOLDER
-            })
-            .show(ui)
-            .tip(format!("Works in: {place}"));
-        menu(&chip).show(|ui| {
-            ui.set_width(300.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.add_space(space::XS);
-            ui.horizontal(|ui| {
-                ui.add_space(space::SM);
-                ui.label(
-                    egui::RichText::new("Where it works")
-                        .font(font::medium(text::SM))
-                        .color(p.text_faint),
-                );
-            });
-            ui.add_space(space::XS);
+        // where it works can only be picked before the first message
+        if !locked {
+            menu_divider(ui);
+            menu_caption(ui, "Where it works");
             for (worktree, label, icon, detail) in [
                 (
                     false,
@@ -1353,35 +1332,35 @@ fn agent_controls(
                     ui.close();
                 }
             }
-        });
-    }
-
-    // plan mode has the agent plan first and wait, rather than change things straight away
-    let plan = IconButton::new(icons::LIST_CHECKS, "Plan mode")
-        .selected(settings.plan)
-        .show(ui)
-        .tip(if settings.plan {
-            "Plan mode is on: the agent plans and waits for you before changing anything"
-        } else {
-            "Plan mode: have the agent plan first and wait for you"
-        });
-    if plan.clicked() {
-        let mut changed = settings.clone();
-        changed.plan = !changed.plan;
-        next = Some(changed);
-    }
-
-    if let Some(detail) = &current.fast {
-        let fast = IconButton::new(icons::LIGHTNING, "Fast mode")
-            .selected(settings.fast)
+        }
+        menu_divider(ui);
+        if MenuItem::new("Plan mode")
+            .icon(icons::LIST_CHECKS)
+            .detail("Plan first, and wait for you before changing anything")
+            .checked(settings.plan)
             .show(ui)
-            .tip(format!("Fast mode: {detail}"));
-        if fast.clicked() {
+            .clicked()
+        {
+            let mut changed = settings.clone();
+            changed.plan = !changed.plan;
+            next = Some(changed);
+            ui.close();
+        }
+        if let Some(detail) = &fast
+            && MenuItem::new("Fast mode")
+                .icon(icons::LIGHTNING)
+                .detail(detail)
+                .checked(settings.fast)
+                .show(ui)
+                .clicked()
+        {
             let mut changed = settings.clone();
             changed.fast = !changed.fast;
             next = Some(changed);
+            ui.close();
         }
-    }
+    });
+
     next
 }
 
@@ -1529,6 +1508,29 @@ fn changes_button(ui: &mut egui::Ui, added: usize, removed: usize) -> egui::Resp
     ui.painter()
         .galley(pos2(x, y - minus.size().y / 2.0), minus, p.danger);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn menu_caption(ui: &mut egui::Ui, label: &str) {
+    let p = theme::palette(ui);
+    ui.add_space(space::XS);
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        ui.label(
+            egui::RichText::new(label)
+                .font(font::medium(text::SM))
+                .color(p.text_faint),
+        );
+    });
+    ui.add_space(space::XS);
+}
+
+fn menu_divider(ui: &mut egui::Ui) {
+    let p = theme::palette(ui);
+    ui.add_space(space::XS);
+    let line = ui.available_rect_before_wrap();
+    ui.painter()
+        .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
+    ui.add_space(space::XS + 1.0);
 }
 
 // fills the model list's usual space with a short centred message, so switching tabs never resizes the menu

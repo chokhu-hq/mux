@@ -3,6 +3,7 @@ mod attachments;
 mod cards;
 mod composer;
 mod markdown;
+mod queue;
 mod slash;
 
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
@@ -138,6 +139,11 @@ pub enum ChatAction {
     // the question at this index was answered, one list of picks per question
     Answer(usize, Vec<Vec<String>>),
     ImplementPlan,
+    // the message at this index was picked to edit from, rewinding the chat to before it
+    Rewind(usize),
+    // something done to a waiting message, by its place in the queue
+    Queue(usize, mux_core::protocol::QueueAction),
+    Resume,
     Decide(usize, Decision),
 }
 
@@ -150,6 +156,8 @@ pub struct ChatView<'a> {
     attachments: Option<&'a mut Vec<String>>,
     dropping: bool,
     commands: &'a [SlashCommand],
+    queue: &'a [mux_core::protocol::Queued],
+    held: bool,
 }
 
 impl<'a> ChatView<'a> {
@@ -163,7 +171,16 @@ impl<'a> ChatView<'a> {
             attachments: None,
             dropping: false,
             commands: &[],
+            queue: &[],
+            held: false,
         }
+    }
+
+    // messages sent while the agent works, shown after the chat until they go out
+    pub fn queue(mut self, queue: &'a [mux_core::protocol::Queued], held: bool) -> Self {
+        self.queue = queue;
+        self.held = held;
+        self
     }
 
     pub fn commands(mut self, commands: &'a [SlashCommand]) -> Self {
@@ -285,7 +302,18 @@ impl<'a> ChatView<'a> {
                                     text,
                                     attachments,
                                     queued,
-                                } => cards::user_message(ui, text, attachments, *queued),
+                                } => {
+                                    // a rewind waits for the agent to finish, so nothing is cut out from under it
+                                    if cards::user_message(
+                                        ui,
+                                        text,
+                                        attachments,
+                                        *queued,
+                                        !self.running,
+                                    ) {
+                                        action = Some(ChatAction::Rewind(index));
+                                    }
+                                }
                                 ChatItem::Assistant(text) => {
                                     if let Some(target) = markdown(ui, text) {
                                         action = Some(ChatAction::OpenLink(target));
@@ -334,6 +362,17 @@ impl<'a> ChatView<'a> {
                                 }
                                 ChatItem::Thinking => cards::thinking(ui, turn),
                             });
+                        }
+                        if !self.queue.is_empty() {
+                            match queue::queue(ui, self.queue, self.held) {
+                                Some(queue::QueueEvent::Change(index, change)) => {
+                                    action = Some(ChatAction::Queue(index, change))
+                                }
+                                Some(queue::QueueEvent::Resume) => {
+                                    action = Some(ChatAction::Resume)
+                                }
+                                None => {}
+                            }
                         }
                         ui.add_space(space::SM);
                     });

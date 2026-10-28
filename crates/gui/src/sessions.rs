@@ -37,6 +37,9 @@ pub struct Local {
     pub context: Option<ContextUsage>,
     // the skills the agent can be pointed at with `$name`, offered alongside mux's commands
     pub skills: Vec<Skill>,
+    // messages waiting for the agent to finish, and whether a stop is holding them
+    pub queue: Vec<wire::Queued>,
+    pub held: bool,
     // files picked or dropped for the next message
     pub attachments: Vec<String>,
     transcript: Vec<AgentItem>,
@@ -223,6 +226,12 @@ impl Sessions {
             ServerMsg::Output { id, data } => {
                 if let Some(terminal) = self.locals.get_mut(&id).and_then(|l| l.terminal.as_mut()) {
                     terminal.feed(&data);
+                }
+            }
+            ServerMsg::AgentQueue { id, queue, held } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.queue = queue;
+                    local.held = held;
                 }
             }
             ServerMsg::AgentSkills { id, skills } => {
@@ -1009,6 +1018,7 @@ fn chat_items(
                 text,
                 attachments,
                 queued,
+                ..
             } => items.push(ChatItem::User {
                 text: text.clone(),
                 attachments: attachments.clone(),
@@ -1261,6 +1271,7 @@ mod tests {
             text: "go".into(),
             attachments: Vec::new(),
             queued: false,
+            rewind: None,
         };
         let edit = |path: &str| AgentItem::FileChange {
             changes: vec![wire::FileChange {
@@ -1364,6 +1375,7 @@ mod tests {
                 text: "hi".into(),
                 attachments: Vec::new(),
                 queued: false,
+                rewind: None,
             },
             AgentItem::FileChange {
                 changes: vec![

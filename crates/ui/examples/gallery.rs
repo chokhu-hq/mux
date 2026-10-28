@@ -397,7 +397,10 @@ impl eframe::App for Gallery {
                                                         | ChatAction::OpenDiff(_)
                                                         | ChatAction::Command(_)
                                                         | ChatAction::Answer(..)
-                                                        | ChatAction::ImplementPlan,
+                                                        | ChatAction::ImplementPlan
+                                                        | ChatAction::Rewind(_)
+                                                        | ChatAction::Queue(..)
+                                                        | ChatAction::Resume,
                                                     ) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;

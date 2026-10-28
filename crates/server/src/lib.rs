@@ -428,8 +428,10 @@ impl Server {
                     context: agent.context,
                 };
                 let (skills, provider) = (agent.skills(), agent.settings.provider);
+                let (queue, held) = (agent.queue.clone(), agent.held);
                 self.send(client, msg);
                 self.send(client, ServerMsg::AgentSkills { id, skills });
+                self.send(client, ServerMsg::AgentQueue { id, queue, held });
                 self.fetch_skills(id, provider);
                 for provider in Provider::ALL {
                     if !self.models.contains_key(&provider) {
@@ -506,6 +508,44 @@ impl Server {
                 self.agent_changed(id);
             }
             ClientMsg::AgentCompact { id } => self.agent_compact(id),
+            ClientMsg::AgentQueue { id, index, action } => {
+                let send = self.agent(id).change_queue(index, action);
+                self.agent_changed(id);
+                if let Some(message) = send {
+                    self.agent_send(id, message.text, message.attachments);
+                }
+            }
+            ClientMsg::AgentResume { id } => {
+                let send = self.agent(id).resume();
+                self.agent_changed(id);
+                if let Some(message) = send {
+                    self.agent_send(id, message.text, message.attachments);
+                }
+            }
+            ClientMsg::AgentRewind { id, message } => {
+                let path = self.agent_path(id);
+                let agent = self.agent(id);
+                if agent.rewind(message) {
+                    if let Err(err) = agent.save(&path) {
+                        eprintln!("mux: could not save {}: {err}", path.display());
+                    }
+                    // the transcript got shorter, which item by item updates can't say, so it's sent whole
+                    let msg = ServerMsg::AgentTranscript {
+                        id,
+                        items: agent.items.clone(),
+                        busy: agent.busy,
+                        settings: agent.settings.clone(),
+                        context: agent.context,
+                    };
+                    let summary = agent.summary();
+                    self.send_watchers(id, msg);
+                    if let Some(info) = self.store.session_mut(id) {
+                        info.summary = Some(summary);
+                    }
+                    self.agent_changed(id);
+                    self.changed();
+                }
+            }
             ClientMsg::AgentAnswer {
                 id,
                 question,
@@ -690,6 +730,7 @@ impl Server {
         let usage = agent.usage.take();
         let context = agent.take_context();
         let skills = agent.take_skills();
+        let queue = agent.take_queue();
         // saved when a turn starts or ends rather than on every streamed word, and the sidebar's summary with it
         let settled = busy.is_some() || (!agent.busy && !items.is_empty());
         if settled && let Err(err) = agent.save(&path) {
@@ -710,6 +751,15 @@ impl Server {
         }
         if let Some(skills) = skills {
             self.send_watchers(id, ServerMsg::AgentSkills { id, skills });
+        }
+        if let Some((queue, held)) = queue {
+            // waiting messages are kept even when nothing else about the chat changed
+            if let Some(agent) = self.agents.get(&id)
+                && let Err(err) = agent.save(&path)
+            {
+                eprintln!("mux: could not save {}: {err}", path.display());
+            }
+            self.send_watchers(id, ServerMsg::AgentQueue { id, queue, held });
         }
         if let Some(info) = self.store.session_mut(id)
             && info.status != status

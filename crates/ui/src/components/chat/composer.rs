@@ -214,7 +214,7 @@ impl<'a> Composer<'a> {
                             }
                         } else {
                             let tip = if self.running {
-                                "Send now, the agent will pick it up"
+                                "Queue it for when the agent finishes"
                             } else {
                                 "Send"
                             };

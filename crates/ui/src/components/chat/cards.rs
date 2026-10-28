@@ -14,12 +14,19 @@ use super::{
 use crate::components::{Button, TooltipExt, hover_t, reveal};
 use crate::icons;
 use crate::motion::{self, Spring, spring_bool};
-use crate::theme::{self, font, icon, radius, space, text};
+use crate::theme::{self, control, font, icon, radius, space, text};
 
 const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
 
-pub fn user_message(ui: &mut Ui, message: &str, attachments: &[String], queued: bool) {
+// one of the person's messages, returning true when they asked to rewind the chat to it
+pub fn user_message(
+    ui: &mut Ui,
+    message: &str,
+    attachments: &[String],
+    queued: bool,
+    rewindable: bool,
+) -> bool {
     let p = theme::palette(ui);
     // a message still waiting its turn sits back a little until the agent picks it up
     let waiting = spring_bool(
@@ -33,10 +40,13 @@ pub fn user_message(ui: &mut Ui, message: &str, attachments: &[String], queued: 
     if !attachments.is_empty() {
         super::attachments::sent(ui, attachments);
     }
-    if !message.is_empty() {
-        bubble(ui, message);
-    }
+    let top = ui.cursor().top();
+    let bubble_rect = (!message.is_empty()).then(|| bubble(ui, message));
     ui.set_opacity(opacity);
+    let rewind = match bubble_rect {
+        Some(rect) if rewindable => rewind_button(ui, rect, top),
+        _ => false,
+    };
     if waiting > 0.01 {
         let (rect, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), 16.0 * waiting), Sense::hover());
@@ -61,9 +71,78 @@ pub fn user_message(ui: &mut Ui, message: &str, attachments: &[String], queued: 
             color,
         );
     }
+    rewind
 }
 
-fn bubble(ui: &mut Ui, message: &str) {
+// a small edit button left of the bubble while the message is hovered, asking before it rewinds anything
+fn rewind_button(ui: &mut Ui, bubble: Rect, top: f32) -> bool {
+    let p = theme::palette(ui);
+    let id = ui.make_persistent_id("rewind");
+    let area = Rect::from_min_max(pos2(ui.min_rect().left(), top), bubble.max);
+    let button = Rect::from_center_size(
+        pos2(
+            bubble.left() - space::SM - control::SM / 2.0,
+            bubble.top() + 17.0,
+        ),
+        vec2(control::SM, control::SM),
+    );
+    let response = ui.interact(button, id, Sense::click());
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    let near = ui.rect_contains_pointer(area) || response.hovered() || menu_open;
+    let shown = spring_bool(ui.ctx(), id.with("shown"), near, Spring::QUICK);
+    if shown > 0.01 {
+        let t = hover_t(ui, &response).max(if menu_open { 1.0 } else { 0.0 });
+        ui.painter().rect_filled(
+            button,
+            CornerRadius::same(radius::MD),
+            p.hover.gamma_multiply(t * shown),
+        );
+        glyph(
+            ui,
+            button.center(),
+            icons::PENCIL_SIMPLE,
+            icon::MD,
+            p.text_faint.lerp_to_gamma(p.text, t).gamma_multiply(shown),
+        );
+    }
+    let response = response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .tip("Edit from here");
+    let mut rewind = false;
+    egui::Popup::menu(&response)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(space::XS)
+        .show(|ui| {
+            ui.set_width(260.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(space::XS);
+            ui.horizontal(|ui| {
+                ui.add_space(space::SM);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "This message and everything after it leave the chat, and the agent forgets them. Files stay as they are.",
+                        )
+                        .font(font::regular(text::SM + 1.0))
+                        .color(p.text_muted),
+                    )
+                    .wrap(),
+                );
+            });
+            ui.add_space(space::SM);
+            if crate::components::MenuItem::new("Rewind and edit")
+                .icon(icons::PENCIL_SIMPLE)
+                .show(ui)
+                .clicked()
+            {
+                rewind = true;
+                ui.close();
+            }
+        });
+    rewind
+}
+
+fn bubble(ui: &mut Ui, message: &str) -> Rect {
     let p = theme::palette(ui);
     // lay the text out first so the bubble hugs short messages instead of filling the row
     let max = ui.available_width() * 0.8 - 24.0;
@@ -113,8 +192,11 @@ fn bubble(ui: &mut Ui, message: &str) {
             .show(ui, |ui| {
                 ui.set_width(width);
                 ui.add(Label::new(galley));
-            });
-    });
+            })
+            .response
+            .rect
+    })
+    .inner
 }
 
 // one light line per tool call, with its output a click away

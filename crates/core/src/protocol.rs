@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 20;
+pub const PROTOCOL: u32 = 22;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -82,6 +82,10 @@ pub enum AgentItem {
         // sent while the agent was busy and still waiting its turn
         #[serde(default)]
         queued: bool,
+        // where the agent's own history stood before this message: claude's reply before it, empty for none,
+        // or the codex turn it started
+        #[serde(default)]
+        rewind: Option<String>,
     },
     Assistant {
         text: String,
@@ -250,6 +254,21 @@ impl TokenTotals {
     }
 }
 
+// a message waiting to be sent once the agent finishes what it's doing
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Queued {
+    pub text: String,
+    pub attachments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum QueueAction {
+    Edit(String),
+    Remove,
+    // into the running turn now, or ahead of everything else once the agent stops what it's doing
+    SendNow,
+}
+
 // a reusable set of instructions an agent can be pointed at with `$name`
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
@@ -387,6 +406,21 @@ pub enum ClientMsg {
         id: u64,
         index: usize,
     },
+    // changes one of the messages waiting to be sent
+    AgentQueue {
+        id: u64,
+        index: usize,
+        action: QueueAction,
+    },
+    // lets messages held back by a stop carry on being sent
+    AgentResume {
+        id: u64,
+    },
+    // takes the conversation back to before the user's `message`th message
+    AgentRewind {
+        id: u64,
+        message: usize,
+    },
     // answers an agent's question, one list of picks or typed text per question asked
     AgentAnswer {
         id: u64,
@@ -448,6 +482,12 @@ pub enum ServerMsg {
     AgentContext {
         id: u64,
         context: ContextUsage,
+    },
+    // the messages waiting for the agent, and whether they're held back after a stop
+    AgentQueue {
+        id: u64,
+        queue: Vec<Queued>,
+        held: bool,
     },
     // the skills the agent can be asked to use, for the composer's menus
     AgentSkills {

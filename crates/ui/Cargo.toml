@@ -1,0 +1,13 @@
+[package]
+name = "mux-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mux-core.workspace = true
+egui.workspace = true
+alacritty_terminal.workspace = true
+png.workspace = true
+
+[dev-dependencies]
+eframe.workspace = true

@@ -1,0 +1,258 @@
+mod cards;
+mod composer;
+mod markdown;
+
+use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
+
+pub use composer::{Composer, ComposerAction};
+pub use markdown::markdown;
+
+use crate::components::Icon;
+use crate::icons;
+use crate::theme::{self, space};
+
+const MAX_WIDTH: f32 = 720.0;
+
+pub enum ChatItem {
+    User(String),
+    Assistant(String),
+    Tool(ToolCall),
+    Diff(FileDiff),
+    Permission(PermissionRequest),
+    Thinking,
+}
+
+pub struct ToolCall {
+    pub kind: ToolKind,
+    pub target: String,
+    pub status: ToolStatus,
+    pub output: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolKind {
+    Read,
+    Edit,
+    Run,
+    Search,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+pub struct FileDiff {
+    pub path: String,
+    pub lines: Vec<DiffLine>,
+}
+
+pub struct DiffLine {
+    pub kind: DiffKind,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffKind {
+    Add,
+    Remove,
+    Context,
+}
+
+pub struct PermissionRequest {
+    pub title: String,
+    pub detail: Option<String>,
+    pub decision: Option<Decision>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    AlwaysAllow,
+    Deny,
+}
+
+pub enum ChatAction {
+    Send(String),
+    Stop,
+    Decide(usize, Decision),
+}
+
+pub struct ChatView<'a> {
+    items: &'a [ChatItem],
+    draft: &'a mut String,
+    running: bool,
+}
+
+impl<'a> ChatView<'a> {
+    pub fn new(items: &'a [ChatItem], draft: &'a mut String) -> Self {
+        Self {
+            items,
+            draft,
+            running: false,
+        }
+    }
+
+    pub fn running(mut self, running: bool) -> Self {
+        self.running = running;
+        self
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Option<ChatAction> {
+        let rect = ui.max_rect();
+        let width = (rect.width() - space::LG * 2.0).min(MAX_WIDTH);
+        let left = rect.center().x - width / 2.0;
+        let mut action = None;
+
+        // pinned to the bottom using last frame's height, since egui lays out top to bottom
+        let height_id = ui.scope_id().with("composer-height");
+        let height = ui.data(|d| d.get_temp::<f32>(height_id)).unwrap_or(96.0);
+        let composer = Rect::from_min_max(
+            pos2(left, rect.bottom() - space::MD - height),
+            pos2(left + width, rect.bottom() - space::MD),
+        );
+        let mut bottom = ui.new_child(UiBuilder::new().max_rect(composer));
+        if let Some(composer) = Composer::new(self.draft)
+            .running(self.running)
+            .show(&mut bottom)
+        {
+            action = Some(match composer {
+                ComposerAction::Send(text) => ChatAction::Send(text),
+                ComposerAction::Stop => ChatAction::Stop,
+            });
+        }
+        let measured = bottom.min_rect().height();
+        if (measured - height).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(height_id, measured));
+            ui.ctx().request_discard("composer height changed");
+        }
+        let list = Rect::from_min_max(rect.min, pos2(rect.max.x, composer.top() - space::SM));
+
+        let mut list_ui = ui.new_child(UiBuilder::new().max_rect(list));
+        list_ui.set_clip_rect(list.intersect(ui.clip_rect()));
+        if self.items.is_empty() {
+            empty(&mut list_ui);
+            ui.allocate_rect(rect, Sense::hover());
+            return action;
+        }
+        ScrollArea::vertical()
+            .auto_shrink(false)
+            .stick_to_bottom(true)
+            .show(&mut list_ui, |ui| {
+                // center the column inside the scroll area so the scrollbar stays at the edge
+                ui.horizontal_top(|ui| {
+                    ui.add_space(left - rect.left());
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        ui.spacing_mut().item_spacing.y = space::MD;
+                        ui.add_space(space::LG);
+                        for (i, item) in self.items.iter().enumerate() {
+                            ui.push_id(i, |ui| match item {
+                                ChatItem::User(text) => cards::user_message(ui, text),
+                                ChatItem::Assistant(text) => markdown(ui, text),
+                                ChatItem::Tool(tool) => cards::tool_call(ui, tool),
+                                ChatItem::Diff(diff) => cards::diff(ui, diff),
+                                ChatItem::Permission(request) => {
+                                    if let Some(decision) = cards::permission(ui, request) {
+                                        action = Some(ChatAction::Decide(i, decision));
+                                    }
+                                }
+                                ChatItem::Thinking => cards::thinking(ui),
+                            });
+                        }
+                        ui.add_space(space::SM);
+                    });
+                });
+            });
+
+        ui.allocate_rect(rect, Sense::hover());
+        action
+    }
+}
+
+// keeps a single thinking indicator, always at the end of the conversation
+pub fn set_thinking(items: &mut Vec<ChatItem>, thinking: bool) {
+    items.retain(|item| !matches!(item, ChatItem::Thinking));
+    if thinking {
+        items.push(ChatItem::Thinking);
+    }
+}
+
+fn empty(ui: &mut Ui) {
+    let p = theme::palette(ui);
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * 0.4);
+        Icon::new(icons::CHAT_CIRCLE)
+            .size(28.0)
+            .color(p.text_faint)
+            .show(ui);
+        ui.add_space(space::SM);
+        ui.label(egui::RichText::new("Start a conversation").color(p.text_muted));
+    });
+}
+
+// placeholder conversation for the gallery and app until agents are wired up
+pub fn sample() -> Vec<ChatItem> {
+    let tool = |kind, target: &str, status, output: Option<&str>| {
+        ChatItem::Tool(ToolCall {
+            kind,
+            target: target.to_owned(),
+            status,
+            output: output.map(str::to_owned),
+        })
+    };
+    let line = |kind, text: &str| DiffLine {
+        kind,
+        text: text.to_owned(),
+    };
+    vec![
+        ChatItem::User(
+            "Refactor the auth middleware to use the new session store, and add tests for expired sessions.".to_owned(),
+        ),
+        ChatItem::Assistant(
+            "I'll start by reading the current middleware and finding where sessions are loaded.".to_owned(),
+        ),
+        tool(
+            ToolKind::Read,
+            "src/middleware/auth.rs",
+            ToolStatus::Done,
+            Some("pub async fn auth(req: Request, next: Next) -> Response {\n    let cookie = req.headers().get(COOKIE);\n    let session = decode_cookie(cookie)?;\n    ..."),
+        ),
+        tool(
+            ToolKind::Search,
+            "SessionStore",
+            ToolStatus::Done,
+            Some("src/session/store.rs:12  pub struct SessionStore\nsrc/session/store.rs:40  impl SessionStore\nsrc/main.rs:28          let store = SessionStore::new(pool);"),
+        ),
+        ChatItem::Assistant(
+            "The middleware decodes the cookie itself and never checks expiry. Here's the plan:\n\n- Move the lookup into `SessionStore::get`\n- Return **401** when a session has expired\n- Add tests for the valid and expired paths\n\n```rust\nlet session = store.get(&token).await?.ok_or(Unauthorized)?;\n```".to_owned(),
+        ),
+        ChatItem::Diff(FileDiff {
+            path: "src/middleware/auth.rs".to_owned(),
+            lines: vec![
+                line(DiffKind::Context, "pub async fn auth(req: Request, next: Next) -> Response {"),
+                line(DiffKind::Remove, "    let cookie = req.headers().get(COOKIE);"),
+                line(DiffKind::Remove, "    let session = decode_cookie(cookie)?;"),
+                line(DiffKind::Add, "    let token = session_token(&req)?;"),
+                line(DiffKind::Add, "    let session = store.get(&token).await?.ok_or(Unauthorized)?;"),
+                line(DiffKind::Add, "    if session.is_expired() {"),
+                line(DiffKind::Add, "        return Err(Unauthorized);"),
+                line(DiffKind::Add, "    }"),
+                line(DiffKind::Context, "    req.extensions_mut().insert(session);"),
+                line(DiffKind::Context, "    next.run(req).await"),
+                line(DiffKind::Context, "}"),
+                line(DiffKind::Context, ""),
+                line(DiffKind::Add, "fn session_token(req: &Request) -> Result<String> {"),
+                line(DiffKind::Add, "    cookie(req, \"sid\").ok_or(Unauthorized)"),
+                line(DiffKind::Add, "}"),
+            ],
+        }),
+        ChatItem::Permission(PermissionRequest {
+            title: "Run a command?".to_owned(),
+            detail: Some("cargo test -p auth".to_owned()),
+            decision: None,
+        }),
+    ]
+}

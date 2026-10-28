@@ -1,0 +1,12 @@
+[package]
+name = "mux-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mux-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+portable-pty.workspace = true
+alacritty_terminal.workspace = true

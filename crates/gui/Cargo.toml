@@ -1,0 +1,12 @@
+[package]
+name = "mux-gui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mux-core.workspace = true
+mux-ui.workspace = true
+mux-server.workspace = true
+eframe.workspace = true
+alacritty_terminal.workspace = true
+rfd = "0.17"

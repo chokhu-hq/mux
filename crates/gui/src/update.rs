@@ -4,6 +4,7 @@ use std::sync::mpsc::{self, Receiver};
 use eframe::egui;
 use serde_json::Value;
 
+const REPO: &str = "https://api.github.com/repos/chokhu-hq/mux";
 const RELEASES: &str = "https://api.github.com/repos/chokhu-hq/mux/releases";
 
 // release builds learn their channel and commit from ci, and a build from source never checks
@@ -65,7 +66,13 @@ fn newer() -> Option<Update> {
             let release = fetch(&format!("{RELEASES}/tags/experimental"))?;
             let commit = release["target_commitish"].as_str()?;
             let url = release["html_url"].as_str()?.to_owned();
-            (Some(commit) != COMMIT).then(|| Update {
+            // the release can lag behind this build while a newer one is still being made, so only a later commit counts
+            let ours = COMMIT?;
+            if commit == ours {
+                return None;
+            }
+            let compared = fetch(&format!("{REPO}/compare/{ours}...{commit}"))?;
+            (compared["status"] == "ahead").then(|| Update {
                 version: format!("Experimental {}", &commit[..commit.len().min(7)]),
                 url,
             })

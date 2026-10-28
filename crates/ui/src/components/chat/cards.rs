@@ -843,8 +843,9 @@ pub fn thinking(ui: &mut Ui, turn: usize) {
     let label = label.as_str();
     let count = label.chars().count() as f32;
     // the band starts off the left edge and leaves past the right one, so the sweep never pops in
+    // with reduced motion the band waits off the left edge, so no letter glows
     let band = if still {
-        f32::NAN
+        -1.0
     } else {
         (time / SHIMMER_SECONDS).fract() * 1.6 - 0.3
     };

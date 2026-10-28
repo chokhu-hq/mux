@@ -36,7 +36,8 @@ pub fn command(program: &str) -> std::process::Command {
     match wsl() {
         Some(distro) => {
             let mut command = crate::command("wsl.exe");
-            command.args(["-d", &distro, "--", program]);
+            // --exec skips the default shell, which would otherwise reinterpret paths with spaces or quotes
+            command.args(["-d", &distro, "--exec", program]);
             command
         }
         None => crate::command(program),

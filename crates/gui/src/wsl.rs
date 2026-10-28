@@ -1,5 +1,6 @@
 // the server can run inside wsl while this app runs on windows, as vs code's remote does: the app
 // installs a matching linux server there, starts it, and reaches it over a port with the secret it wrote
+// every call uses --exec, because `--` hands the line to the default shell, which expands the script's variables first
 use std::io::{self, Write};
 use std::net::TcpStream;
 use std::process::Stdio;
@@ -70,7 +71,7 @@ pub fn installed<'a>(distro: &str, programs: &[&'a str]) -> Vec<&'a str> {
 esac"#
     );
     let Ok(output) = mux_core::command("wsl.exe")
-        .args(["-d", distro, "--", "sh", "-c", &script])
+        .args(["-d", distro, "--exec", "sh", "-c", &script])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -93,7 +94,7 @@ esac"#
 fn reach(distro: &str) -> io::Result<TcpStream> {
     let script = r#"d="${XDG_DATA_HOME:-$HOME/.local/share}/mux"; printf '%s\n' "$d"; cat "$d/server.address""#;
     let output = mux_core::command("wsl.exe")
-        .args(["-d", distro, "--", "sh", "-c", script])
+        .args(["-d", distro, "--exec", "sh", "-c", script])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()?;
@@ -148,7 +149,7 @@ esac
     }
     let output = std::fs::File::create(&log)?;
     mux_core::command("wsl.exe")
-        .args(["-d", distro, "--cd", "~", "--", "sh", "-c", &script])
+        .args(["-d", distro, "--cd", "~", "--exec", "sh", "-c", &script])
         .stdin(Stdio::null())
         .stdout(output.try_clone()?)
         .stderr(output)

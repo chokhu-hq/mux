@@ -17,6 +17,8 @@ pub enum ComposerAction {
     Compact,
     // one of mux's own slash commands was picked
     Command(String),
+    // up was pressed in an empty box while messages wait, to take them back and change them
+    EditQueued,
 }
 
 // how full the context window gets before the composer suggests compacting
@@ -32,6 +34,8 @@ pub struct Composer<'a> {
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
     commands: &'a [super::SlashCommand],
+    history: &'a [&'a str],
+    queued: bool,
 }
 
 impl<'a> Composer<'a> {
@@ -44,7 +48,21 @@ impl<'a> Composer<'a> {
             context: None,
             attachments: None,
             commands: &[],
+            history: &[],
+            queued: false,
         }
+    }
+
+    // messages sent before, oldest first, that up and down step through
+    pub fn history(mut self, history: &'a [&'a str]) -> Self {
+        self.history = history;
+        self
+    }
+
+    // whether messages are waiting, which up takes back before reaching the history
+    pub fn queued(mut self, queued: bool) -> Self {
+        self.queued = queued;
+        self
     }
 
     // what typing a slash offers
@@ -85,6 +103,17 @@ impl<'a> Composer<'a> {
         let p = theme::palette(ui);
         let edit_id = ui.scope_id().with("mux-composer");
         let focused = ui.memory(|m| m.has_focus(edit_id));
+        // text put in from outside, like waiting messages taken back or a rewound one, is continued from its end
+        let seen_id = edit_id.with("seen");
+        let seen = fingerprint(self.draft);
+        if ui
+            .data(|d| d.get_temp::<u64>(seen_id))
+            .is_some_and(|last| last != seen)
+            && !self.draft.is_empty()
+            && !focused_typing(ui)
+        {
+            caret_to_end(ui, edit_id, self.draft);
+        }
         // pasted pictures and copied files become attachments, before the text edit sees the paste as text
         if focused && let Some(attachments) = self.attachments.as_deref_mut() {
             for path in super::attachments::take_pasted(ui) {
@@ -111,6 +140,10 @@ impl<'a> Composer<'a> {
             ) {
                 picked = Some(ComposerAction::Command(name));
             }
+        }
+        if focused && picked.is_none() && recall(ui, edit_id, self.draft, self.history, self.queued)
+        {
+            picked = Some(ComposerAction::EditQueued);
         }
         // enter sends and shift+enter falls through to the text edit as a newline
         // messages can go out while the agent works, the agent picks them up as it goes
@@ -260,6 +293,8 @@ impl<'a> Composer<'a> {
             self.draft.clear();
             action = Some(ComposerAction::Send(message));
         }
+        let seen = fingerprint(self.draft);
+        ui.data_mut(|d| d.insert_temp(seen_id, seen));
         action
     }
 }
@@ -355,4 +390,89 @@ fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response 
     } else {
         response
     }
+}
+
+// up in an empty box takes back what's waiting, or else steps back through what was sent, and down steps forward,
+// the way claude code's prompt does, returning true when the waiting messages should come back to be changed
+fn recall(
+    ui: &mut Ui,
+    edit_id: egui::Id,
+    draft: &mut String,
+    history: &[&str],
+    queued: bool,
+) -> bool {
+    let at_id = edit_id.with("recall");
+    // how far back the box is showing, counted from the newest message
+    let mut at: Option<usize> = ui.data(|d| d.get_temp(at_id));
+    // typing over a recalled message leaves the history behind
+    if at.is_some_and(|n| history.iter().rev().nth(n) != Some(&draft.as_str())) {
+        at = None;
+    }
+    let mut taken_back = false;
+    if draft.is_empty() || at.is_some() {
+        let (up, down) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                at.is_some() && i.consume_key(Modifiers::NONE, Key::ArrowDown),
+            )
+        });
+        if up {
+            if queued && at.is_none() {
+                taken_back = true;
+            } else {
+                let next = at.map_or(0, |n| n + 1);
+                if let Some(text) = history.iter().rev().nth(next) {
+                    *draft = (*text).to_owned();
+                    at = Some(next);
+                    caret_to_end(ui, edit_id, draft);
+                }
+            }
+        } else if down && let Some(n) = at {
+            if n == 0 {
+                draft.clear();
+                at = None;
+            } else if let Some(text) = history.iter().rev().nth(n - 1) {
+                *draft = (*text).to_owned();
+                at = Some(n - 1);
+                caret_to_end(ui, edit_id, draft);
+            }
+        }
+    }
+    ui.data_mut(|d| match at {
+        Some(n) => {
+            d.insert_temp(at_id, n);
+        }
+        None => {
+            d.remove_temp::<usize>(at_id);
+        }
+    });
+    taken_back
+}
+
+fn caret_to_end(ui: &Ui, edit_id: egui::Id, text: &str) {
+    let mut state = TextEdit::load_state(ui.ctx(), edit_id).unwrap_or_default();
+    let end = egui::text::CCursor::new(text.chars().count());
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(end)));
+    state.store(ui.ctx(), edit_id);
+}
+
+// keys or text arriving this frame mean the change is the person typing, not text put in from outside
+fn focused_typing(ui: &Ui) -> bool {
+    ui.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Key { .. }
+            )
+        })
+    })
+}
+
+fn fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }

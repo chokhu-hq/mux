@@ -2332,6 +2332,37 @@ fn agent_chat(
         Some(ChatAction::Queue(index, action)) => {
             outbox.push(ClientMsg::AgentQueue { id, index, action })
         }
+        // waiting messages come back into the box to change, ahead of anything already typed, and leave the queue
+        Some(ChatAction::EditQueued(mut indices)) => {
+            indices.retain(|&i| i < local.queue.len());
+            let texts: Vec<String> = indices
+                .iter()
+                .map(|&i| local.queue[i].text.clone())
+                .collect();
+            for &i in &indices {
+                // they were sent as the server sees them, and the box holds this machine's paths
+                for path in &local.queue[i].attachments {
+                    let path = mux_core::paths::local(path);
+                    if !local.attachments.contains(&path) {
+                        local.attachments.push(path);
+                    }
+                }
+            }
+            let mut parts = texts;
+            if !local.draft.trim().is_empty() {
+                parts.push(local.draft.trim_end().to_owned());
+            }
+            local.draft = parts.join("\n\n");
+            indices.sort_unstable();
+            for &i in indices.iter().rev() {
+                local.queue.remove(i);
+                outbox.push(ClientMsg::AgentQueue {
+                    id,
+                    index: i,
+                    action: wire::QueueAction::Remove,
+                });
+            }
+        }
         Some(ChatAction::Resume) => outbox.push(ClientMsg::AgentResume { id }),
         Some(ChatAction::StopBackground(task)) => {
             outbox.push(ClientMsg::AgentStopBackground { id, task })

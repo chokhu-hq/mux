@@ -619,6 +619,26 @@ impl Agent {
         std::mem::take(&mut self.queue_changed).then(|| (self.queue.clone(), self.held))
     }
 
+    // a tool call is where claude code slips waiting messages in, since the agent reads them with the tool's result,
+    // so they go to the agent then rather than waiting for the turn to end
+    fn deliver_queued(&mut self) {
+        let steerable = match self.settings.provider {
+            Provider::Claude => true,
+            Provider::Codex => self.thread_live && self.turn_id.is_some(),
+            // opencode can't take a message mid turn, so its queue waits for the end
+            Provider::OpenCode => false,
+        };
+        if !steerable || self.held || !self.busy || self.queue.is_empty() || self.process.is_none()
+        {
+            return;
+        }
+        self.queue_changed = true;
+        for message in std::mem::take(&mut self.queue) {
+            self.record(&message.text, &message.attachments, true);
+            self.transmit(message.text, message.attachments, true);
+        }
+    }
+
     // the next waiting message goes out once a turn ends, one turn each
     fn next_queued(&mut self) {
         if self.held || self.busy || self.queue.is_empty() || self.process.is_none() {
@@ -647,12 +667,13 @@ impl Agent {
                 if !self.busy || self.process.is_none() {
                     return Some(message);
                 }
-                if self.settings.provider != Provider::Codex {
-                    // only codex can take a message mid reply, so the reply stops and this one goes next
+                if self.settings.provider == Provider::OpenCode {
+                    // opencode can't take a message mid reply, so the reply stops and this one goes next
                     self.queue.insert(0, message);
                     self.stop();
                     self.held = false;
                 } else {
+                    // claude reads it at its next step and codex joins it to the running turn
                     self.record(&message.text, &message.attachments, true);
                     self.transmit(message.text, message.attachments, true);
                 }
@@ -1125,6 +1146,13 @@ impl Agent {
             self.compacting = Some(index);
         }
         self.by_codex_id.insert(id, index);
+        // codex takes waiting messages into the turn at a tool call, the same point claude does
+        if matches!(
+            self.items[index],
+            AgentItem::Command { .. } | AgentItem::FileChange { .. }
+        ) {
+            self.deliver_queued();
+        }
     }
 
     fn item_completed(&mut self, item: &Value) {
@@ -1297,7 +1325,10 @@ impl Agent {
                                 }
                             }
                         }
-                        Some("tool_use") => self.claude_tool(block),
+                        Some("tool_use") => {
+                            self.claude_tool(block);
+                            self.deliver_queued();
+                        }
                         // the whole thought arrives once it's done, and fills in a stream that carried no words
                         Some("thinking") => {
                             let full = block["thinking"].as_str().unwrap_or_default();
@@ -2450,6 +2481,40 @@ mod tests {
         queue(&mut agent, "never");
         agent.change_queue(0, QueueAction::Remove);
         assert!(agent.queue.is_empty());
+    }
+
+    // claude 2.1.312 read a message written during a running command right after that command's result
+    #[test]
+    fn waiting_messages_go_to_claude_at_its_next_tool_call() {
+        let mut agent = claude_agent();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        agent.process = Some(Process::fake(tx));
+        agent.set_busy(true);
+        agent.queue.push(Queued {
+            text: "also check the tests".into(),
+            attachments: Vec::new(),
+        });
+        let tool = json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "id": "t1", "name": "Bash", "input": { "command": "sleep 8" } }
+        ] } });
+        agent.handle(tool.clone());
+        assert!(agent.queue.is_empty());
+        assert!(
+            matches!(agent.items.last(), Some(AgentItem::User { text, .. }) if text == "also check the tests")
+        );
+        let sent: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|line| serde_json::from_str(&line).unwrap())
+            .collect();
+        assert!(sent.iter().any(|m| m["type"] == "user"));
+
+        // a queue held by a stop stays put
+        agent.queue.push(Queued {
+            text: "later".into(),
+            attachments: Vec::new(),
+        });
+        agent.held = true;
+        agent.handle(tool);
+        assert_eq!(agent.queue.len(), 1);
     }
 
     #[test]

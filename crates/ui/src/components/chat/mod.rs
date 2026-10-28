@@ -152,6 +152,8 @@ pub enum ChatAction {
     Rewind(usize),
     // something done to a waiting message, by its place in the queue
     Queue(usize, mux_core::protocol::QueueAction),
+    // waiting messages, by their places in the queue, taken back into the composer to change
+    EditQueued(Vec<usize>),
     Resume,
     Decide(usize, Decision),
     // a command left running in the background, by the id the agent gave it
@@ -250,10 +252,34 @@ impl<'a> ChatView<'a> {
         if let Some(task) = background::strip(&mut bottom, self.background) {
             action = Some(ChatAction::StopBackground(task));
         }
+        if let Some(event) = queue::strip(&mut bottom, self.queue, self.held) {
+            use mux_core::protocol::QueueAction;
+            action = Some(match event {
+                queue::QueueEvent::SendNow(i) => ChatAction::Queue(i, QueueAction::SendNow),
+                queue::QueueEvent::Remove(i) => ChatAction::Queue(i, QueueAction::Remove),
+                queue::QueueEvent::Edit(i) => ChatAction::EditQueued(vec![i]),
+                queue::QueueEvent::Resume => ChatAction::Resume,
+            });
+        }
+        // what was sent before, oldest first, for stepping back through with the up key
+        let history: Vec<&str> = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ChatItem::User {
+                    text,
+                    queued: false,
+                    ..
+                } if !text.trim().is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         let mut input = Composer::new(self.draft)
             .running(self.running)
             .context(self.context)
-            .commands(self.commands);
+            .commands(self.commands)
+            .history(&history)
+            .queued(!self.queue.is_empty());
         if let Some(attachments) = self.attachments {
             input = input.attachments(attachments);
         }
@@ -267,6 +293,9 @@ impl<'a> ChatView<'a> {
                 ComposerAction::Stop => ChatAction::Stop,
                 ComposerAction::Compact => ChatAction::Compact,
                 ComposerAction::Command(name) => ChatAction::Command(name),
+                ComposerAction::EditQueued => {
+                    ChatAction::EditQueued((0..self.queue.len()).collect())
+                }
             });
         }
         let measured = bottom.min_rect().height();
@@ -397,17 +426,6 @@ impl<'a> ChatView<'a> {
                                 } => cards::reasoning(ui, text, *started, *ended),
                                 ChatItem::Thinking => cards::thinking(ui, turn),
                             });
-                        }
-                        if !self.queue.is_empty() {
-                            match queue::queue(ui, self.queue, self.held) {
-                                Some(queue::QueueEvent::Change(index, change)) => {
-                                    action = Some(ChatAction::Queue(index, change))
-                                }
-                                Some(queue::QueueEvent::Resume) => {
-                                    action = Some(ChatAction::Resume)
-                                }
-                                None => {}
-                            }
                         }
                         ui.add_space(space::SM);
                     });

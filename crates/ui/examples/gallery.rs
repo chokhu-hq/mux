@@ -400,6 +400,7 @@ impl eframe::App for Gallery {
                                                         | ChatAction::ImplementPlan
                                                         | ChatAction::Rewind(_)
                                                         | ChatAction::Queue(..)
+                                                        | ChatAction::EditQueued(_)
                                                         | ChatAction::Resume
                                                         | ChatAction::StopBackground(_),
                                                     ) => {}

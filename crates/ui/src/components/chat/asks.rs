@@ -4,7 +4,7 @@ use egui::{
 use mux_core::protocol::{Question, TodoStatus, TodoStep};
 
 use super::markdown;
-use crate::components::{Button, TextInput, hover_t};
+use crate::components::{Button, TextInput, TooltipExt, hover_t};
 use crate::icons;
 use crate::motion;
 use crate::theme::{self, font, icon, radius, space, text};
@@ -72,30 +72,60 @@ pub fn question(
 ) -> Option<Vec<Vec<String>>> {
     let p = theme::palette(ui);
     if let Some(answers) = answers {
-        // once answered it shrinks to a line, like a decided permission
-        let (glyph, color, line) = if answers.is_empty() {
-            (icons::X_CIRCLE, p.text_faint, "Not answered".to_owned())
+        // once answered it shrinks to one row like a decided permission, cut short with the rest a hover away
+        let said: Vec<String> = answers.iter().map(|a| a.join(", ")).collect();
+        let said = said.join(" · ");
+        let (glyph, label, color) = if answers.is_empty() {
+            (icons::X_CIRCLE, "Not answered", p.text_faint)
         } else {
-            let said: Vec<String> = answers.iter().map(|a| a.join(", ")).collect();
-            (
-                icons::CHECK_CIRCLE,
-                p.success,
-                format!("Answered: {}", said.join(" · ")),
-            )
+            (icons::CHECK_CIRCLE, "Answered", p.success)
         };
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = space::SM;
-            ui.label(
-                RichText::new(glyph.to_string())
-                    .font(font::icon(icon::MD))
-                    .color(color),
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), super::cards::ROW),
+            Sense::hover(),
+        );
+        let y = rect.center().y;
+        let mut x = rect.left() + space::SM + icon::MD / 2.0;
+        ui.painter().text(
+            pos2(x, y),
+            Align2::CENTER_CENTER,
+            glyph,
+            font::icon(icon::MD),
+            color,
+        );
+        x += icon::MD / 2.0 + space::SM;
+        let verb = ui.painter().text(
+            pos2(x, y),
+            Align2::LEFT_CENTER,
+            label,
+            font::medium(text::MD),
+            p.text_muted,
+        );
+        if !said.is_empty() {
+            // a typed answer can run over several lines, which the row puts together
+            let line = said.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                line,
+                font::regular(text::MD),
+                p.text_faint,
             );
-            ui.label(
-                RichText::new(line)
-                    .font(font::regular(text::MD))
-                    .color(p.text_muted),
+            job.wrap = egui::text::TextWrapping {
+                max_width: rect.right() - verb.right() - space::SM * 2.0,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let galley = ui.painter().layout_job(job);
+            let cut = galley.elided;
+            ui.painter().galley(
+                pos2(verb.right() + space::SM, y - galley.size().y / 2.0),
+                galley,
+                p.text_faint,
             );
-        });
+            if cut {
+                response.tip(said);
+            }
+        }
         return None;
     }
     let id = ui.make_persistent_id("question");

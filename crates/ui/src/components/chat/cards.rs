@@ -16,7 +16,7 @@ use crate::icons;
 use crate::motion::{self, Spring, spring_bool};
 use crate::theme::{self, control, font, icon, radius, space, text};
 
-const ROW: f32 = 32.0;
+pub(super) const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
 
 // one of the person's messages, returning true when they asked to rewind the chat to it

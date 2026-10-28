@@ -49,6 +49,11 @@ pub struct Prefs {
     // terminal text size, or none for the default
     #[serde(default)]
     pub terminal_text: Option<f32>,
+    // the themes used in dark and light mode, or none for mux's own
+    #[serde(default)]
+    pub dark_theme: Option<String>,
+    #[serde(default)]
+    pub light_theme: Option<String>,
 }
 
 // what a new agent starts with, before anything is picked in its composer

@@ -36,6 +36,7 @@ mod settings;
 #[cfg(unix)]
 mod shell_env;
 mod terminal;
+mod themes;
 mod token_usage;
 mod update;
 #[cfg(windows)]
@@ -135,6 +136,7 @@ struct App {
     // what the titlebar shows for the selected session, filled in while drawing it
     titlebar: Option<TitleBar>,
     prefs: Prefs,
+    themes: themes::Themes,
     // the settings page stands in for the selected session until it's closed
     settings_open: bool,
     settings_tab: settings::Tab,
@@ -198,6 +200,7 @@ impl App {
         #[cfg(windows)]
         mux_core::paths::set_wsl(prefs.wsl.clone());
         let mut app = Self {
+            themes: themes::Themes::load(),
             palette: CommandPalette::default(),
             sidebar: Sidebar::default(),
             sessions: Sessions::default(),
@@ -233,6 +236,7 @@ impl App {
             distros: None,
         };
         app.prefs.apply(ctx);
+        app.themes.apply(ctx, &app.prefs);
         app.sessions.agent_defaults = app.prefs.new_agent.settings();
         app
     }
@@ -800,6 +804,7 @@ impl App {
             tokens: self.sessions.tokens().cloned(),
             distros,
             models: self.sessions.models().clone(),
+            themes: &mut self.themes,
         }
         .show(ui);
         if close {
@@ -809,6 +814,7 @@ impl App {
             let moved = prefs.wsl != self.prefs.wsl;
             self.sessions.agent_defaults = prefs.new_agent.settings();
             prefs.apply(&ctx);
+            self.themes.apply(&ctx, &prefs);
             prefs.save();
             self.prefs = prefs;
             if moved {
@@ -2169,6 +2175,17 @@ impl eframe::App for App {
         }
         self.link.tick(&ctx, &mut self.sessions);
         self.alerts(&ctx);
+        if self.themes.refresh() {
+            self.themes.apply(&ctx, &self.prefs);
+        }
+        // a theme being written is checked for edits even while the app is otherwise idle
+        let custom = [&self.prefs.dark_theme, &self.prefs.light_theme]
+            .into_iter()
+            .flatten()
+            .any(|id| self.themes.find(id).is_some_and(|c| c.custom));
+        if self.settings_open || custom {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
         mux_ui::capture::screenshot(&ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)

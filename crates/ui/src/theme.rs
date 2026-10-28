@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Margin, Shadow, Stroke, Style,
@@ -96,7 +96,7 @@ pub mod control {
     pub const MD: f32 = 28.0;
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub bg: Color32,
     pub surface: Color32,
@@ -244,12 +244,34 @@ pub fn tint(p: &Palette, amount: f32) -> Color32 {
     p.text.gamma_multiply(amount)
 }
 
+// the palettes in use for dark and light mode, swapped when another theme is picked
+static ACTIVE: RwLock<(&'static Palette, &'static Palette)> = RwLock::new((&DARK, &LIGHT));
+
 pub fn palette(ui: &egui::Ui) -> &'static Palette {
+    let active = *ACTIVE.read().unwrap_or_else(|e| e.into_inner());
     if ui.visuals().dark_mode {
-        &DARK
+        active.0
     } else {
-        &LIGHT
+        active.1
     }
+}
+
+// a picked palette is leaked because everything borrows it for the frame, and themes change rarely enough not to matter
+pub fn set_palettes(ctx: &egui::Context, dark: Palette, light: Palette) {
+    let mut active = ACTIVE.write().unwrap_or_else(|e| e.into_inner());
+    if *active.0 == dark && *active.1 == light {
+        return;
+    }
+    if *active.0 != dark {
+        active.0 = Box::leak(Box::new(dark));
+    }
+    if *active.1 != light {
+        active.1 = Box::leak(Box::new(light));
+    }
+    let (dark, light) = *active;
+    drop(active);
+    ctx.style_mut_of(Theme::Dark, |style| apply(style, dark, true));
+    ctx.style_mut_of(Theme::Light, |style| apply(style, light, false));
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -258,8 +280,9 @@ pub fn install(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
     // egui's 40 points a wheel notch crawls through long chats and files
     ctx.options_mut(|o| o.input_options.line_scroll_speed = 90.0);
-    ctx.style_mut_of(Theme::Dark, |style| apply(style, &DARK, true));
-    ctx.style_mut_of(Theme::Light, |style| apply(style, &LIGHT, false));
+    let (dark, light) = *ACTIVE.read().unwrap_or_else(|e| e.into_inner());
+    ctx.style_mut_of(Theme::Dark, |style| apply(style, dark, true));
+    ctx.style_mut_of(Theme::Light, |style| apply(style, light, false));
 }
 
 fn fonts() -> FontDefinitions {
@@ -379,7 +402,8 @@ fn apply(style: &mut Style, p: &Palette, dark: bool) {
     v.warn_fg_color = p.warning;
     v.error_fg_color = p.danger;
     v.selection.bg_fill = p.accent.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, p.accent);
+    // egui paints selected text in this colour, and the accent of some themes is unreadable on its own tint
+    v.selection.stroke = Stroke::new(1.0, p.text);
 
     let shadow = Shadow {
         offset: [0, 8],

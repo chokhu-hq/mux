@@ -11,6 +11,7 @@ png.workspace = true
 egui_extras.workspace = true
 image.workspace = true
 syntect.workspace = true
+two-face.workspace = true
 pulldown-cmark.workspace = true
 
 [dev-dependencies]

@@ -7,13 +7,15 @@ use egui::{
     pos2, vec2,
 };
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, ThemeSet};
+use syntect::highlighting::{
+    Color, FontStyle, ScopeSelectors, StyleModifier, Theme, ThemeItem, ThemeSettings,
+};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 use super::{IconButton, TooltipExt};
 use crate::icons;
-use crate::theme::{self, font, icon, space, text};
+use crate::theme::{self, Palette, font, icon, space, text};
 
 // big enough for any source file, small enough to highlight without a stall
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -57,12 +59,12 @@ pub struct FileView {
     pub lines: Option<(usize, usize)>,
     content: Result<Arc<str>, String>,
     // the coloured file from a background thread, tagged with the theme it was coloured for
-    colored: Arc<Mutex<Option<(bool, LayoutJob)>>>,
+    colored: Arc<Mutex<Option<(Palette, LayoutJob)>>>,
     // the theme a colouring thread was last started for
-    coloring: Option<bool>,
+    coloring: Option<Palette>,
     pub wrap: bool,
     // the laid out file and what it was laid out for: theme, coloured or plain, and wrap width
-    galley: Option<((bool, bool, u32), Arc<Galley>)>,
+    galley: Option<((Palette, bool, u32), Arc<Galley>)>,
     // the row each line starts on, since a wrapped line takes several rows
     line_rows: Vec<usize>,
     // frames left to keep pinning the scroll to the linked lines, since the first frame doesn't know the height yet
@@ -301,12 +303,13 @@ impl FileView {
         let p = theme::palette(ui);
         let size = text::MONO_SM;
         let dark = ui.visuals().dark_mode;
+        let palette = *p;
         let Ok(content) = &self.content else {
             return;
         };
         let content = content.clone();
-        if self.coloring != Some(dark) {
-            self.coloring = Some(dark);
+        if self.coloring != Some(palette) {
+            self.coloring = Some(palette);
             let (slot, ctx, text, ext) = (
                 self.colored.clone(),
                 ui.ctx().clone(),
@@ -315,9 +318,9 @@ impl FileView {
             );
             // colouring a whole file takes long enough to drop frames, so it happens off the ui thread
             std::thread::spawn(move || {
-                if let Some(job) = colorize(&text, &ext, dark, font::mono(size)) {
+                if let Some(job) = colorize(&text, &ext, &palette, dark, font::mono(size)) {
                     if let Ok(mut slot) = slot.lock() {
-                        *slot = Some((dark, job));
+                        *slot = Some((palette, job));
                     }
                     ctx.request_repaint();
                 }
@@ -350,12 +353,12 @@ impl FileView {
         } else {
             f32::INFINITY
         };
-        let colored = self
-            .colored
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone().filter(|(d, _)| *d == dark).map(|(_, job)| job));
-        let key = (dark, colored.is_some(), width.to_bits());
+        let colored = self.colored.lock().ok().and_then(|slot| {
+            slot.clone()
+                .filter(|(colored_for, _)| *colored_for == palette)
+                .map(|(_, job)| job)
+        });
+        let key = (palette, colored.is_some(), width.to_bits());
         let galley = match &self.galley {
             Some((laid, galley)) if *laid == key => galley.clone(),
             _ => {
@@ -653,22 +656,91 @@ fn line_rows(galley: &Galley) -> Vec<usize> {
     starts
 }
 
-// the same colours egui_extras uses, built here so the work can run on another thread
-fn colorize(text: &str, ext: &str, dark: bool, font: FontId) -> Option<LayoutJob> {
-    static SETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
-    let (syntaxes, themes) = SETS.get_or_init(|| {
+// code is coloured from the app theme's terminal colours, so it matches whichever theme is picked
+fn code_theme(p: &Palette, dark: bool) -> Theme {
+    // the bright terminal colours read better on dark backgrounds and the normal ones on light
+    let ansi = |i: usize| p.ansi[if dark { i + 8 } else { i }];
+    let color = |c: Color32| Color {
+        r: c.r(),
+        g: c.g(),
+        b: c.b(),
+        a: 255,
+    };
+    let rules: [(&str, Color32, FontStyle); 12] = [
         (
-            SyntaxSet::load_defaults_newlines(),
-            ThemeSet::load_defaults(),
-        )
-    });
+            "comment, punctuation.definition.comment",
+            p.text_faint,
+            FontStyle::ITALIC,
+        ),
+        (
+            "string, constant.character, markup.inline.raw, markup.raw",
+            ansi(2),
+            FontStyle::empty(),
+        ),
+        (
+            "constant.numeric, constant.language, constant.character.escape, constant.other",
+            ansi(6),
+            FontStyle::empty(),
+        ),
+        (
+            "keyword, storage, keyword.operator.new, keyword.operator.word, variable.language",
+            ansi(5),
+            FontStyle::empty(),
+        ),
+        (
+            "keyword.operator, punctuation",
+            p.text_muted,
+            FontStyle::empty(),
+        ),
+        (
+            "entity.name.function, support.function, meta.function-call variable.function, variable.function",
+            ansi(4),
+            FontStyle::empty(),
+        ),
+        (
+            "entity.name.type, entity.name.class, entity.other.inherited-class, support.type, support.class, storage.type.primitive",
+            ansi(3),
+            FontStyle::empty(),
+        ),
+        (
+            "entity.name.tag, support.type.property-name, meta.mapping.key string, entity.name.section",
+            ansi(1),
+            FontStyle::empty(),
+        ),
+        ("entity.other.attribute-name", ansi(3), FontStyle::empty()),
+        ("markup.heading", ansi(4), FontStyle::BOLD),
+        ("markup.bold", p.text, FontStyle::BOLD),
+        ("invalid, markup.deleted", p.danger, FontStyle::empty()),
+    ];
+    Theme {
+        settings: ThemeSettings {
+            foreground: Some(color(p.text)),
+            ..ThemeSettings::default()
+        },
+        scopes: rules
+            .into_iter()
+            .filter_map(|(scope, c, style)| {
+                Some(ThemeItem {
+                    scope: scope.parse::<ScopeSelectors>().ok()?,
+                    style: StyleModifier {
+                        foreground: Some(color(c)),
+                        background: None,
+                        font_style: Some(style),
+                    },
+                })
+            })
+            .collect(),
+        ..Theme::default()
+    }
+}
+
+// built here rather than with egui_extras so the work can run on another thread
+fn colorize(text: &str, ext: &str, p: &Palette, dark: bool, font: FontId) -> Option<LayoutJob> {
+    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+    let syntaxes = SYNTAXES.get_or_init(two_face::syntax::extra_newlines);
     let syntax = syntaxes.find_syntax_by_extension(ext)?;
-    let theme = &themes.themes[if dark {
-        "base16-mocha.dark"
-    } else {
-        "Solarized (light)"
-    }];
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let theme = code_theme(p, dark);
+    let mut highlighter = HighlightLines::new(syntax, &theme);
     let mut job = LayoutJob {
         text: text.to_owned(),
         ..Default::default()
@@ -783,7 +855,30 @@ pub fn open_in_editor(path: &str, line: Option<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowKind, link_target, parse_diff, split_lines};
+    use super::{RowKind, code_theme, colorize, link_target, parse_diff, split_lines};
+    use crate::theme::{DARK, font};
+
+    #[test]
+    fn typescript_is_coloured_from_the_theme() {
+        assert_eq!(code_theme(&DARK, true).scopes.len(), 12);
+        let job = colorize(
+            "const a: string = \"x\";\n",
+            "ts",
+            &DARK,
+            true,
+            font::mono(12.0),
+        )
+        .unwrap();
+        let keyword = job.sections.first().unwrap().format.color;
+        assert_eq!(keyword, DARK.ansi[13]);
+        assert!(job.sections.iter().any(|s| s.format.color == DARK.ansi[10]));
+        for ext in ["tsx", "toml", "rs", "py", "go", "md", "json", "yaml", "sh"] {
+            assert!(
+                colorize("x\n", ext, &DARK, true, font::mono(12.0)).is_some(),
+                "{ext}"
+            );
+        }
+    }
 
     #[test]
     fn reads_a_unified_diff_into_numbered_rows() {

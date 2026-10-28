@@ -51,6 +51,7 @@ pub struct Page<'a> {
     // on windows, the wsl distributions the server could run in instead
     pub distros: Option<Vec<String>>,
     pub models: crate::sessions::Models,
+    pub themes: &'a mut crate::themes::Themes,
 }
 
 impl Page<'_> {
@@ -114,6 +115,7 @@ impl Page<'_> {
                         &self.agents,
                         self.distros.as_deref(),
                         &self.models,
+                        self.themes,
                     ),
                     Tab::Usage => {
                         crate::token_usage::show(ui, self.tokens.as_ref());
@@ -172,6 +174,7 @@ fn general(
     agents: &[(Provider, bool)],
     distros: Option<&[String]>,
     models: &crate::sessions::Models,
+    themes: &mut crate::themes::Themes,
 ) {
     let p = theme::palette(ui);
     if let Some(distros) = distros {
@@ -179,7 +182,7 @@ fn general(
     }
     new_agents(ui, prefs, models);
     section(ui, "Appearance", |ui| {
-        setting(ui, "Theme", "Follow the system, or always use one", |ui| {
+        setting(ui, "Mode", "Follow the system, or always use one", |ui| {
             Segmented::new(
                 &mut prefs.appearance,
                 &[
@@ -190,6 +193,7 @@ fn general(
             )
             .show(ui);
         });
+        theme_rows(ui, prefs, themes);
         if blur {
             divider(ui);
             setting(
@@ -374,6 +378,108 @@ fn server(ui: &mut egui::Ui, prefs: &mut Prefs, distros: &[String]) {
 }
 
 // what a new agent starts with, so the composer is already set the way someone usually works
+fn theme_rows(ui: &mut egui::Ui, prefs: &mut Prefs, themes: &mut crate::themes::Themes) {
+    for (dark, title, detail) in [
+        (true, "Dark theme", "Used while the app is dark"),
+        (false, "Light theme", "Used while the app is light"),
+    ] {
+        let hidden = if dark {
+            Appearance::Light
+        } else {
+            Appearance::Dark
+        };
+        if prefs.appearance == hidden {
+            continue;
+        }
+        let picked = if dark {
+            &mut prefs.dark_theme
+        } else {
+            &mut prefs.light_theme
+        };
+        let fallback = if dark {
+            crate::themes::MUX_DARK
+        } else {
+            crate::themes::MUX_LIGHT
+        };
+        divider(ui);
+        ui.push_id(title, |ui| {
+            setting(ui, title, detail, |ui| {
+                let current = picked
+                    .as_deref()
+                    .and_then(|id| themes.find(id))
+                    .filter(|c| c.dark == dark)
+                    .or_else(|| themes.find(fallback));
+                let label = current.map_or("Mux", |c| c.name.as_str());
+                let button = mux_ui::Button::new(label).size(mux_ui::Size::Sm).show(ui);
+                let current = current.map(|c| c.id.clone());
+                egui::Popup::menu(&button)
+                    .align(egui::RectAlign::BOTTOM_END)
+                    .gap(space::XS)
+                    .show(|ui| {
+                        ui.set_width(220.0);
+                        for choice in themes.list.iter().filter(|c| c.dark == dark) {
+                            let mut item = mux_ui::MenuItem::new(&choice.name)
+                                .checked(current.as_deref() == Some(choice.id.as_str()));
+                            if choice.custom {
+                                item = item.detail("Custom");
+                            }
+                            if item.show(ui).clicked() {
+                                *picked = (choice.id != fallback).then(|| choice.id.clone());
+                            }
+                        }
+                    });
+            });
+        });
+    }
+    divider(ui);
+    let detail = match themes.errors.first() {
+        Some((file, error)) => format!("Couldn't read {file}: {error}"),
+        None => "JSON files in the themes folder, reloaded as you save them".to_owned(),
+    };
+    setting(ui, "Custom themes", &detail, |ui| {
+        if mux_ui::Button::new("Open folder")
+            .size(mux_ui::Size::Sm)
+            .show(ui)
+            .clicked()
+        {
+            let dir = crate::themes::dir();
+            let _ = std::fs::create_dir_all(&dir);
+            mux_ui::chat::open_externally(&dir.to_string_lossy());
+        }
+        let dark = ui.visuals().dark_mode;
+        let shown = if dark {
+            prefs
+                .dark_theme
+                .as_deref()
+                .unwrap_or(crate::themes::MUX_DARK)
+        } else {
+            prefs
+                .light_theme
+                .as_deref()
+                .unwrap_or(crate::themes::MUX_LIGHT)
+        }
+        .to_owned();
+        let new = mux_ui::Button::new("New theme")
+            .size(mux_ui::Size::Sm)
+            .show(ui)
+            .tip("Copy the current theme into a file to edit");
+        if new.clicked() {
+            match themes.duplicate(&shown) {
+                Ok(id) => {
+                    let file = crate::themes::dir().join(format!("{id}.json"));
+                    mux_ui::chat::open_externally(&file.to_string_lossy());
+                    if dark {
+                        prefs.dark_theme = Some(id);
+                    } else {
+                        prefs.light_theme = Some(id);
+                    }
+                }
+                Err(e) => log::warn!("couldn't create a theme: {e}"),
+            }
+        }
+    });
+}
+
 fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Models) {
     let defaults = &mut prefs.new_agent;
     section(ui, "New agents", |ui| {

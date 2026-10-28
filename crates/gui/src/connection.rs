@@ -15,6 +15,7 @@ pub struct Connection {
     stream: UnixStream,
     inbox: Receiver<ServerMsg>,
     closed: Arc<AtomicBool>,
+    unreadable: Arc<AtomicBool>,
 }
 
 impl Connection {
@@ -48,7 +49,8 @@ impl Connection {
         let mut reader = stream.try_clone()?;
         let (tx, inbox) = mpsc::channel();
         let closed = Arc::new(AtomicBool::new(false));
-        let (flag, ctx) = (closed.clone(), ctx.clone());
+        let unreadable = Arc::new(AtomicBool::new(false));
+        let (flag, odd, ctx) = (closed.clone(), unreadable.clone(), ctx.clone());
         thread::spawn(move || {
             loop {
                 match protocol::read::<ServerMsg>(&mut reader) {
@@ -56,6 +58,10 @@ impl Connection {
                         if tx.send(msg).is_err() {
                             break;
                         }
+                    }
+                    // a whole frame arrived but isn't a message this build knows, so the server is from another one
+                    Err(err) if err.kind() == io::ErrorKind::Other => {
+                        odd.store(true, Ordering::Relaxed);
                     }
                     Err(_) => {
                         flag.store(true, Ordering::Relaxed);
@@ -71,6 +77,7 @@ impl Connection {
             stream,
             inbox,
             closed,
+            unreadable,
         };
         connection.send(&ClientMsg::Hello { protocol: PROTOCOL });
         Ok(connection)
@@ -84,6 +91,11 @@ impl Connection {
 
     pub fn messages(&self) -> Vec<ServerMsg> {
         self.inbox.try_iter().collect()
+    }
+
+    // the server sent something this build can't read, which only happens across versions
+    pub fn is_unreadable(&self) -> bool {
+        self.unreadable.load(Ordering::Relaxed)
     }
 
     // callers drain messages first, so anything the server sent before closing is already handled

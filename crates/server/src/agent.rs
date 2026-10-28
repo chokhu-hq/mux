@@ -122,6 +122,7 @@ impl Agent {
                 AgentItem::Approval { decision, .. } if decision.is_none() => {
                     *decision = Some(Decision::Deny)
                 }
+                AgentItem::User { queued, .. } => *queued = false,
                 _ => {}
             }
         }
@@ -220,9 +221,17 @@ impl Agent {
         events: &UnboundedSender<Event>,
     ) {
         let was_busy = self.busy;
+        // claude runs a message sent mid turn after the current one, and codex waits for its thread to open
+        let claude = self.settings.provider == Provider::Claude;
+        let queued = if claude {
+            was_busy
+        } else {
+            !self.thread_live && self.process.is_some()
+        };
         self.push(AgentItem::User {
             text: text.clone(),
             attachments: attachments.clone(),
+            queued,
         });
         self.set_busy(true);
         if !self.launch(was_busy, session, generation, cwd, events) {
@@ -343,6 +352,24 @@ impl Agent {
         false
     }
 
+    // marks the oldest waiting messages as picked up, up to `count` of them
+    fn unqueue(&mut self, count: usize) {
+        let waiting: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| matches!(item, AgentItem::User { queued: true, .. }))
+            .map(|(i, _)| i)
+            .take(count)
+            .collect();
+        for index in waiting {
+            if let Some(AgentItem::User { queued, .. }) = self.items.get_mut(index) {
+                *queued = false;
+                self.changed.insert(index);
+            }
+        }
+    }
+
     pub fn error(&mut self, message: String) {
         self.push(AgentItem::Error { message });
     }
@@ -407,6 +434,8 @@ impl Agent {
         self.live_text = None;
         self.launched = None;
         self.claude_turns = 0;
+        // whatever was waiting will never run on this process
+        self.unqueue(usize::MAX);
         self.compact_queued = false;
         self.finish_compaction(ItemStatus::Failed);
         self.fail_subagents();
@@ -535,6 +564,7 @@ impl Agent {
                         self.start_compaction();
                     }
                     let queued = std::mem::take(&mut self.queued);
+                    self.unqueue(usize::MAX);
                     if !queued.is_empty() {
                         let (texts, files): (Vec<_>, Vec<_>) = queued.into_iter().unzip();
                         self.start_turn(texts.join("\n\n"), files.concat());
@@ -884,6 +914,10 @@ impl Agent {
                 self.expire_approvals();
                 self.finish_compaction(ItemStatus::Failed);
                 self.claude_turns = self.claude_turns.saturating_sub(1);
+                // claude moves on to the oldest message still waiting
+                if self.claude_turns > 0 {
+                    self.unqueue(1);
+                }
                 self.set_busy(self.claude_turns > 0);
             }
             _ => {}
@@ -1510,6 +1544,26 @@ mod tests {
         assert_eq!(steps[0].name, "Bash");
         assert_eq!(steps[0].status, ItemStatus::Done);
         assert_eq!(result, "It's session_expiry.");
+    }
+
+    #[test]
+    fn claude_messages_sent_mid_turn_wait_their_turn() {
+        let mut agent = claude_agent();
+        let user = |queued| AgentItem::User {
+            text: String::new(),
+            attachments: Vec::new(),
+            queued,
+        };
+        agent.items = vec![user(false), user(true), user(true)];
+        agent.claude_turns = 3;
+        agent.set_busy(true);
+        let result = json!({ "type": "result", "subtype": "success", "result": "ok" });
+        agent.handle(result.clone());
+        assert_eq!(agent.items, [user(false), user(false), user(true)]);
+        agent.handle(result.clone());
+        agent.handle(result);
+        assert_eq!(agent.items, [user(false), user(false), user(false)]);
+        assert!(!agent.busy);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use mux_ui::{
 use link::Link;
 use mux_core::protocol::{self as wire, AgentSettings};
 use mux_core::{Access, Provider};
-use mux_ui::chat::{ChatAction, ChatView, Decision};
+use mux_ui::chat::{ChatAction, ChatItem, ChatView, Decision};
 use prefs::Prefs;
 use sessions::{Models, Sessions};
 
@@ -38,8 +38,14 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    let mut viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
+    if let Ok(icon) =
+        eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/mux-256.png"))
+    {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: window::viewport("Mux", vec2(1200.0, 800.0)),
+        viewport,
         // on wayland mux reads the clipboard itself, since egui's fallback can't see pictures
         clipboard_shortcuts: !wayland(),
         ..Default::default()
@@ -109,6 +115,9 @@ struct App {
     viewer: Option<FileView>,
     viewer_open: bool,
     viewer_width: f32,
+    // every file changed in the open chat, with the agent's own hunks for when git can't say, and the one shown
+    diffs: Vec<(String, String)>,
+    diff_index: usize,
 }
 
 struct TitleBar {
@@ -145,6 +154,8 @@ impl App {
             viewer: None,
             viewer_open: false,
             viewer_width: 560.0,
+            diffs: Vec::new(),
+            diff_index: 0,
         };
         app.prefs.apply(ctx);
         app
@@ -351,6 +362,18 @@ impl App {
                             self.viewer_open = true;
                         }
                         None => {}
+                    }
+                }
+                Some(ChatAction::OpenDiff(index)) => {
+                    let folder = group.as_ref().and_then(|g| g.1.as_deref());
+                    self.diffs = changed_files(&local.chat, folder);
+                    let clicked = match local.chat.get(index) {
+                        Some(ChatItem::Diff(diff)) => Some(resolve(&diff.path, folder)),
+                        _ => None,
+                    };
+                    if let Some(at) = clicked.and_then(|p| self.diffs.iter().position(|d| d.0 == p))
+                    {
+                        self.show_diff(at);
                     }
                 }
                 Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
@@ -563,9 +586,12 @@ impl App {
             ),
             Link::Outdated { protocol, .. } => (
                 "The running Mux server is from another version".to_owned(),
-                Some(format!(
-                    "It speaks protocol {protocol} and this app speaks {PROTOCOL}. Restarting it stops the sessions running in it."
-                )),
+                Some(match protocol {
+                    Some(protocol) => format!(
+                        "It speaks protocol {protocol} and this app speaks {PROTOCOL}. Restarting it stops the sessions running in it."
+                    ),
+                    None => "This app can't read what it sends. Restarting it stops the sessions running in it.".to_owned(),
+                }),
                 Some("Restart server"),
             ),
             Link::Stopping(_) => ("Restarting the Mux server…".to_owned(), None, None),
@@ -726,6 +752,81 @@ fn cli(provider: Provider) -> &'static str {
     }
 }
 
+// a path the agent reported, made absolute against the project when it's relative
+fn resolve(path: &str, folder: Option<&str>) -> String {
+    match folder {
+        Some(folder) if !std::path::Path::new(path).is_absolute() => std::path::Path::new(folder)
+            .join(path)
+            .to_string_lossy()
+            .into_owned(),
+        _ => path.to_owned(),
+    }
+}
+
+// each file the chat changed, once and in order, with every hunk the agent showed for it
+fn changed_files(chat: &[ChatItem], folder: Option<&str>) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for item in chat {
+        let ChatItem::Diff(diff) = item else {
+            continue;
+        };
+        let path = resolve(&diff.path, folder);
+        let mut hunk = "@@ -1 +1 @@\n".to_owned();
+        for line in &diff.lines {
+            let sign = match line.kind {
+                mux_ui::chat::DiffKind::Add => '+',
+                mux_ui::chat::DiffKind::Remove => '-',
+                mux_ui::chat::DiffKind::Context => ' ',
+            };
+            hunk.push(sign);
+            hunk.push_str(&line.text);
+            hunk.push('\n');
+        }
+        match files.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, hunks)) => hunks.push_str(&hunk),
+            None => files.push((path, hunk)),
+        }
+    }
+    files
+}
+
+// the file's changes since the last commit, falling back to the agent's own hunks outside a repository
+fn file_diff(path: &str, fallback: &str) -> String {
+    let file = std::path::Path::new(path);
+    let dir = file.parent().unwrap_or(file);
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+    };
+    let text = |out: std::process::Output| String::from_utf8_lossy(&out.stdout).into_owned();
+    let inside = git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|o| o.status.success());
+    if !inside {
+        return fallback.to_owned();
+    }
+    if let Some(out) = git(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path])
+        && out.status.success()
+        && !out.stdout.is_empty()
+    {
+        return text(out);
+    }
+    // a file git doesn't track yet is all new, and comparing it with nothing shows that
+    let tracked =
+        git(&["ls-files", "--error-unmatch", "--", path]).is_some_and(|o| o.status.success());
+    if !tracked
+        && file.is_file()
+        && let Some(out) = git(&["diff", "--no-color", "--no-index", "--", "/dev/null", path])
+        && !out.stdout.is_empty()
+    {
+        return text(out);
+    }
+    // committed since, so what the agent showed is the best account of the change
+    fallback.to_owned()
+}
+
 fn wayland() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
@@ -807,11 +908,36 @@ fn agent_controls(
             .gap(space::XS)
     };
 
+    // a narrow composer drops labels in steps, permissions first and then the model name
     let label = current.map_or(settings.provider.label(), |m| m.name.as_str());
-    let chip = Chip::new(label)
+    let access = settings.access;
+    let gap = ui.spacing().item_spacing.x;
+    let effort_text = current
+        .filter(|m| !m.efforts.is_empty())
+        .map(|m| effort_label(settings.effort.as_deref().unwrap_or(&m.default_effort)));
+    let rest = effort_text
+        .as_deref()
+        .map_or(0.0, |e| Chip::new(e).width(ui) + gap)
+        + current
+            .filter(|m| m.fast.is_some())
+            .map_or(0.0, |_| theme::control::SM + gap);
+    let width = |label: &str, icon: bool| {
+        let chip = Chip::new(label);
+        let chip = if icon {
+            chip.icon(icons::LIGHTNING)
+        } else {
+            chip
+        };
+        chip.width(ui) + gap
+    };
+    let budget = ui.available_width();
+    let full = width(label, true) + rest + width(access.label(), true) <= budget;
+    let named = width(label, true) + rest + width("", true) <= budget;
+    let shown = if named { label } else { "" };
+    let chip = Chip::new(shown)
         .provider(settings.provider)
         .show(ui)
-        .tip("Agent and model");
+        .tip(format!("Agent and model: {label}"));
     let viewing_id = chip.id.with("viewing");
     // tabs and the more models row act inside the menu, so only picking a model or clicking away closes it
     menu(&chip)
@@ -1003,13 +1129,7 @@ fn agent_controls(
         });
     }
 
-    let access = settings.access;
-    // a narrow composer keeps just the icon, so the send button never gets pushed out
-    let label = if ui.available_width() < 300.0 {
-        ""
-    } else {
-        access.label()
-    };
+    let label = if full { access.label() } else { "" };
     let chip = Chip::new(label)
         .icon(access_icon(access))
         .show(ui)
@@ -1203,12 +1323,28 @@ impl App {
                     }
                 }
                 FileViewAction::CopyPath => ctx.copy_text(view.path.clone()),
-                FileViewAction::OpenInEditor => {
-                    open_in_editor(&view.path, view.lines.map(|(start, _)| start))
+                FileViewAction::OpenInEditor => open_in_editor(&view.path, view.editor_line()),
+                FileViewAction::Step(by) => {
+                    let count = self.diffs.len() as isize;
+                    if count > 0 {
+                        let at = (self.diff_index as isize + by).rem_euclid(count);
+                        self.show_diff(at as usize);
+                    }
                 }
             }
         }
         Rect::from_min_max(main.min, pos2(edge, main.bottom()))
+    }
+
+    fn show_diff(&mut self, index: usize) {
+        let Some((path, fallback)) = self.diffs.get(index) else {
+            return;
+        };
+        let mut view = FileView::diff(path.clone(), &file_diff(path, fallback));
+        view.step = Some((index, self.diffs.len()));
+        self.viewer = Some(view);
+        self.viewer_open = true;
+        self.diff_index = index;
     }
 
     fn take_drops(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {

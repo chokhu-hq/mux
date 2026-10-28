@@ -19,7 +19,8 @@ pub enum Link {
     // a server from another build is running, and its messages can't be read
     Outdated {
         connection: Connection,
-        protocol: u32,
+        // what the server said it speaks, or none when its messages just didn't decode
+        protocol: Option<u32>,
     },
     // asked an outdated server to quit, waiting for it to go before starting a fresh one
     Stopping(Connection),
@@ -72,11 +73,14 @@ impl Link {
                 for msg in connection.messages() {
                     match msg {
                         ServerMsg::Welcome { protocol } if protocol != PROTOCOL => {
-                            outdated = Some(protocol);
+                            outdated = Some(Some(protocol));
                             break;
                         }
                         msg => sessions.apply(msg),
                     }
+                }
+                if outdated.is_none() && connection.is_unreadable() {
+                    outdated = Some(None);
                 }
                 if let Some(protocol) = outdated {
                     sessions.outbox.clear();

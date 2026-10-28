@@ -21,6 +21,8 @@ pub enum ChatItem {
     User {
         text: String,
         attachments: Vec<String>,
+        // sent while the agent was busy and not picked up yet
+        queued: bool,
     },
     Assistant(String),
     Tool(ToolCall),
@@ -106,6 +108,8 @@ pub enum ChatAction {
     OpenLink(String),
     Stop,
     Compact,
+    // the edit card at this index was clicked, to see its file's full diff
+    OpenDiff(usize),
     Decide(usize, Decision),
 }
 
@@ -240,16 +244,22 @@ impl<'a> ChatView<'a> {
                             let index = i;
                             i += 1;
                             ui.push_id(index, |ui| match item {
-                                ChatItem::User { text, attachments } => {
-                                    cards::user_message(ui, text, attachments)
-                                }
+                                ChatItem::User {
+                                    text,
+                                    attachments,
+                                    queued,
+                                } => cards::user_message(ui, text, attachments, *queued),
                                 ChatItem::Assistant(text) => {
                                     if let Some(target) = markdown(ui, text) {
                                         action = Some(ChatAction::OpenLink(target));
                                     }
                                 }
                                 ChatItem::Tool(tool) => cards::tool_call(ui, tool),
-                                ChatItem::Diff(diff) => cards::diff(ui, diff),
+                                ChatItem::Diff(diff) => {
+                                    if cards::diff(ui, diff) {
+                                        action = Some(ChatAction::OpenDiff(index));
+                                    }
+                                }
                                 ChatItem::Permission(request) => {
                                     if let Some(decision) = cards::permission(ui, request) {
                                         action = Some(ChatAction::Decide(index, decision));
@@ -352,6 +362,7 @@ pub fn sample() -> Vec<ChatItem> {
         ChatItem::User {
             text: "Refactor the auth middleware to use the new session store, and add tests for expired sessions.".to_owned(),
             attachments: Vec::new(),
+            queued: false,
         },
         ChatItem::Assistant(
             "I'll start by reading the current middleware and finding where sessions are loaded.".to_owned(),

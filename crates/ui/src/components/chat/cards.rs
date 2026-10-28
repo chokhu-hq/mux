@@ -10,7 +10,7 @@ use egui::{
 use super::{
     Decision, DiffKind, FileDiff, PermissionRequest, Subagent, ToolCall, ToolKind, ToolStatus,
 };
-use crate::components::{Button, hover_t, reveal};
+use crate::components::{Button, TooltipExt, hover_t, reveal};
 use crate::icons;
 use crate::motion::{self, Spring, spring_bool};
 use crate::theme::{self, font, icon, radius, space, text};
@@ -18,14 +18,52 @@ use crate::theme::{self, font, icon, radius, space, text};
 const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
 
-pub fn user_message(ui: &mut Ui, message: &str, attachments: &[String]) {
+pub fn user_message(ui: &mut Ui, message: &str, attachments: &[String], queued: bool) {
     let p = theme::palette(ui);
+    // a message still waiting its turn sits back a little until the agent picks it up
+    let waiting = spring_bool(
+        ui.ctx(),
+        ui.make_persistent_id("queued"),
+        queued,
+        Spring::SMOOTH,
+    );
+    let opacity = ui.opacity();
+    ui.multiply_opacity(1.0 - 0.4 * waiting);
     if !attachments.is_empty() {
         super::attachments::sent(ui, attachments);
     }
-    if message.is_empty() {
-        return;
+    if !message.is_empty() {
+        bubble(ui, message);
     }
+    ui.set_opacity(opacity);
+    if waiting > 0.01 {
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 16.0 * waiting), Sense::hover());
+        let color = p.text_faint.gamma_multiply(waiting);
+        let label = ui.painter().layout_no_wrap(
+            "Queued, runs after the current reply".to_owned(),
+            font::regular(text::SM),
+            color,
+        );
+        let right = rect.right() - space::XS;
+        let y = rect.center().y;
+        ui.painter().galley(
+            pos2(right - label.size().x, y - label.size().y / 2.0),
+            label.clone(),
+            color,
+        );
+        glyph(
+            ui,
+            pos2(right - label.size().x - space::XS - icon::SM / 2.0, y),
+            icons::CLOCK,
+            icon::SM,
+            color,
+        );
+    }
+}
+
+fn bubble(ui: &mut Ui, message: &str) {
+    let p = theme::palette(ui);
     // lay the text out first so the bubble hugs short messages instead of filling the row
     let max = ui.available_width() * 0.8 - 24.0;
     let galley = ui.painter().layout(
@@ -227,7 +265,9 @@ fn summary(tools: &[&ToolCall]) -> String {
     .join(" · ")
 }
 
-pub fn diff(ui: &mut Ui, diff: &FileDiff) {
+// a file the agent changed, with the start of its changes, whose header opens the full diff
+pub fn diff(ui: &mut Ui, diff: &FileDiff) -> bool {
+    let mut open = false;
     let p = theme::palette(ui);
     let id = ui.make_persistent_id("diff");
     let mut expanded = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
@@ -243,7 +283,30 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) {
         .count();
 
     card(ui, |ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+        let (rect, header) =
+            ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+        let t = hover_t(ui, &header);
+        ui.painter().rect_filled(
+            rect.shrink(1.0),
+            CornerRadius {
+                nw: radius::LG,
+                ne: radius::LG,
+                sw: 0,
+                se: 0,
+            },
+            p.hover.gamma_multiply(t * 0.6),
+        );
+        glyph(
+            ui,
+            pos2(rect.right() - space::MD - icon::MD / 2.0, rect.center().y),
+            icons::ARROW_SQUARE_OUT,
+            icon::MD,
+            p.text_faint.lerp_to_gamma(p.text, t),
+        );
+        open = header
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .tip("Open the full diff")
+            .clicked();
         let y = rect.center().y;
         let x = rect.left() + space::MD;
         glyph(
@@ -253,27 +316,58 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) {
             icon::MD,
             p.text_faint,
         );
-        let path = ui.painter().text(
+        // the name and counts lead, and the folder fills what's left before the open icon
+        let file = std::path::Path::new(&diff.path);
+        let name = file
+            .file_name()
+            .map_or_else(|| diff.path.clone(), |n| n.to_string_lossy().into_owned());
+        let folder = file
+            .parent()
+            .map(|d| mux_core::display_path(&d.to_string_lossy()))
+            .unwrap_or_default();
+        let room = Rect::from_min_max(
+            pos2(rect.left(), rect.top()),
+            pos2(
+                rect.right() - space::MD - icon::MD - space::SM,
+                rect.bottom(),
+            ),
+        );
+        let painter = ui.painter().with_clip_rect(room.intersect(ui.clip_rect()));
+        let name = painter.text(
             pos2(x + icon::MD + space::SM, y),
             Align2::LEFT_CENTER,
-            &diff.path,
+            name,
             font::mono(text::MONO_SM),
             p.text,
         );
-        let plus = ui.painter().text(
-            pos2(path.right() + space::SM, y),
+        let plus = painter.text(
+            pos2(name.right() + space::SM, y),
             Align2::LEFT_CENTER,
             format!("+{added}"),
             font::medium(text::SM),
             p.success,
         );
-        ui.painter().text(
+        let minus = painter.text(
             pos2(plus.right() + space::XS, y),
             Align2::LEFT_CENTER,
             format!("−{removed}"),
             font::medium(text::SM),
             p.danger,
         );
+        let left = minus.right() + space::SM;
+        if room.right() - left > 24.0 {
+            let mut job =
+                LayoutJob::simple_singleline(folder, font::regular(text::SM + 1.0), p.text_faint);
+            job.wrap = egui::text::TextWrapping {
+                max_width: room.right() - left,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let galley = ui.painter().layout_job(job);
+            ui.painter()
+                .galley(pos2(left, y - galley.size().y / 2.0), galley, p.text_faint);
+        }
 
         let line = ui.available_rect_before_wrap();
         ui.painter()
@@ -344,6 +438,7 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) {
             }
         }
     });
+    open
 }
 
 pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> {

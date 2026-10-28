@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mux
+Comment=Run coding agents, shells and tasks side by side
+Exec=mux-gui
+Icon=mux
+Terminal=false
+Categories=Development;
+StartupWMClass=mux

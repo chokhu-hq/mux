@@ -24,6 +24,30 @@ pub enum FileViewAction {
     ToggleWrap,
     CopyPath,
     OpenInEditor,
+    // move to the previous or next changed file
+    Step(isize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowKind {
+    Context,
+    Add,
+    Remove,
+    // the `@@` line that starts each hunk
+    Hunk,
+}
+
+// one line of a diff and where it sits in the old and new file
+struct DiffRow {
+    kind: RowKind,
+    old: Option<usize>,
+    new: Option<usize>,
+}
+
+struct Diff {
+    rows: Vec<DiffRow>,
+    added: usize,
+    removed: usize,
 }
 
 // a read only look at one file, opened from a link in the chat
@@ -43,6 +67,10 @@ pub struct FileView {
     line_rows: Vec<usize>,
     // frames left to keep pinning the scroll to the linked lines, since the first frame doesn't know the height yet
     settle: u8,
+    // set when showing a diff rather than the file, one row per line of content
+    diff: Option<Diff>,
+    // which of the changed files this is, and how many there are
+    pub step: Option<(usize, usize)>,
 }
 
 impl FileView {
@@ -61,6 +89,41 @@ impl FileView {
             galley: None,
             line_rows: Vec::new(),
             settle: 3,
+            diff: None,
+            step: None,
+        }
+    }
+
+    // a file's changes from a unified diff, scrolled to the first one
+    pub fn diff(path: String, unified: &str) -> Self {
+        let (text, diff) = parse_diff(unified);
+        let first = diff
+            .rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Add | RowKind::Remove))
+            .map(|i| i + 1);
+        let content = if diff.rows.is_empty() {
+            Err("No changes since the last commit".to_owned())
+        } else {
+            Ok(Arc::from(text))
+        };
+        Self {
+            content,
+            lines: first.map(|line| (line, line)),
+            diff: Some(diff),
+            ..Self::open(path, None)
+        }
+    }
+
+    // the line in the file itself to open an editor at
+    pub fn editor_line(&self) -> Option<usize> {
+        match &self.diff {
+            Some(diff) => diff
+                .rows
+                .iter()
+                .find(|r| matches!(r.kind, RowKind::Add | RowKind::Remove))
+                .and_then(|r| r.new.or(r.old)),
+            None => self.lines.map(|(start, _)| start),
         }
     }
 
@@ -143,6 +206,27 @@ impl FileView {
         {
             action = Some(FileViewAction::CopyPath);
         }
+        if let Some((index, count)) = self.step.filter(|(_, count)| *count > 1) {
+            if IconButton::new(icons::CARET_RIGHT, "Next file")
+                .show(&mut row)
+                .tip("Next changed file")
+                .clicked()
+            {
+                action = Some(FileViewAction::Step(1));
+            }
+            row.label(
+                egui::RichText::new(format!("{} of {count}", index + 1))
+                    .font(font::regular(text::SM + 1.0))
+                    .color(p.text_faint),
+            );
+            if IconButton::new(icons::CARET_LEFT, "Previous file")
+                .show(&mut row)
+                .tip("Previous changed file")
+                .clicked()
+            {
+                action = Some(FileViewAction::Step(-1));
+            }
+        }
         let buttons_left = row.min_rect().left();
 
         let file = Path::new(&self.path);
@@ -168,8 +252,25 @@ impl FileView {
             icon_center.x + icon::MD / 2.0 + space::SM,
             rect.center().y - name_galley.size().y / 2.0,
         );
-        let name_right = name_pos.x + name_galley.size().x;
+        let mut name_right = name_pos.x + name_galley.size().x;
         ui.painter().galley(name_pos, name_galley, p.text);
+        if let Some(diff) = &self.diff {
+            let plus = ui.painter().text(
+                pos2(name_right + space::SM, rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("+{}", diff.added),
+                font::medium(text::SM + 1.0),
+                p.success,
+            );
+            let minus = ui.painter().text(
+                pos2(plus.right() + space::XS, rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("−{}", diff.removed),
+                font::medium(text::SM + 1.0),
+                p.danger,
+            );
+            name_right = minus.right();
+        }
         let room = buttons_left - space::SM - name_right - space::SM;
         if room > 24.0 {
             let mut job = egui::text::LayoutJob::simple_singleline(
@@ -229,7 +330,20 @@ impl FileView {
             .layout_no_wrap("0".to_owned(), font::mono(size), p.text_faint)
             .size()
             .x;
-        let gutter = lines.to_string().len() as f32 * digit + space::LG * 2.0;
+        // a diff numbers both sides, the old file's line then the new one's, with room for the sign
+        let biggest = self.diff.as_ref().map_or(lines, |d| {
+            d.rows
+                .iter()
+                .filter_map(|r| r.old.max(r.new))
+                .max()
+                .unwrap_or(1)
+        });
+        let column = biggest.to_string().len() as f32 * digit;
+        let gutter = if self.diff.is_some() {
+            column * 2.0 + space::MD * 2.0 + digit + space::LG
+        } else {
+            column + space::LG * 2.0
+        };
         let pad = space::SM;
         let width = if self.wrap {
             (ui.available_width() - gutter - space::LG).max(120.0)
@@ -248,6 +362,9 @@ impl FileView {
                 let mut job = colored.unwrap_or_else(|| {
                     LayoutJob::simple(content.to_string(), font::mono(size), p.text, f32::INFINITY)
                 });
+                if let Some(diff) = &self.diff {
+                    mute_hunks(&mut job, &content, diff, p.text_faint);
+                }
                 job.wrap.max_width = width;
                 let galley = ui.painter().layout_job(job);
                 self.line_rows = line_rows(&galley);
@@ -297,7 +414,9 @@ impl FileView {
             let origin = pos2(rect.left() + gutter, rect.top() + pad);
             let visible = ui.clip_rect();
 
-            if let Some((start, end)) = self.lines {
+            if let Some(diff) = &self.diff {
+                paint_diff_rows(ui, &galley, &line_rows, diff, origin.y, visible);
+            } else if let Some((start, end)) = self.lines {
                 let rows = &galley.rows;
                 // the band runs to the row before the line after the range, so wrapped lines are covered whole
                 let last_row = row_of(end + 1).unwrap_or(rows.len()).saturating_sub(1);
@@ -336,6 +455,42 @@ impl FileView {
                     break;
                 }
                 let line = i + 1;
+                let mid = (top + bottom) / 2.0;
+                let left = visible.left().max(rect.left());
+                if let Some(diff) = &self.diff {
+                    let Some(row) = diff.rows.get(i) else {
+                        continue;
+                    };
+                    let number = |n: Option<usize>| n.map(|n| n.to_string()).unwrap_or_default();
+                    let mono = font::mono(size);
+                    ui.painter().text(
+                        pos2(left + space::MD + column, mid),
+                        Align2::RIGHT_CENTER,
+                        number(row.old),
+                        mono.clone(),
+                        p.text_faint,
+                    );
+                    ui.painter().text(
+                        pos2(left + space::MD * 2.0 + column * 2.0, mid),
+                        Align2::RIGHT_CENTER,
+                        number(row.new),
+                        mono.clone(),
+                        p.text_faint,
+                    );
+                    let (sign, color) = match row.kind {
+                        RowKind::Add => ("+", p.success),
+                        RowKind::Remove => ("−", p.danger),
+                        _ => ("", p.text_faint),
+                    };
+                    ui.painter().text(
+                        pos2(left + gutter - space::SM, mid),
+                        Align2::RIGHT_CENTER,
+                        sign,
+                        mono,
+                        color,
+                    );
+                    continue;
+                }
                 let linked = self
                     .lines
                     .is_some_and(|(start, end)| (start..=end).contains(&line));
@@ -357,6 +512,127 @@ impl FileView {
             );
         });
     }
+}
+
+// added and removed lines get a wash of green or red across the whole row, hunk starts a quiet grey
+fn paint_diff_rows(
+    ui: &Ui,
+    galley: &Galley,
+    line_rows: &[usize],
+    diff: &Diff,
+    top: f32,
+    visible: Rect,
+) {
+    let p = theme::palette(ui);
+    for (i, row) in diff.rows.iter().enumerate() {
+        let fill = match row.kind {
+            RowKind::Add => p.success.gamma_multiply(0.12),
+            RowKind::Remove => p.danger.gamma_multiply(0.12),
+            RowKind::Hunk => theme::tint(p, 0.04),
+            RowKind::Context => continue,
+        };
+        let (Some(&first), last) = (line_rows.get(i), line_rows.get(i + 1)) else {
+            continue;
+        };
+        let last = last
+            .map_or(galley.rows.len(), |&next| next)
+            .saturating_sub(1);
+        let (Some(a), Some(b)) = (galley.rows.get(first), galley.rows.get(last)) else {
+            continue;
+        };
+        let band = Rect::from_min_max(
+            pos2(visible.left(), top + a.min_y()),
+            pos2(visible.right(), top + b.max_y()),
+        );
+        if band.max.y < visible.min.y || band.min.y > visible.max.y {
+            continue;
+        }
+        ui.painter().rect_filled(band, CornerRadius::ZERO, fill);
+    }
+}
+
+// syntax colours make no sense on a hunk's `@@` line, so it's greyed out over them
+fn mute_hunks(job: &mut LayoutJob, text: &str, diff: &Diff, color: Color32) {
+    let mut start = 0;
+    let mut ranges = Vec::new();
+    for (line, row) in text.split_inclusive('\n').zip(&diff.rows) {
+        if row.kind == RowKind::Hunk {
+            ranges.push(start..start + line.len());
+        }
+        start += line.len();
+    }
+    for section in &mut job.sections {
+        if ranges
+            .iter()
+            .any(|r| r.contains(&section.byte_range.start.0))
+        {
+            section.format.color = color;
+        }
+    }
+}
+
+// the lines of a unified diff without their signs, and what each one was
+fn parse_diff(unified: &str) -> (String, Diff) {
+    let mut text = String::new();
+    let mut rows = Vec::new();
+    let (mut old, mut new) = (0, 0);
+    let mut started = false;
+    for line in unified.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            let numbers = |sign: char| {
+                rest.split_whitespace()
+                    .find_map(|part| part.strip_prefix(sign))
+                    .and_then(|part| part.split(',').next()?.parse::<usize>().ok())
+                    .unwrap_or(1)
+            };
+            (old, new) = (numbers('-'), numbers('+'));
+            started = true;
+            // the function or heading git found for the hunk reads better than the numbers
+            let context = rest.split("@@").nth(1).unwrap_or_default().trim();
+            text.push_str(if context.is_empty() { "⋯" } else { context });
+            text.push('\n');
+            rows.push(DiffRow {
+                kind: RowKind::Hunk,
+                old: None,
+                new: None,
+            });
+            continue;
+        }
+        if !started || line.starts_with('\\') {
+            continue;
+        }
+        let (kind, body) = match line.chars().next() {
+            Some('+') => (RowKind::Add, &line[1..]),
+            Some('-') => (RowKind::Remove, &line[1..]),
+            Some(' ') => (RowKind::Context, &line[1..]),
+            None => (RowKind::Context, ""),
+            _ => continue,
+        };
+        rows.push(DiffRow {
+            kind,
+            old: (kind != RowKind::Add).then_some(old),
+            new: (kind != RowKind::Remove).then_some(new),
+        });
+        if kind != RowKind::Add {
+            old += 1;
+        }
+        if kind != RowKind::Remove {
+            new += 1;
+        }
+        text.push_str(body);
+        text.push('\n');
+    }
+    text.pop();
+    let count = |kind| rows.iter().filter(|r| r.kind == kind).count();
+    let (added, removed) = (count(RowKind::Add), count(RowKind::Remove));
+    (
+        text,
+        Diff {
+            rows,
+            added,
+            removed,
+        },
+    )
 }
 
 fn extension(path: &str) -> String {
@@ -507,7 +783,42 @@ pub fn open_in_editor(path: &str, line: Option<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{link_target, split_lines};
+    use super::{RowKind, link_target, parse_diff, split_lines};
+
+    #[test]
+    fn reads_a_unified_diff_into_numbered_rows() {
+        let unified = "diff --git a/src/auth.rs b/src/auth.rs\nindex 1..2 100644\n--- a/src/auth.rs\n+++ b/src/auth.rs\n@@ -10,3 +10,4 @@ pub fn auth()\n let a = 1;\n-let b = 2;\n+let b = 3;\n+let c = 4;\n let d = 5;\n\\ No newline at end of file\n";
+        let (text, diff) = parse_diff(unified);
+        assert_eq!(
+            text,
+            "pub fn auth()\nlet a = 1;\nlet b = 2;\nlet b = 3;\nlet c = 4;\nlet d = 5;"
+        );
+        let kinds: Vec<RowKind> = diff.rows.iter().map(|r| r.kind).collect();
+        assert!(matches!(
+            kinds.as_slice(),
+            [
+                RowKind::Hunk,
+                RowKind::Context,
+                RowKind::Remove,
+                RowKind::Add,
+                RowKind::Add,
+                RowKind::Context
+            ]
+        ));
+        let numbers: Vec<_> = diff.rows.iter().map(|r| (r.old, r.new)).collect();
+        assert_eq!(
+            numbers,
+            [
+                (None, None),
+                (Some(10), Some(10)),
+                (Some(11), None),
+                (None, Some(11)),
+                (None, Some(12)),
+                (Some(12), Some(13))
+            ]
+        );
+        assert_eq!((diff.added, diff.removed), (2, 1));
+    }
 
     #[test]
     fn reads_lines_from_link_targets() {

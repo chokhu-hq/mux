@@ -8,7 +8,7 @@ use mux_core::protocol::ContextUsage;
 use crate::components::{ContextRing, IconButton, TooltipExt, hover_t, press_t};
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
-use crate::theme::{self, font, icon, radius, space, text};
+use crate::theme::{self, control, font, icon, radius, space, text};
 
 pub enum ComposerAction {
     Send(String),
@@ -154,7 +154,26 @@ impl<'a> Composer<'a> {
                         action = Some(ComposerAction::Attach);
                     }
                     if let Some(controls) = self.controls.take() {
-                        controls(ui);
+                        // the controls get what's left once send and the context ring have their room,
+                        // and are clipped to it, so they shrink rather than slide under them
+                        let gap = ui.spacing().item_spacing.x;
+                        let ring = if self.context.is_some() {
+                            space::XS + control::SM + gap
+                        } else {
+                            0.0
+                        };
+                        let budget = (ui.available_width() - SEND - ring - gap).max(0.0);
+                        let row = ui.available_rect_before_wrap();
+                        ui.allocate_ui_with_layout(
+                            vec2(budget, control::SM),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_clip_rect(ui.clip_rect().intersect(
+                                    egui::Rect::from_min_size(row.min, vec2(budget, row.height())),
+                                ));
+                                controls(ui);
+                            },
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let ready = !self.draft.trim().is_empty() || has_files;
@@ -265,6 +284,8 @@ fn compact_notice(ui: &mut Ui, context: ContextUsage) -> bool {
     clicked
 }
 
+const SEND: f32 = 26.0;
+
 fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response {
     let p = theme::palette(ui);
     let sense = if enabled {
@@ -272,7 +293,7 @@ fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response 
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), sense);
+    let (rect, response) = ui.allocate_exact_size(vec2(SEND, SEND), sense);
     let t = hover_t(ui, &response);
     let pressed = press_t(ui, &response);
     let (fill, fg) = match (enabled, stop) {

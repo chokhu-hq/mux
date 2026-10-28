@@ -385,11 +385,17 @@ impl eframe::App for Gallery {
                                                         items.push(ChatItem::User {
                                                             text,
                                                             attachments: Vec::new(),
+                                                            queued: false,
                                                         });
                                                         self.thinking = true;
                                                         chat::set_thinking(items, true);
                                                     }
-                                                    Some(ChatAction::Attach | ChatAction::OpenLink(_) | ChatAction::Compact) => {}
+                                                    Some(
+                                                        ChatAction::Attach
+                                                        | ChatAction::OpenLink(_)
+                                                        | ChatAction::Compact
+                                                        | ChatAction::OpenDiff(_),
+                                                    ) => {}
                                                     Some(ChatAction::Stop) => {
                                                         self.thinking = false;
                                                         chat::set_thinking(items, false);

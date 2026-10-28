@@ -703,9 +703,14 @@ fn chat_items(
     for entry in transcript {
         let mut approval = None;
         match entry {
-            AgentItem::User { text, attachments } => items.push(ChatItem::User {
+            AgentItem::User {
+                text,
+                attachments,
+                queued,
+            } => items.push(ChatItem::User {
                 text: text.clone(),
                 attachments: attachments.clone(),
+                queued: *queued,
             }),
             // a reply that has started but not streamed any words yet shows as thinking instead
             AgentItem::Assistant { text } if text.trim().is_empty() => continue,
@@ -904,6 +909,7 @@ mod tests {
             AgentItem::User {
                 text: "hi".into(),
                 attachments: Vec::new(),
+                queued: false,
             },
             AgentItem::FileChange {
                 changes: vec![

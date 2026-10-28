@@ -33,6 +33,31 @@ impl<'a> Chip<'a> {
         self
     }
 
+    // how wide the chip will be, so a row can decide what fits before laying anything out
+    pub fn width(&self, ui: &Ui) -> f32 {
+        let label_w = if self.label.is_empty() {
+            -space::XS
+        } else {
+            ui.painter()
+                .layout_no_wrap(
+                    self.label.to_owned(),
+                    font::medium(text::SM + 1.0),
+                    theme::palette(ui).text_muted,
+                )
+                .size()
+                .x
+        };
+        space::SM + self.mark_width() + label_w + space::XS + icon::SM + space::SM
+    }
+
+    fn mark_width(&self) -> f32 {
+        if self.provider.is_some() || self.icon.is_some() {
+            icon::MD + space::XS + 2.0
+        } else {
+            0.0
+        }
+    }
+
     pub fn show(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui);
         let galley = ui.painter().layout_no_wrap(
@@ -40,17 +65,8 @@ impl<'a> Chip<'a> {
             font::medium(text::SM + 1.0),
             p.text_muted,
         );
-        let mark_w = if self.provider.is_some() || self.icon.is_some() {
-            icon::MD + space::XS + 2.0
-        } else {
-            0.0
-        };
-        let label_w = if self.label.is_empty() {
-            -space::XS
-        } else {
-            galley.size().x
-        };
-        let width = space::SM + mark_w + label_w + space::XS + icon::SM + space::SM;
+        let mark_w = self.mark_width();
+        let width = self.width(ui);
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(width, control::SM), Sense::click());
         response.widget_info(|| WidgetInfo::labeled(egui::Role::ComboBox, true, self.label));

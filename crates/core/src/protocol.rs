@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 14;
+pub const PROTOCOL: u32 = 15;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -57,6 +57,9 @@ pub enum AgentItem {
         // absolute paths of the files and images sent along with the message
         #[serde(default)]
         attachments: Vec<String>,
+        // sent while the agent was busy and still waiting its turn
+        #[serde(default)]
+        queued: bool,
     },
     Assistant {
         text: String,

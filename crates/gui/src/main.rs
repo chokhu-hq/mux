@@ -69,6 +69,8 @@ fn main() -> eframe::Result {
     // before anything spawns a thread, and before the server is started so it inherits the result
     #[cfg(unix)]
     shell_env::adopt_login_path();
+    #[cfg(windows)]
+    adopt_windows_path();
     let mut viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
     if let Ok(icon) =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/mux-256.png"))
@@ -100,6 +102,29 @@ fn main() -> eframe::Result {
             eframe::run_native("Mux", options, start())
         }
         result => result,
+    }
+}
+
+// picks up folders added to PATH since the user signed in, like npm's once node or an agent cli is installed,
+// which an app opened from explorer otherwise can't see until they sign out and back in
+#[cfg(windows)]
+fn adopt_windows_path() {
+    let Some(fresh) = mux_core::windows_path() else {
+        return;
+    };
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut dirs: Vec<&str> = Vec::new();
+    for dir in current.split(';').chain(fresh.split(';')) {
+        let dir = dir.trim();
+        if !dir.is_empty() && !dirs.iter().any(|d| d.eq_ignore_ascii_case(dir)) {
+            dirs.push(dir);
+        }
+    }
+    let merged = dirs.join(";");
+    if merged != current {
+        log::info!("using windows' current PATH: {merged}");
+        // nothing else runs yet, since this is called first thing in main before any thread starts
+        unsafe { std::env::set_var("PATH", merged) };
     }
 }
 
@@ -201,8 +226,10 @@ struct App {
     dropping: bool,
     // files dropped since the last frame, for the open agent to pick up
     dropped: Vec<String>,
-    // which agent clis are on PATH, checked once for the welcome screen
-    installed: Option<[(Provider, bool); 3]>,
+    // which agent clis are on PATH and signed in, checked for the welcome screen and settings
+    installed: Option<[(Provider, AgentState); 3]>,
+    // sign-in checks still running, since each cli takes a moment to answer
+    signins: Option<std::sync::mpsc::Receiver<(Provider, bool)>>,
     // the file opened from a chat link, kept while the panel slides shut
     viewer: Option<FileView>,
     viewer_open: bool,
@@ -270,6 +297,7 @@ impl App {
             dropping: false,
             dropped: Vec::new(),
             installed: None,
+            signins: None,
             viewer: None,
             viewer_open: false,
             viewer_width: 560.0,
@@ -393,6 +421,8 @@ impl App {
         if self.settings_open {
             if !std::mem::replace(&mut self.usage_requested, true) {
                 self.sessions.outbox.push(ClientMsg::RefreshUsage);
+                // someone may have signed in or installed an agent since, so it's checked again
+                self.installed = None;
             }
             self.settings_page(ui);
             return;
@@ -407,7 +437,7 @@ impl App {
             return;
         }
         if !self.sessions.has_groups() {
-            let installed = *self.installed.get_or_insert_with(installed_agents);
+            let installed = self.agents(ui.ctx());
             if welcome(ui, &installed) {
                 *run = Some("new-group");
             }
@@ -752,13 +782,22 @@ impl App {
             self.settings_open = false;
         }
         #[cfg(target_os = "linux")]
-        let blur = matches!(self.blur, Some(Ok(_)));
-        // offered until trying it turns out it can't work here
+        let blur = match &self.blur {
+            Some(Err(reason)) => Some(Err(reason.clone())),
+            _ => Some(Ok(())),
+        };
+        // offered until trying it turns out it can't work here, and then the reason stays in its place
         #[cfg(any(windows, target_os = "macos"))]
-        let blur = see_through_renderer() && !matches!(self.backdrop, Some(Err(_)));
+        let blur = match &self.backdrop {
+            _ if !see_through_renderer() => Some(Err(
+                "the graphics driver can't draw a see-through window".to_owned(),
+            )),
+            Some(Err(reason)) => Some(Err(reason.clone())),
+            _ => Some(Ok(())),
+        };
         #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        let blur = false;
-        let agents = *self.installed.get_or_insert_with(installed_agents);
+        let blur = None;
+        let agents = self.agents(&ctx);
         let mut prefs = self.prefs.clone();
         let distros = self.distros();
         let previewed = self.themes.preview.take();
@@ -869,7 +908,7 @@ impl App {
 const SHOWN_MODELS: usize = 5;
 
 // the first run screen: what mux is, the one thing to do next, and whether the agents are ready
-fn welcome(ui: &mut egui::Ui, agents: &[(Provider, bool)]) -> bool {
+fn welcome(ui: &mut egui::Ui, agents: &[(Provider, AgentState)]) -> bool {
     let p = theme::palette(ui);
     let width = 420.0;
     let mut open = false;
@@ -928,8 +967,8 @@ fn welcome(ui: &mut egui::Ui, agents: &[(Provider, bool)]) -> bool {
                                 .font(font::medium(text::SM))
                                 .color(p.text_faint),
                         );
-                        for &(provider, ready) in agents {
-                            agent_status(ui, provider, ready);
+                        for &(provider, state) in agents {
+                            agent_status(ui, provider, state);
                         }
                     });
                 });
@@ -957,7 +996,7 @@ fn welcome(ui: &mut egui::Ui, agents: &[(Provider, bool)]) -> bool {
     open
 }
 
-fn agent_status(ui: &mut egui::Ui, provider: Provider, ready: bool) {
+fn agent_status(ui: &mut egui::Ui, provider: Provider, state: AgentState) {
     let p = theme::palette(ui);
     ui.horizontal(|ui| {
         let (mark, _) = ui.allocate_exact_size(vec2(icon::LG, icon::LG), egui::Sense::hover());
@@ -974,14 +1013,18 @@ fn agent_status(ui: &mut egui::Ui, provider: Provider, ready: bool) {
                 .color(p.text),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (glyph, label, color) = if ready {
-                (icons::CHECK_CIRCLE, "Installed".to_owned(), p.success)
-            } else {
-                (
+            let (glyph, label, color) = match state {
+                AgentState::Ready => (icons::CHECK_CIRCLE, "Installed".to_owned(), p.success),
+                AgentState::SignedOut => (
+                    icons::WARNING_CIRCLE,
+                    format!("Sign in to {}", product(provider)),
+                    p.warning,
+                ),
+                AgentState::Missing => (
                     icons::WARNING_CIRCLE,
                     format!("Install {}", product(provider)),
                     p.warning,
-                )
+                ),
             };
             ui.label(
                 egui::RichText::new(label)
@@ -1141,21 +1184,139 @@ fn shell_quote(path: &str) -> String {
 }
 
 // the clis are looked for where the server runs, since that's where it starts them
-fn installed_agents() -> [(Provider, bool); 3] {
+// whether an agent can start: its cli is missing, there but signed out, or ready
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentState {
+    Missing,
+    SignedOut,
+    Ready,
+}
+
+impl App {
+    // which agents can start, found on PATH at once and marked signed out as the clis answer
+    fn agents(&mut self, ctx: &egui::Context) -> [(Provider, AgentState); 3] {
+        if self.installed.is_none() {
+            let found = installed_agents();
+            self.signins = Some(check_signins(ctx, &found));
+            self.installed = Some(found);
+        }
+        let mut agents = self.installed.unwrap_or_else(installed_agents);
+        if let Some(answers) = &self.signins {
+            for (provider, signed_in) in answers.try_iter() {
+                if let Some(agent) = agents.iter_mut().find(|(p, _)| *p == provider)
+                    && !signed_in
+                {
+                    agent.1 = AgentState::SignedOut;
+                }
+            }
+        }
+        self.installed = Some(agents);
+        agents
+    }
+}
+
+fn installed_agents() -> [(Provider, AgentState); 3] {
+    let state = |found: bool| {
+        if found {
+            AgentState::Ready
+        } else {
+            AgentState::Missing
+        }
+    };
     #[cfg(windows)]
     if let Some(distro) = mux_core::paths::wsl() {
         let found = wsl::installed(&distro, &Provider::ALL.map(cli));
-        return Provider::ALL.map(|provider| (provider, found.contains(&cli(provider))));
+        return Provider::ALL.map(|provider| (provider, state(found.contains(&cli(provider)))));
     }
-    Provider::ALL.map(installed)
+    Provider::ALL.map(|provider| (provider, state(installed(provider))))
 }
 
-// the server runs agents with the same PATH, so finding the cli here means it can start
-fn installed(provider: Provider) -> (Provider, bool) {
-    let found = std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| dir.join(cli(provider)).is_file())
-    });
-    (provider, found)
+// the server runs agents with the same PATH, so finding the cli here means it can start,
+// and on windows npm installs them as .cmd files and others as .exe
+fn installed(provider: Provider) -> bool {
+    let names: &[&str] = if cfg!(windows) {
+        &["exe", "cmd", "bat"]
+    } else {
+        &[""]
+    };
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            names.iter().any(|ext| {
+                let file = dir.join(cli(provider));
+                let file = if ext.is_empty() {
+                    file
+                } else {
+                    file.with_extension(ext)
+                };
+                file.is_file()
+            })
+        })
+    })
+}
+
+// asks claude code and codex whether they're signed in, off the ui thread since each takes a moment to start;
+// opencode's free models work without signing in, and an answer that doesn't come counts as signed in
+fn check_signins(
+    ctx: &egui::Context,
+    agents: &[(Provider, AgentState)],
+) -> std::sync::mpsc::Receiver<(Provider, bool)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    #[cfg(windows)]
+    if mux_core::paths::wsl().is_some() {
+        return rx;
+    }
+    for &(provider, state) in agents {
+        let args: &[&str] = match provider {
+            Provider::Claude => &["auth", "status"],
+            Provider::Codex => &["login", "status"],
+            Provider::OpenCode => continue,
+        };
+        if state != AgentState::Ready {
+            continue;
+        }
+        let (tx, ctx) = (tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            if let Some(signed_in) = exits_cleanly(cli(provider), args) {
+                if !signed_in {
+                    log::info!("{} isn't signed in", provider.label());
+                }
+                let _ = tx.send((provider, signed_in));
+                ctx.request_repaint();
+            }
+        });
+    }
+    rx
+}
+
+// whether a command succeeds, giving up after a while so a stuck cli can't hold the answer forever
+fn exits_cleanly(program: &str, args: &[&str]) -> Option<bool> {
+    let mut child = mux_core::command(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            return Some(status.success());
+        }
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+// how to sign in to an agent from a terminal
+pub fn sign_in_command(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "claude auth login",
+        Provider::Codex => "codex login",
+        Provider::OpenCode => "opencode auth login",
+    }
 }
 
 // the agent, model, effort and speed pickers in the composer, returning new settings when one changes

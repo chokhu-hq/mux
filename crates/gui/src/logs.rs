@@ -30,7 +30,7 @@ impl Entry {
 }
 
 // the settings tab that shows what the app and its server logged, ready to copy into a bug report
-pub fn show(ui: &mut egui::Ui, agents: &[(Provider, bool)]) {
+pub fn show(ui: &mut egui::Ui, agents: &[(Provider, crate::AgentState)]) {
     let p = theme::palette(ui);
     let entries = read(ui.ctx());
 
@@ -178,11 +178,15 @@ fn parse(source: &'static str, log: &str) -> Vec<Entry> {
 }
 
 // what gets copied: enough about this machine to make sense of the log, then the log itself
-fn report(entries: &[Entry], agents: &[(Provider, bool)]) -> String {
+fn report(entries: &[Entry], agents: &[(Provider, crate::AgentState)]) -> String {
     let found = agents
         .iter()
-        .map(|(provider, installed)| {
-            let state = if *installed { "found" } else { "not found" };
+        .map(|(provider, state)| {
+            let state = match state {
+                crate::AgentState::Ready => "found",
+                crate::AgentState::SignedOut => "found, signed out",
+                crate::AgentState::Missing => "not found",
+            };
             format!("{} {state}", provider.label())
         })
         .collect::<Vec<_>>()

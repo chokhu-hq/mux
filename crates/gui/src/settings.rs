@@ -42,9 +42,9 @@ impl Tab {
 pub struct Page<'a> {
     pub tab: &'a mut Tab,
     pub prefs: &'a mut Prefs,
-    // transparency is only offered where the compositor can blur behind the window
-    pub blur: bool,
-    pub agents: [(Provider, bool); 3],
+    // whether the system can blur behind the window, or why it can't, or none where it never could
+    pub blur: Option<Result<(), String>>,
+    pub agents: [(Provider, crate::AgentState); 3],
     pub usage: [(Provider, Vec<UsageWindow>); 3],
     // the last month of tokens by day, once the server has read the clis' history
     pub tokens: Option<(i64, Vec<UsageDay>)>,
@@ -111,7 +111,7 @@ impl Page<'_> {
                     Tab::General => general(
                         ui,
                         self.prefs,
-                        self.blur,
+                        self.blur.clone(),
                         &self.agents,
                         self.distros.as_deref(),
                         &self.models,
@@ -170,8 +170,8 @@ fn nav_item(ui: &mut egui::Ui, tab: Tab, selected: bool) -> egui::Response {
 fn general(
     ui: &mut egui::Ui,
     prefs: &mut Prefs,
-    blur: bool,
-    agents: &[(Provider, bool)],
+    blur: Option<Result<(), String>>,
+    agents: &[(Provider, crate::AgentState)],
     distros: Option<&[String]>,
     models: &crate::sessions::Models,
     themes: &mut crate::themes::Themes,
@@ -194,24 +194,39 @@ fn general(
             .show(ui);
         });
         theme_rows(ui, prefs, themes);
-        if blur {
-            divider(ui);
-            setting(
-                ui,
-                "Transparency",
-                "How much of the desktop shows through the window",
-                |ui| {
-                    Segmented::new(
-                        &mut prefs.transparency,
-                        &[
-                            (Transparency::Off, "Off"),
-                            (Transparency::Subtle, "Subtle"),
-                            (Transparency::Full, "Full"),
-                        ],
-                    )
-                    .show(ui);
-                },
-            );
+        match blur {
+            Some(Ok(())) => {
+                divider(ui);
+                setting(
+                    ui,
+                    "Transparency",
+                    "How much of the desktop shows through the window",
+                    |ui| {
+                        Segmented::new(
+                            &mut prefs.transparency,
+                            &[
+                                (Transparency::Off, "Off"),
+                                (Transparency::Subtle, "Subtle"),
+                                (Transparency::Full, "Full"),
+                            ],
+                        )
+                        .show(ui);
+                    },
+                );
+            }
+            // the row stays, saying why, rather than vanishing the moment it's tried
+            Some(Err(reason)) => {
+                divider(ui);
+                let detail = format!("Not available here because {reason}");
+                setting(ui, "Transparency", &detail, |ui| {
+                    ui.label(
+                        egui::RichText::new("Unavailable")
+                            .font(font::regular(text::MD))
+                            .color(p.text_faint),
+                    );
+                });
+            }
+            None => {}
         }
         divider(ui);
         setting(
@@ -255,22 +270,31 @@ fn general(
     });
 
     section(ui, "Coding agents", |ui| {
-        for (i, &(provider, ready)) in agents.iter().enumerate() {
+        for (i, &(provider, state)) in agents.iter().enumerate() {
             if i > 0 {
                 divider(ui);
             }
             ui.push_id(i, |ui| {
                 let name = crate::product(provider);
-                let detail = if ready {
-                    format!("Runs {name}, found on your PATH")
-                } else {
-                    format!("Install {name} to start {} agents", provider.label())
+                let detail = match state {
+                    crate::AgentState::Ready => format!("Runs {name}, found on your PATH"),
+                    crate::AgentState::SignedOut => format!(
+                        "Run `{}` in a terminal to sign in",
+                        crate::sign_in_command(provider)
+                    ),
+                    crate::AgentState::Missing => {
+                        format!("Install {name} to start {} agents", provider.label())
+                    }
                 };
                 setting(ui, provider.label(), &detail, |ui| {
-                    let (glyph, label, color) = if ready {
-                        (icons::CHECK_CIRCLE, "Installed", p.success)
-                    } else {
-                        (icons::WARNING_CIRCLE, "Not found", p.warning)
+                    let (glyph, label, color) = match state {
+                        crate::AgentState::Ready => (icons::CHECK_CIRCLE, "Installed", p.success),
+                        crate::AgentState::SignedOut => {
+                            (icons::WARNING_CIRCLE, "Not signed in", p.warning)
+                        }
+                        crate::AgentState::Missing => {
+                            (icons::WARNING_CIRCLE, "Not found", p.warning)
+                        }
                     };
                     ui.label(
                         egui::RichText::new(label)

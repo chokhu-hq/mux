@@ -33,23 +33,84 @@ pub fn build_id() -> &'static str {
     })
 }
 
-// windows' build number, where 22000 and up is windows 11, read once from `ver`,
-// which prints "Microsoft Windows [Version 10.0.22631.4602]"
+// windows' build number, where 22000 and up is windows 11, read once and the same in every language,
+// from RtlGetVersion since the documented calls report an older windows to apps without a manifest
 #[cfg(windows)]
 pub fn windows_build() -> Option<u32> {
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
     static BUILD: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     *BUILD.get_or_init(|| {
-        let output = command("cmd").args(["/C", "ver"]).output().ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let version = text.split("Version ").nth(1)?;
-        version
-            .split('.')
-            .nth(2)?
-            .trim_end_matches(']')
-            .trim()
-            .parse()
-            .ok()
+        // the struct is plain data that RtlGetVersion fills in, once its own size is set
+        let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        let status = unsafe { windows_sys::Wdk::System::SystemServices::RtlGetVersion(&mut info) };
+        (status == 0).then_some(info.dwBuildNumber)
     })
+}
+
+// PATH as windows has it now, the machine's folders and then the user's, since an app opened from explorer
+// keeps the PATH from when the user signed in and misses anything installed since, like npm's folder
+#[cfg(windows)]
+pub fn windows_path() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let machine = registry_string(
+        HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        "Path",
+    );
+    let user = registry_string(HKEY_CURRENT_USER, "Environment", "Path");
+    let parts: Vec<String> = [machine, user].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(";"))
+}
+
+// a string value, with %VARIABLES% in it expanded the way windows expands them for new processes
+#[cfg(windows)]
+fn registry_string(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    key: &str,
+    value: &str,
+) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (key, value) = (wide(key), wide(value));
+    let mut size = 0u32;
+    // asking for a plain string makes windows expand an expandable one, and a first call gives the size
+    let found = unsafe {
+        RegGetValueW(
+            root,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if found != 0 {
+        return None;
+    }
+    // the expanded size is only an estimate, so a too small buffer is grown and tried again
+    for _ in 0..3 {
+        let mut buffer = vec![0u16; size as usize / 2 + 1];
+        let mut bytes = (buffer.len() * 2) as u32;
+        let read = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut bytes,
+            )
+        };
+        if read == 0 {
+            let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+            return Some(String::from_utf16_lossy(&buffer[..len]));
+        }
+        size = bytes.max(size * 2);
+    }
+    None
 }
 
 // the shell in the user's account is the one a terminal opens, and SHELL can be stale or missing

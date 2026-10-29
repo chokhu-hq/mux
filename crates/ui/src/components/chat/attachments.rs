@@ -69,7 +69,7 @@ pub fn sent(ui: &mut Ui, paths: &[String]) {
 pub fn picture(ui: &Ui, path: &str, rect: Rect, cover: bool) {
     let p = theme::palette(ui);
     let rounding = CornerRadius::same(radius::LG);
-    let uri = format!("file://{path}");
+    let uri = crate::components::image_viewer::file_uri(path);
     let image = Image::new(uri).corner_radius(rounding);
     match image.load_for_size(ui.ctx(), rect.size()) {
         Ok(poll) => match poll.size() {
@@ -108,7 +108,7 @@ pub fn picture(ui: &Ui, path: &str, rect: Rect, cover: bool) {
 
 // a preview keeps the picture's shape, shrunk to fit inside `max`
 pub fn fitted(ui: &Ui, path: &str, max: Vec2) -> Vec2 {
-    let uri = format!("file://{path}");
+    let uri = crate::components::image_viewer::file_uri(path);
     let source = Image::new(uri)
         .load_for_size(ui.ctx(), max)
         .ok()

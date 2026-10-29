@@ -33,6 +33,25 @@ pub fn build_id() -> &'static str {
     })
 }
 
+// windows' build number, where 22000 and up is windows 11, read once from `ver`,
+// which prints "Microsoft Windows [Version 10.0.22631.4602]"
+#[cfg(windows)]
+pub fn windows_build() -> Option<u32> {
+    static BUILD: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *BUILD.get_or_init(|| {
+        let output = command("cmd").args(["/C", "ver"]).output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let version = text.split("Version ").nth(1)?;
+        version
+            .split('.')
+            .nth(2)?
+            .trim_end_matches(']')
+            .trim()
+            .parse()
+            .ok()
+    })
+}
+
 // the shell in the user's account is the one a terminal opens, and SHELL can be stale or missing
 #[cfg(unix)]
 pub fn login_shell() -> String {

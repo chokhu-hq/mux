@@ -11,9 +11,45 @@ const RELEASES: &str = "https://api.github.com/repos/chokhu-hq/mux/releases";
 const CHANNEL: Option<&str> = option_env!("MUX_CHANNEL");
 const COMMIT: Option<&str> = option_env!("MUX_COMMIT");
 
+#[derive(Clone)]
 pub struct Update {
     pub version: String,
     pub url: String,
+    // this platform's build in the release, when it's there and signed
+    pub download: Option<Download>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Download {
+    pub name: String,
+    pub url: String,
+    pub signature: String,
+    pub size: u64,
+}
+
+// the release file holding this platform's build
+fn asset_name() -> String {
+    if cfg!(target_os = "macos") {
+        "mux-macos-universal.zip".to_owned()
+    } else if cfg!(windows) {
+        "mux-windows-x86_64.zip".to_owned()
+    } else {
+        format!("mux-linux-{}.tar.gz", std::env::consts::ARCH)
+    }
+}
+
+// a build without a signature beside it is left for downloading by hand
+fn download(release: &Value, name: &str) -> Option<Download> {
+    let assets = release["assets"].as_array()?;
+    let find = |wanted: &str| assets.iter().find(|a| a["name"] == wanted);
+    let build = find(name)?;
+    let signature = find(&format!("{name}.sig"))?;
+    Some(Download {
+        name: name.to_owned(),
+        url: build["browser_download_url"].as_str()?.to_owned(),
+        signature: signature["browser_download_url"].as_str()?.to_owned(),
+        size: build["size"].as_u64().unwrap_or(0),
+    })
 }
 
 // asks github once in the background whether a newer build of this channel is out
@@ -50,6 +86,11 @@ pub fn server_release() -> Option<(String, String)> {
     }
 }
 
+// only builds made in ci check for and install updates, never one built from source
+pub fn is_release() -> bool {
+    CHANNEL.is_some()
+}
+
 // how this build was made, for the log and for anyone reading it
 pub fn build() -> String {
     match (CHANNEL, COMMIT) {
@@ -75,6 +116,7 @@ fn newer() -> Option<Update> {
             (compared["status"] == "ahead").then(|| Update {
                 version: format!("Experimental {}", &commit[..commit.len().min(7)]),
                 url,
+                download: download(&release, &asset_name()),
             })
         }
         _ => {
@@ -84,6 +126,7 @@ fn newer() -> Option<Update> {
             is_newer(tag, env!("CARGO_PKG_VERSION")).then(|| Update {
                 version: tag.to_owned(),
                 url,
+                download: download(&release, &asset_name()),
             })
         }
     }
@@ -119,7 +162,36 @@ fn is_newer(tag: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{Download, download, is_newer};
+    use serde_json::json;
+
+    #[test]
+    fn picks_this_platforms_signed_build() {
+        let asset = |name: &str| json!({ "name": name, "browser_download_url": format!("https://x/{name}"), "size": 42 });
+        let release = json!({ "assets": [
+            asset("mux-linux-x86_64.tar.gz"), asset("mux-linux-x86_64.tar.gz.sig"),
+            asset("mux-windows-x86_64.zip"),
+        ] });
+        assert_eq!(
+            download(&release, "mux-linux-x86_64.tar.gz"),
+            Some(Download {
+                name: "mux-linux-x86_64.tar.gz".into(),
+                url: "https://x/mux-linux-x86_64.tar.gz".into(),
+                signature: "https://x/mux-linux-x86_64.tar.gz.sig".into(),
+                size: 42,
+            })
+        );
+        assert_eq!(
+            download(&release, "mux-windows-x86_64.zip"),
+            None,
+            "unsigned"
+        );
+        assert_eq!(
+            download(&release, "mux-macos-universal.zip"),
+            None,
+            "missing"
+        );
+    }
 
     #[test]
     fn compares_versions_by_number() {

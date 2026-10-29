@@ -82,7 +82,20 @@ fn id() -> Id {
 }
 
 fn uri(path: &str) -> String {
-    format!("file://{path}")
+    file_uri(path)
+}
+
+// a file:// uri the image loader reads back to the same path, where a windows drive path needs a third slash,
+// since without it the loader takes the drive letter for a network host and looks for \\C:\…
+pub(crate) fn file_uri(path: &str) -> String {
+    if let Some(share) = path.strip_prefix("\\\\") {
+        return format!("file://{share}");
+    }
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
 }
 
 fn keys(ctx: &Context, state: &mut State) {
@@ -426,4 +439,26 @@ fn divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
     ui.painter()
         .vline(rect.center().x, rect.y_range(), Stroke::new(1.0, p.border));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_uri;
+
+    #[test]
+    fn file_uris_keep_windows_drives_as_drives() {
+        assert_eq!(file_uri("/home/me/a.png"), "file:///home/me/a.png");
+        assert_eq!(
+            file_uri("C:/Users/mili/Downloads/a.png"),
+            "file:///C:/Users/mili/Downloads/a.png"
+        );
+        assert_eq!(
+            file_uri("C:\\Users\\mili\\a.png"),
+            "file:///C:\\Users\\mili\\a.png"
+        );
+        assert_eq!(
+            file_uri("\\\\server\\share\\a.png"),
+            "file://server\\share\\a.png"
+        );
+    }
 }

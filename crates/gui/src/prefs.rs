@@ -15,12 +15,22 @@ pub enum Appearance {
 }
 
 // how much of the blurred desktop shows through, where off keeps every surface solid
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transparency {
     Off,
-    #[default]
     Subtle,
     Full,
+}
+
+// on linux the compositor's blur is well tried, while windows and macos start solid until it's turned on
+impl Default for Transparency {
+    fn default() -> Self {
+        if cfg!(target_os = "linux") {
+            Self::Subtle
+        } else {
+            Self::Off
+        }
+    }
 }
 
 impl Transparency {
@@ -39,7 +49,9 @@ impl Transparency {
 pub struct Prefs {
     pub appearance: Appearance,
     pub reduced_motion: bool,
-    #[serde(default)]
+    // saved under a new name, since every older file says subtle, which windows and macos shouldn't take up
+    #[serde(default, rename = "see_through")]
+    #[cfg_attr(target_os = "linux", serde(alias = "transparency"))]
     pub transparency: Transparency,
     // on windows, the wsl distribution the server runs in, or none to run it on windows itself
     #[serde(default)]
@@ -54,6 +66,9 @@ pub struct Prefs {
     pub dark_theme: Option<String>,
     #[serde(default)]
     pub light_theme: Option<String>,
+    // new builds download and go in place by themselves unless this is set, leaving only a restart
+    #[serde(default)]
+    pub manual_updates: bool,
 }
 
 // what a new agent starts with, before anything is picked in its composer
@@ -110,4 +125,32 @@ impl Prefs {
 
 fn path() -> PathBuf {
     protocol::data_dir().join("ui.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Prefs, Transparency};
+
+    #[test]
+    fn transparency_reads_back_under_its_new_name() {
+        let saved = serde_json::to_string(&Prefs {
+            transparency: Transparency::Full,
+            ..Prefs::default()
+        })
+        .unwrap();
+        assert!(saved.contains("\"see_through\":\"Full\""));
+        let read: Prefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(read.transparency, Transparency::Full);
+        // an older file's choice still counts on linux, where it was offered
+        let old: Prefs = serde_json::from_str(
+            r#"{"appearance":"System","reduced_motion":false,"transparency":"Off"}"#,
+        )
+        .unwrap();
+        let expected = if cfg!(target_os = "linux") {
+            Transparency::Off
+        } else {
+            Transparency::default()
+        };
+        assert_eq!(old.transparency, expected);
+    }
 }

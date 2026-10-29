@@ -122,7 +122,7 @@ impl Page<'_> {
                         usage(ui, &self.usage);
                     }
                     Tab::Logs => crate::logs::show(ui, &self.agents),
-                    Tab::About => about(ui),
+                    Tab::About => about(ui, self.prefs),
                 }
             });
         ui.allocate_rect(ui.max_rect(), Sense::hover());
@@ -307,7 +307,7 @@ fn usage(ui: &mut egui::Ui, usage: &[(Provider, Vec<UsageWindow>)]) {
     }
 }
 
-fn about(ui: &mut egui::Ui) {
+fn about(ui: &mut egui::Ui, prefs: &mut Prefs) {
     let p = theme::palette(ui);
     section(ui, "Mux", |ui| {
         setting(ui, "Version", "The Mux app and server", |ui| {
@@ -317,6 +317,19 @@ fn about(ui: &mut egui::Ui) {
                     .color(p.text_muted),
             );
         });
+        divider(ui);
+        setting(
+            ui,
+            "Updates",
+            "New builds download by themselves, so updating takes a restart",
+            |ui| {
+                Segmented::new(
+                    &mut prefs.manual_updates,
+                    &[(false, "Automatic"), (true, "Manual")],
+                )
+                .show(ui);
+            },
+        );
         divider(ui);
         let data = mux_core::protocol::data_dir()
             .to_string_lossy()

@@ -21,11 +21,14 @@ use mux_ui::chat::{ChatAction, ChatItem, ChatView, Decision};
 use prefs::Prefs;
 use sessions::{Models, Sessions};
 
+#[cfg(any(windows, target_os = "macos"))]
+mod backdrop;
 #[cfg(target_os = "linux")]
 mod blur;
 mod connection;
 #[cfg(target_os = "linux")]
 mod drop;
+mod install;
 mod link;
 mod logs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -52,6 +55,10 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     mux_core::logging::init("app.log");
+    // a build installed by the updater runs from here on, so what the last update left behind can go
+    if update::is_release() {
+        install::clean_up();
+    }
     log::info!(
         "mux {} ({}) on {} {}",
         mux_core::VERSION,
@@ -72,16 +79,52 @@ fn main() -> eframe::Result {
         viewport,
         // on wayland mux reads the clipboard itself, since egui's fallback can't see pictures
         clipboard_shortcuts: !wayland(),
+        wgpu_options: renderer(),
         ..Default::default()
     };
-    eframe::run_native(
-        "Mux",
-        options,
+    let start = || -> eframe::AppCreator<'static> {
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
             Ok(Box::new(App::new(&cc.egui_ctx)))
-        }),
-    )
+        })
+    };
+    match eframe::run_native("Mux", options.clone(), start()) {
+        // a gpu that can't draw see-through on windows still gets a window, just a solid one
+        Err(e) if cfg!(windows) && see_through_renderer() => {
+            log::warn!("the see-through renderer didn't start, so the window is solid: {e}");
+            SEE_THROUGH.store(false, std::sync::atomic::Ordering::Relaxed);
+            let options = eframe::NativeOptions {
+                wgpu_options: Default::default(),
+                ..options
+            };
+            eframe::run_native("Mux", options, start())
+        }
+        result => result,
+    }
+}
+
+// whether the window can be drawn see-through, which on windows takes a renderer set up for it at start
+static SEE_THROUGH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn see_through_renderer() -> bool {
+    SEE_THROUGH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// windows only composites a see-through window when direct3d 12 draws into a directcomposition visual,
+// and vulkan, which wgpu would otherwise pick first, can't, so windows asks for exactly that
+fn renderer() -> eframe::egui_wgpu::WgpuConfiguration {
+    let mut config = eframe::egui_wgpu::WgpuConfiguration::default();
+    if cfg!(windows)
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup
+    {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+        setup
+            .instance_descriptor
+            .backend_options
+            .dx12
+            .presentation_system = eframe::wgpu::Dx12SwapchainKind::DxgiFromVisual;
+    }
+    config
 }
 
 const NEW_AGENT: KeyboardShortcut = shortcut::app(Key::T);
@@ -145,6 +188,9 @@ struct App {
     // asked for once on the first frame, and kept alive so the compositor keeps blurring
     #[cfg(target_os = "linux")]
     blur: Option<Result<blur::Blur, String>>,
+    // whether the system's frosted background is on, or why it can't be, once it's first wanted
+    #[cfg(any(windows, target_os = "macos"))]
+    backdrop: Option<Result<bool, String>>,
     // started on the first frame, since winit doesn't pass wayland drops on
     #[cfg(target_os = "linux")]
     drops: Option<Option<std::sync::mpsc::Receiver<drop::DropEvent>>>,
@@ -175,6 +221,8 @@ struct App {
     opened: (std::sync::mpsc::Sender<u64>, std::sync::mpsc::Receiver<u64>),
     // a newer release, once the check at launch finds one
     update: Option<update::Update>,
+    // that update being downloaded and put in place
+    installer: Option<install::Installer>,
     updates: std::sync::mpsc::Receiver<update::Update>,
     // on windows, the wsl distributions installed, read once when settings first open
     #[cfg(windows)]
@@ -213,6 +261,8 @@ impl App {
             usage_requested: false,
             #[cfg(target_os = "linux")]
             blur: None,
+            #[cfg(any(windows, target_os = "macos"))]
+            backdrop: None,
             #[cfg(target_os = "linux")]
             drops: None,
             #[cfg(target_os = "linux")]
@@ -231,6 +281,7 @@ impl App {
             review: false,
             opened: std::sync::mpsc::channel(),
             update: None,
+            installer: None,
             updates: update::check(ctx),
             #[cfg(windows)]
             distros: None,
@@ -264,6 +315,13 @@ impl App {
         let p = theme::palette(ui);
         let rect = ui.max_rect().shrink(space::SM);
         if let Ok(update) = self.updates.try_recv() {
+            // with updates on, a signed build for this platform downloads and goes in place by itself
+            if let Some(download) = update.download.clone()
+                && !self.prefs.manual_updates
+                && install::target().is_ok()
+            {
+                self.installer = Some(install::Installer::start(ui.ctx(), download));
+            }
             self.update = Some(update);
         }
         let stale = self.link.is_stale();
@@ -296,15 +354,8 @@ impl App {
             .painter()
             .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
         ui_footer.add_space(space::SM + 1.0);
-        if let Some(update) = &self.update
-            && notice_row(&mut ui_footer, icons::ARROW_CIRCLE_UP, "Update available")
-                .tip(format!(
-                    "{} is out. Open the release page to download it.",
-                    update.version
-                ))
-                .clicked()
-        {
-            mux_ui::chat::open_externally(&update.url);
+        if let Some(update) = &self.update {
+            self.update_row(&mut ui_footer, update.clone());
         }
         // the server waits for a click here while something runs in it, since restarting it stops that
         if stale
@@ -702,7 +753,10 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         let blur = matches!(self.blur, Some(Ok(_)));
-        #[cfg(not(target_os = "linux"))]
+        // offered until trying it turns out it can't work here
+        #[cfg(any(windows, target_os = "macos"))]
+        let blur = see_through_renderer() && !matches!(self.backdrop, Some(Err(_)));
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         let blur = false;
         let agents = *self.installed.get_or_insert_with(installed_agents);
         let mut prefs = self.prefs.clone();
@@ -1490,6 +1544,99 @@ fn slash_commands(
 const FOOTER_ROW: f32 = 32.0;
 
 // a quiet row above settings, there only while a newer release is out
+impl App {
+    // puts the frosted background in or takes it out as transparency is turned on and off, returning whether it's on
+    #[cfg(any(windows, target_os = "macos"))]
+    fn backdrop(&mut self, frame: &eframe::Frame) -> bool {
+        let wanted = self.prefs.transparency != prefs::Transparency::Off && see_through_renderer();
+        match (&self.backdrop, wanted) {
+            // once it's failed it isn't tried again, and the setting stops being offered
+            (Some(Err(_)), _) => false,
+            (Some(Ok(on)), wanted) if *on == wanted => wanted,
+            (_, true) => match backdrop::apply(frame) {
+                Ok(()) => {
+                    log::info!("frosted background on");
+                    self.backdrop = Some(Ok(true));
+                    true
+                }
+                Err(reason) => {
+                    log::info!("no frosted background: {reason}");
+                    self.backdrop = Some(Err(reason));
+                    false
+                }
+            },
+            (Some(Ok(true)), false) => {
+                backdrop::clear(frame);
+                self.backdrop = Some(Ok(false));
+                false
+            }
+            (_, false) => false,
+        }
+    }
+
+    // the update row: available, downloading, ready to restart into, or failed with the release page as the way out
+    fn update_row(&mut self, ui: &mut egui::Ui, update: update::Update) {
+        let stage = self.installer.as_ref().map(install::Installer::stage);
+        let downloadable = update.download.is_some() && install::target().is_ok();
+        match stage {
+            None => {
+                let tip = match (&update.download, install::target()) {
+                    (Some(_), Ok(_)) => format!(
+                        "{} is out. Click to download and install it.",
+                        update.version
+                    ),
+                    (_, Err(why)) => format!(
+                        "{} is out. {why}, so this opens the release page.",
+                        update.version
+                    ),
+                    (None, _) => format!(
+                        "{} is out. Open the release page to download it.",
+                        update.version
+                    ),
+                };
+                if notice_row(ui, icons::ARROW_CIRCLE_UP, "Update available")
+                    .tip(tip)
+                    .clicked()
+                {
+                    match update.download.clone().filter(|_| downloadable) {
+                        Some(download) => {
+                            self.installer = Some(install::Installer::start(ui.ctx(), download));
+                        }
+                        None => mux_ui::chat::open_externally(&update.url),
+                    }
+                }
+            }
+            Some(install::Stage::Downloading { done, total }) => {
+                let label = match (done * 100).checked_div(total) {
+                    Some(percent) => format!("Downloading update {}%", percent.min(100)),
+                    None => "Downloading update…".to_owned(),
+                };
+                notice_row(ui, icons::ARROW_CIRCLE_UP, &label)
+                    .tip(format!("Getting {}", update.version));
+            }
+            Some(install::Stage::Ready) => {
+                if notice_row(ui, icons::ARROW_CLOCKWISE, "Restart to update")
+                    .tip(format!(
+                        "{} is installed and starts when Mux does",
+                        update.version
+                    ))
+                    .clicked()
+                {
+                    install::restart(ui.ctx());
+                }
+            }
+            Some(install::Stage::Failed(why)) => {
+                if notice_row(ui, icons::WARNING_CIRCLE, "Update failed")
+                    .tip(format!("{why}. Click to open the release page."))
+                    .clicked()
+                {
+                    mux_ui::chat::open_externally(&update.url);
+                }
+            }
+        }
+    }
+}
+
 // a row above settings that asks for a click, like an update to download
 fn notice_row(ui: &mut egui::Ui, glyph: char, label: &str) -> egui::Response {
     let p = theme::palette(ui);
@@ -2131,7 +2278,9 @@ impl eframe::App for App {
             }
             blur.is_ok()
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(windows, target_os = "macos"))]
+        let blurred = self.backdrop(frame);
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         let blurred = {
             let _ = frame;
             false

@@ -13,6 +13,8 @@ alacritty_terminal.workspace = true
 rfd = "0.17"
 serde.workspace = true
 serde_json.workspace = true
+ed25519-compact.workspace = true
+raw-window-handle = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -20,8 +22,11 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"
 
+# the system's frosted background behind the window, acrylic on windows and vibrancy on macos
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+window-vibrancy = "0.8"
+
 [target.'cfg(target_os = "linux")'.dependencies]
-raw-window-handle = "0.6"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }

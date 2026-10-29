@@ -401,6 +401,8 @@ fn apply(style: &mut Style, p: &Palette, dark: bool) {
     v.hyperlink_color = p.accent;
     v.warn_fg_color = p.warning;
     v.error_fg_color = p.danger;
+    // letters on whole pixels look sharper, most of all on the normal density screens windows often runs at
+    v.text_options.subpixel_binning = false;
     v.selection.bg_fill = p.accent.gamma_multiply(0.35);
     // egui paints selected text in this colour, and the accent of some themes is unreadable on its own tint
     v.selection.stroke = Stroke::new(1.0, p.text);

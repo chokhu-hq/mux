@@ -24,10 +24,12 @@ pub fn viewport(title: &str, size: Vec2) -> ViewportBuilder {
         .with_inner_size(capture::size().unwrap_or(size))
         .with_min_inner_size([480.0, 320.0]);
     if cfg!(target_os = "macos") {
+        // see-through so the frosted background can show, which nothing does until transparency is turned on
         builder
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
             .with_title_shown(false)
+            .with_transparent(true)
     } else {
         builder.with_decorations(false).with_transparent(true)
     }
@@ -73,7 +75,8 @@ impl<'a> WindowFrame<'a> {
             )
         });
         let custom = !cfg!(target_os = "macos");
-        let rounded = custom && !maximized;
+        // macos and windows 11 round and outline windows themselves, so drawing them here as well doubles them up
+        let rounded = custom && !maximized && !system_frame();
         let corner = CornerRadius::same(if rounded { radius::LG } else { 0 });
 
         let edge = rect.min.x + self.sidebar;
@@ -149,10 +152,20 @@ impl<'a> WindowFrame<'a> {
                 Stroke::new(1.0, p.border_strong),
                 StrokeKind::Inside,
             );
+        }
+        if custom && !maximized {
             resize_handles(ui, rect);
         }
         inner
     }
+}
+
+// whether the system draws the window's corners and border itself, which windows does from windows 11 on
+fn system_frame() -> bool {
+    #[cfg(windows)]
+    return mux_core::windows_build().is_some_and(|build| build >= 22000);
+    #[cfg(not(windows))]
+    cfg!(target_os = "macos")
 }
 
 // where the title bar's own controls can start, after any window buttons on the left

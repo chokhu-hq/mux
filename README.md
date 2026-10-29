@@ -64,7 +64,7 @@ Builds are published from every change to `main`.
 | Platform | Download |
 | --- | --- |
 | macOS (Apple Silicon and Intel) | [mux-macos-universal.zip](https://github.com/chokhu-hq/mux/releases/download/experimental/mux-macos-universal.zip) |
-| Windows (x64) | [mux-windows-x86_64.zip](https://github.com/chokhu-hq/mux/releases/download/experimental/mux-windows-x86_64.zip) |
+| Windows (x64) | [mux-windows-x86_64-setup.exe](https://github.com/chokhu-hq/mux/releases/download/experimental/mux-windows-x86_64-setup.exe), or the portable [mux-windows-x86_64.zip](https://github.com/chokhu-hq/mux/releases/download/experimental/mux-windows-x86_64.zip) |
 | Linux (x64) | [mux-linux-x86_64.tar.gz](https://github.com/chokhu-hq/mux/releases/download/experimental/mux-linux-x86_64.tar.gz) |
 | Linux (arm64) | [mux-linux-aarch64.tar.gz](https://github.com/chokhu-hq/mux/releases/download/experimental/mux-linux-aarch64.tar.gz) |
 
@@ -84,7 +84,11 @@ xattr -dr com.apple.quarantine /Applications/Mux.app
 <details>
 <summary><strong>Windows</strong></summary>
 
-Unzip and run `Mux.exe`. SmartScreen may warn about an unrecognised app, so choose **More info** and then **Run anyway**.
+Run `mux-windows-x86_64-setup.exe`. It installs for your account only, so there's no admin prompt, and adds Mux to the Start menu and to **Settings → Apps** for uninstalling. SmartScreen may warn about an unrecognised app, so choose **More info** and then **Run anyway**.
+
+For a portable copy, unzip `mux-windows-x86_64.zip` into a folder you own and run `Mux.exe`.
+
+Either way, Mux updates itself and only asks you to restart.
 
 To run your agents in Linux instead, open **Settings → General → Run agents in** and pick a WSL distribution. Mux installs its server there and keeps the window on Windows, the way VS Code's remote does.
 

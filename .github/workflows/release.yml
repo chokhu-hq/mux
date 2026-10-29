@@ -145,10 +145,21 @@ jobs:
           Copy-Item target/release/mux-gui.exe mux-windows-x86_64/Mux.exe
           Copy-Item LICENSE, README.md mux-windows-x86_64/
           Compress-Archive -Path mux-windows-x86_64 -DestinationPath mux-windows-x86_64.zip
+      # the zip stays for anyone who wants it portable, and the installer gives a start menu entry and an uninstaller
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DVersion=$version" "/DSource=$PWD\mux-windows-x86_64" "/O$PWD" packaging\windows\mux.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v7
         with:
           name: mux-windows-x86_64
-          path: mux-windows-x86_64.zip
+          path: |
+            mux-windows-x86_64.zip
+            mux-windows-x86_64-setup.exe
 
   publish:
     needs: [linux, macos, windows]

@@ -979,7 +979,7 @@ fn agent_status(ui: &mut egui::Ui, provider: Provider, ready: bool) {
             } else {
                 (
                     icons::WARNING_CIRCLE,
-                    format!("Install the {} CLI", cli(provider)),
+                    format!("Install {}", cli_name(provider)),
                     p.warning,
                 )
             };
@@ -995,6 +995,15 @@ fn agent_status(ui: &mut egui::Ui, provider: Provider, ready: bool) {
             );
         });
     });
+}
+
+// what each agent's cli is called in a sentence, since the command names are lowercase
+fn cli_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "the Codex CLI",
+        Provider::Claude => "Claude Code",
+        Provider::OpenCode => "the OpenCode CLI",
+    }
 }
 
 fn cli(provider: Provider) -> &'static str {

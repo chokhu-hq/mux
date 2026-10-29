@@ -260,11 +260,11 @@ fn general(
                 divider(ui);
             }
             ui.push_id(i, |ui| {
-                let cli = crate::cli(provider);
+                let cli = crate::cli_name(provider);
                 let detail = if ready {
-                    format!("Runs the {cli} CLI found on your PATH")
+                    format!("Runs {cli}, found on your PATH")
                 } else {
-                    format!("Install the {cli} CLI to start {} agents", provider.label())
+                    format!("Install {cli} to start {} agents", provider.label())
                 };
                 setting(ui, provider.label(), &detail, |ui| {
                     let (glyph, label, color) = if ready {

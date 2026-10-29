@@ -169,6 +169,7 @@ impl Sessions {
                     SessionKind::Shell => icons::TERMINAL,
                     SessionKind::Task => icons::PLAY,
                 },
+                provider: (session.kind == SessionKind::Agent).then_some(session.provider),
             })
             .collect()
     }

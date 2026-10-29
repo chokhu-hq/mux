@@ -96,6 +96,11 @@ impl Button {
             let t = hover_t(ui, &response);
             let pressed = press_t(ui, &response);
             let (base, hover, fg, stroke) = match self.variant {
+                // a button that can't be pressed looks the same whatever its kind, so it never reads as the main action
+                _ if !self.enabled => {
+                    let fill = theme::tint(p, theme::fill::DISABLED);
+                    (fill, fill, p.text_faint, None)
+                }
                 Variant::Primary => (p.accent, p.accent_hover, p.on_accent, None),
                 Variant::Secondary => (p.surface, p.hover, p.text, Some(p.border_strong)),
                 Variant::Ghost => (
@@ -116,30 +121,24 @@ impl Button {
                 .gamma_multiply(1.0 - 0.15 * pressed);
             // shrink slightly while held like apple's press feedback
             let rect = rect.shrink2(rect.size() * 0.015 * pressed);
-            let alpha = if self.enabled { 1.0 } else { 0.4 };
             let corner = CornerRadius::same(radius::MD);
             let painter = ui.painter();
-            painter.rect_filled(rect, corner, fill.gamma_multiply(alpha));
+            painter.rect_filled(rect, corner, fill);
             if let Some(stroke) = stroke {
-                painter.rect_stroke(
-                    rect,
-                    corner,
-                    Stroke::new(1.0, stroke.gamma_multiply(alpha)),
-                    StrokeKind::Inside,
-                );
+                painter.rect_stroke(rect, corner, Stroke::new(1.0, stroke), StrokeKind::Inside);
             }
             let text_at = Align2::CENTER_CENTER
                 .anchor_size(rect.center() - Vec2::new(caret / 2.0, 0.0), galley.size())
                 .min;
             let text_right = text_at.x + galley.size().x;
-            painter.galley_with_override_text_color(text_at, galley, fg.gamma_multiply(alpha));
+            painter.galley_with_override_text_color(text_at, galley, fg);
             if self.menu {
                 painter.text(
                     egui::pos2(text_right + space::XS + icon::SM / 2.0, rect.center().y),
                     Align2::CENTER_CENTER,
                     icons::CARET_DOWN,
                     font::icon(icon::SM),
-                    p.text_faint.gamma_multiply(alpha),
+                    p.text_faint,
                 );
             }
         }

@@ -49,6 +49,8 @@ pub struct Destination {
     // a faint note on the right, like the project it belongs to
     pub detail: String,
     pub icon: char,
+    // an agent session wears its agent's mark in place of the icon, as it does in the sidebar
+    pub provider: Option<mux_core::Provider>,
 }
 
 pub enum Choice {
@@ -243,8 +245,21 @@ impl CommandPalette {
                                     (d.title.as_str(), Some(d.icon), None, d.detail.as_str())
                                 }
                             };
+                            let provider = match row_item {
+                                Row::Destination(d) => d.provider,
+                                Row::Command(_) => None,
+                            };
                             let mut text_x = rect.left() + 10.0;
-                            if let Some(icon) = icon {
+                            if let Some(provider) = provider {
+                                super::provider_mark(
+                                    ui.painter(),
+                                    pos2(text_x + icon::LG / 2.0, rect.center().y),
+                                    icon::LG,
+                                    provider,
+                                    super::provider_color(provider, p.text_muted),
+                                );
+                                text_x += 26.0;
+                            } else if let Some(icon) = icon {
                                 ui.painter().text(
                                     pos2(text_x, rect.center().y),
                                     Align2::LEFT_CENTER,

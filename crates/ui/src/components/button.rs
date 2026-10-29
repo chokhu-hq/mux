@@ -4,7 +4,8 @@ use egui::{
 };
 
 use super::{hover_t, press_t};
-use crate::theme::{self, control, radius};
+use crate::icons;
+use crate::theme::{self, control, font, icon, radius, space};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variant {
@@ -25,6 +26,8 @@ pub struct Button {
     variant: Variant,
     size: Size,
     enabled: bool,
+    // a down arrow after the text, for a button that opens a list to pick from
+    menu: bool,
 }
 
 impl Button {
@@ -34,7 +37,14 @@ impl Button {
             variant: Variant::Secondary,
             size: Size::Md,
             enabled: true,
+            menu: false,
         }
+    }
+
+    // marks the button as opening a menu, the way the composer's pickers show it
+    pub fn menu(mut self) -> Self {
+        self.menu = true;
+        self
     }
 
     pub fn variant(mut self, variant: Variant) -> Self {
@@ -72,7 +82,8 @@ impl Button {
             Size::Sm => (control::SM, 8.0),
             Size::Md => (control::MD, 12.0),
         };
-        let size = Vec2::new(galley.size().x + pad * 2.0, height);
+        let caret = if self.menu { icon::SM + space::XS } else { 0.0 };
+        let size = Vec2::new(galley.size().x + caret + pad * 2.0, height);
         let sense = if self.enabled {
             Sense::click()
         } else {
@@ -117,13 +128,20 @@ impl Button {
                     StrokeKind::Inside,
                 );
             }
-            painter.galley_with_override_text_color(
-                Align2::CENTER_CENTER
-                    .anchor_size(rect.center(), galley.size())
-                    .min,
-                galley,
-                fg.gamma_multiply(alpha),
-            );
+            let text_at = Align2::CENTER_CENTER
+                .anchor_size(rect.center() - Vec2::new(caret / 2.0, 0.0), galley.size())
+                .min;
+            let text_right = text_at.x + galley.size().x;
+            painter.galley_with_override_text_color(text_at, galley, fg.gamma_multiply(alpha));
+            if self.menu {
+                painter.text(
+                    egui::pos2(text_right + space::XS + icon::SM / 2.0, rect.center().y),
+                    Align2::CENTER_CENTER,
+                    icons::CARET_DOWN,
+                    font::icon(icon::SM),
+                    p.text_faint.gamma_multiply(alpha),
+                );
+            }
         }
 
         if self.enabled {

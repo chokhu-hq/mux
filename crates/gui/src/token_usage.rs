@@ -29,7 +29,11 @@ impl Range {
 }
 
 // the token section of the usage tab: headline numbers, a daily chart and the models that used them
-pub fn show(ui: &mut egui::Ui, history: Option<&(i64, Vec<UsageDay>)>) {
+pub fn show(
+    ui: &mut egui::Ui,
+    history: Option<&(i64, Vec<UsageDay>)>,
+    names: &crate::sessions::Models,
+) {
     let p = theme::palette(ui);
     let range_id = ui.scope_id().with("token-range");
     let mut range = ui
@@ -86,7 +90,7 @@ pub fn show(ui: &mut egui::Ui, history: Option<&(i64, Vec<UsageDay>)>) {
     let chart_days = range.days().max(7);
     card(ui, |ui| chart(ui, days, *today - chart_days + 1, *today));
     ui.add_space(space::MD);
-    card(ui, |ui| models(ui, &in_range, total.total()));
+    card(ui, |ui| models(ui, &in_range, total.total(), names));
     ui.add_space(space::XL);
 }
 
@@ -501,7 +505,48 @@ fn day_card(
     }
 }
 
-fn models(ui: &mut egui::Ui, days: &[&UsageDay], total: u64) {
+// a model by the name the composer and sidebar give it, or a tidied id for one the cli no longer lists
+fn model_label(names: &crate::sessions::Models, provider: Provider, id: &str) -> String {
+    if let Some(model) = names
+        .get(&provider)
+        .and_then(|list| list.iter().find(|m| m.id == id))
+    {
+        return model.name.clone();
+    }
+    tidy_model_id(id)
+}
+
+// claude-opus-5-5 reads as Opus 5.5 and gpt-6.1-sol as GPT-6.1-Sol, the way the clis name them
+fn tidy_model_id(id: &str) -> String {
+    let capital = |word: &str| {
+        let mut chars = word.chars();
+        chars
+            .next()
+            .map_or(String::new(), |c| c.to_uppercase().chain(chars).collect())
+    };
+    if let Some(rest) = id.strip_prefix("claude-") {
+        let parts: Vec<&str> = rest.split('-').filter(|p| p.len() < 8).collect();
+        let (words, numbers): (Vec<&str>, Vec<&str>) = parts
+            .iter()
+            .partition(|p| !p.chars().all(|c| c.is_ascii_digit()));
+        let mut name = words
+            .iter()
+            .map(|w| capital(w))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !numbers.is_empty() {
+            name = format!("{name} {}", numbers.join("."));
+        }
+        return name;
+    }
+    if let Some(rest) = id.strip_prefix("gpt-") {
+        let parts: Vec<String> = rest.split('-').map(capital).collect();
+        return format!("GPT-{}", parts.join("-"));
+    }
+    id.to_owned()
+}
+
+fn models(ui: &mut egui::Ui, days: &[&UsageDay], total: u64, names: &crate::sessions::Models) {
     let p = theme::palette(ui);
     ui.label(
         egui::RichText::new("By model")
@@ -541,7 +586,7 @@ fn models(ui: &mut egui::Ui, days: &[&UsageDay], total: u64) {
         painter.text(
             pos2(name_left, y),
             egui::Align2::LEFT_CENTER,
-            model,
+            model_label(names, provider, model),
             font::regular(text::MD),
             p.text,
         );
@@ -637,7 +682,15 @@ fn date(day: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{date, long_date, nice_ceiling};
+    use super::{date, long_date, nice_ceiling, tidy_model_id};
+
+    #[test]
+    fn model_ids_read_like_their_names() {
+        assert_eq!(tidy_model_id("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(tidy_model_id("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(tidy_model_id("gpt-6.1-sol"), "GPT-6.1-Sol");
+        assert_eq!(tidy_model_id("codex-auto-review"), "codex-auto-review");
+    }
 
     #[test]
     fn formats_days_and_rounds_chart_tops() {

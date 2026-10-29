@@ -662,7 +662,7 @@ impl Sessions {
                         ui.close();
                     }
                     if group.sessions.is_empty()
-                        && MenuItem::new("Remove group")
+                        && MenuItem::new("Remove project")
                             .icon(icons::TRASH)
                             .danger()
                             .show(ui)

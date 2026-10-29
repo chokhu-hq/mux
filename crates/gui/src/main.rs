@@ -227,7 +227,7 @@ const COMMANDS: [Command; 7] = [
     Command::new("new-shell", "New shell")
         .icon(icons::TERMINAL_WINDOW)
         .shortcut(NEW_SHELL),
-    Command::new("new-group", "New group from folder…").icon(icons::FOLDER),
+    Command::new("new-group", "Add project folder…").icon(icons::FOLDER),
     Command::new("toggle-sidebar", "Toggle sidebar")
         .icon(icons::SIDEBAR_SIMPLE)
         .shortcut(SIDEBAR_SHORTCUT),
@@ -552,7 +552,7 @@ impl App {
                 let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body));
                 // agents are sandboxed to their folder, so they never run without one
                 let choose = EmptyState::new(icons::FOLDER_OPEN, "Choose a project folder")
-                    .detail("Agents can only read and change files inside their group's folder. Pick the project this agent should work on.")
+                    .detail("Agents can only read and change files inside their project's folder. Pick the folder this agent should work on.")
                     .action("Choose folder…")
                     .show(&mut body_ui);
                 if choose {

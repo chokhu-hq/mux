@@ -118,7 +118,7 @@ impl Page<'_> {
                         self.themes,
                     ),
                     Tab::Usage => {
-                        crate::token_usage::show(ui, self.tokens.as_ref());
+                        crate::token_usage::show(ui, self.tokens.as_ref(), &self.models);
                         usage(ui, &self.usage);
                     }
                     Tab::Logs => crate::logs::show(ui, &self.agents),
@@ -385,7 +385,10 @@ fn server(ui: &mut egui::Ui, prefs: &mut Prefs, distros: &[String]) {
                 .wsl
                 .as_deref()
                 .map_or("Windows".to_owned(), |d| format!("WSL: {d}"));
-            let button = mux_ui::Button::new(current).size(mux_ui::Size::Sm).show(ui);
+            let button = mux_ui::Button::new(current)
+                .size(mux_ui::Size::Sm)
+                .menu()
+                .show(ui);
             egui::Popup::menu(&button)
                 .align(egui::RectAlign::BOTTOM_END)
                 .gap(space::XS)
@@ -447,7 +450,10 @@ fn theme_rows(ui: &mut egui::Ui, prefs: &mut Prefs, themes: &mut crate::themes::
                     .filter(|c| c.dark == dark)
                     .or_else(|| themes.find(fallback));
                 let label = current.map_or("Mux", |c| c.name.as_str());
-                let button = mux_ui::Button::new(label).size(mux_ui::Size::Sm).show(ui);
+                let button = mux_ui::Button::new(label)
+                    .size(mux_ui::Size::Sm)
+                    .menu()
+                    .show(ui);
                 let current = current.map(|c| c.id.clone());
                 egui::Popup::menu(&button)
                     .align(egui::RectAlign::BOTTOM_END)
@@ -566,7 +572,10 @@ fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Mo
                         .map_or(id.clone(), |m| m.name.clone()),
                     None => "Default".to_owned(),
                 };
-                let button = mux_ui::Button::new(current).size(mux_ui::Size::Sm).show(ui);
+                let button = mux_ui::Button::new(current)
+                    .size(mux_ui::Size::Sm)
+                    .menu()
+                    .show(ui);
                 egui::Popup::menu(&button)
                     .align(egui::RectAlign::BOTTOM_END)
                     .gap(space::XS)
@@ -603,6 +612,7 @@ fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Mo
         setting(ui, "Permissions", defaults.access.description(), |ui| {
             let button = mux_ui::Button::new(defaults.access.label())
                 .size(mux_ui::Size::Sm)
+                .menu()
                 .show(ui);
             egui::Popup::menu(&button)
                 .align(egui::RectAlign::BOTTOM_END)

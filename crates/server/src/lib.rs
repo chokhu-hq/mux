@@ -13,12 +13,15 @@ mod worktree;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use mux_core::protocol::{
     self, AgentItem, ClientMsg, ModelOption, PROTOCOL, ServerMsg, UsageWindow,
 };
 use mux_core::{Provider, SessionStatus};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use agent::Agent;
@@ -28,7 +31,7 @@ use store::Store;
 pub enum Event {
     #[cfg(windows)]
     Tray(tray::Action),
-    Connected(u64, UnboundedSender<ServerMsg>),
+    Connected(u64, Client),
     Disconnected(u64),
     Client(u64, ClientMsg),
     Output {
@@ -130,48 +133,90 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     Ok(())
 }
 
+// how much may wait to be sent to one client, past which it's cut off rather than held for, like a window that
+// froze while watching a long reply. it reconnects and is sent everything afresh once it reads again
+const CLIENT_BACKLOG: usize = 32 * 1024 * 1024;
+
+// a connected client's outbox, which counts what's queued so a client that stops reading can't grow the server
+pub struct Client {
+    tx: UnboundedSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+    cut: Arc<Notify>,
+    over: AtomicBool,
+}
+
+impl Client {
+    pub(crate) fn send(&self, msg: ServerMsg) -> Result<(), ()> {
+        let Ok(frame) = protocol::encode(&msg) else {
+            return Err(());
+        };
+        if self.queued.load(Ordering::Relaxed) + frame.len() > CLIENT_BACKLOG {
+            if !self.over.swap(true, Ordering::Relaxed) {
+                self.cut.notify_one();
+            }
+            return Err(());
+        }
+        self.queued.fetch_add(frame.len(), Ordering::Relaxed);
+        self.tx.send(frame).map_err(drop)
+    }
+}
+
 pub(crate) async fn connection<S>(stream: S, id: u64, events: UnboundedSender<Event>)
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (tx, mut outbox) = mpsc::unbounded_channel::<ServerMsg>();
-    if events.send(Event::Connected(id, tx)).is_err() {
+    let (tx, mut outbox) = mpsc::unbounded_channel::<Vec<u8>>();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let cut = Arc::new(Notify::new());
+    let client = Client {
+        tx,
+        queued: queued.clone(),
+        cut: cut.clone(),
+        over: AtomicBool::new(false),
+    };
+    if events.send(Event::Connected(id, client)).is_err() {
         return;
     }
     let send = tokio::spawn(async move {
-        while let Some(msg) = outbox.recv().await {
-            let Ok(frame) = protocol::encode(&msg) else {
-                continue;
-            };
+        while let Some(frame) = outbox.recv().await {
             if writer.write_all(&frame).await.is_err() {
                 break;
             }
+            queued.fetch_sub(frame.len(), Ordering::Relaxed);
         }
     });
 
-    loop {
-        let mut header = [0; 4];
-        if reader.read_exact(&mut header).await.is_err() {
-            break;
-        }
-        let Ok(len) = protocol::frame_len(header) else {
-            break;
-        };
-        let mut body = vec![0; len];
-        if reader.read_exact(&mut body).await.is_err() {
-            break;
-        }
-        match protocol::decode::<ClientMsg>(&body) {
-            Ok(msg) => {
-                if events.send(Event::Client(id, msg)).is_err() {
+    let read = async {
+        loop {
+            let mut header = [0; 4];
+            if reader.read_exact(&mut header).await.is_err() {
+                break;
+            }
+            let Ok(len) = protocol::frame_len(header) else {
+                break;
+            };
+            let mut body = vec![0; len];
+            if reader.read_exact(&mut body).await.is_err() {
+                break;
+            }
+            match protocol::decode::<ClientMsg>(&body) {
+                Ok(msg) => {
+                    if events.send(Event::Client(id, msg)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    log::warn!("dropping client {id}, bad message: {err}");
                     break;
                 }
             }
-            Err(err) => {
-                log::warn!("dropping client {id}, bad message: {err}");
-                break;
-            }
+        }
+    };
+    tokio::select! {
+        _ = read => {}
+        _ = cut.notified() => {
+            log::warn!("dropping client {id}, it stopped reading and fell too far behind");
         }
     }
     let _ = events.send(Event::Disconnected(id));
@@ -181,7 +226,7 @@ where
 struct Server {
     store: Store,
     state: PathBuf,
-    clients: HashMap<u64, UnboundedSender<ServerMsg>>,
+    clients: HashMap<u64, Client>,
     processes: HashMap<u64, Process>,
     agents: HashMap<u64, Agent>,
     // last known status of each session, to notice when one changes

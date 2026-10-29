@@ -71,6 +71,10 @@ fn main() -> eframe::Result {
     shell_env::adopt_login_path();
     #[cfg(windows)]
     adopt_windows_path();
+    #[cfg(windows)]
+    if !try_see_through() {
+        SEE_THROUGH.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
     if let Ok(icon) =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/mux-256.png"))
@@ -128,6 +132,47 @@ fn adopt_windows_path() {
     }
 }
 
+// a start with the see-through renderer is noted down first and the note is cleared once frames are drawing,
+// so a gpu that crashes or hangs with it gets the standard renderer next time, until mux is updated and it's tried again,
+// and MUX_RENDERER=standard skips it for a gpu that draws a blank window, which the app itself can't notice
+#[cfg(windows)]
+fn try_see_through() -> bool {
+    if std::env::var("MUX_RENDERER").is_ok_and(|v| v == "standard") {
+        log::info!("using the standard renderer, as MUX_RENDERER asks");
+        return false;
+    }
+    let marker = renderer_marker();
+    let build = mux_core::build_id();
+    if std::fs::read_to_string(&marker).is_ok_and(|last| last == build) {
+        log::warn!(
+            "the see-through renderer didn't get going last time, so this start uses the standard one"
+        );
+        return false;
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&marker, build);
+    true
+}
+
+#[cfg(windows)]
+fn renderer_marker() -> std::path::PathBuf {
+    mux_core::protocol::data_dir().join("renderer-check")
+}
+
+// the see-through renderer has drawn enough frames to trust, so the next start uses it again
+#[cfg(windows)]
+fn renderer_works(ctx: &egui::Context) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if see_through_renderer()
+        && ctx.cumulative_frame_nr() > 30
+        && !DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        let _ = std::fs::remove_file(renderer_marker());
+    }
+}
+
 // whether the window can be drawn see-through, which on windows takes a renderer set up for it at start
 static SEE_THROUGH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -140,6 +185,7 @@ fn see_through_renderer() -> bool {
 fn renderer() -> eframe::egui_wgpu::WgpuConfiguration {
     let mut config = eframe::egui_wgpu::WgpuConfiguration::default();
     if cfg!(windows)
+        && see_through_renderer()
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup
     {
         setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
@@ -1271,7 +1317,7 @@ fn check_signins(
             Provider::Codex => &["login", "status"],
             Provider::OpenCode => continue,
         };
-        if state != AgentState::Ready {
+        if state != AgentState::Ready || signed_in_by_environment(provider) {
             continue;
         }
         let (tx, ctx) = (tx.clone(), ctx.clone());
@@ -1286,6 +1332,26 @@ fn check_signins(
         });
     }
     rx
+}
+
+// an api key or a cloud provider set in the environment signs the cli in without a login, which its status
+// command may still call logged out, so those people aren't told to sign in when their agents work
+fn signed_in_by_environment(provider: Provider) -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    match provider {
+        Provider::Claude => [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ]
+        .into_iter()
+        .any(set),
+        Provider::Codex => ["OPENAI_API_KEY", "CODEX_API_KEY"].into_iter().any(set),
+        Provider::OpenCode => true,
+    }
 }
 
 // whether a command succeeds, giving up after a while so a stuck cli can't hold the answer forever
@@ -2491,6 +2557,8 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         mux_ui::capture::screenshot(&ctx);
+        #[cfg(windows)]
+        renderer_works(&ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {

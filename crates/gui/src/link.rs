@@ -118,6 +118,8 @@ impl Link {
                     }
                 } else if connection.is_stale()
                     && local()
+                    // a build from source only says so, since it may well be someone's test run beside their real mux
+                    && crate::update::is_release()
                     && !sessions.is_busy()
                     && !RESTARTED.swap(true, std::sync::atomic::Ordering::Relaxed)
                 {

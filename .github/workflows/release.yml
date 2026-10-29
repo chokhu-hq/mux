@@ -9,6 +9,7 @@ on:
       - "LICENSE"
       - "CLAUDE.md"
       - "AGENTS.md"
+      - "docs/**"
       - "assets/screenshot.png"
   workflow_dispatch:
 

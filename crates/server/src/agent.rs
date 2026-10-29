@@ -21,13 +21,18 @@ use crate::{Event, usage};
 mod background;
 mod interaction;
 mod opencode;
+mod refresh;
 mod rewind;
 mod subagent;
+
+pub(crate) use refresh::stop_claude;
 
 // long command output is cut down to its tail, which is the part people read
 const OUTPUT_LIMIT: usize = 32 * 1024;
 // how much of an agent cli's stderr makes it into the log for each launch
 const STDERR_LINES: usize = 200;
+// the ids of the control requests that change a running claude's settings start with this
+const CONFIG_REQUEST: &str = "mux-config-";
 
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
@@ -66,7 +71,20 @@ enum Call {
 struct Process {
     stdin: UnboundedSender<String>,
     // held so the process is killed when the agent is dropped or restarted, and absent in tests
-    _child: Option<Child>,
+    child: Option<Child>,
+    claude: bool,
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // claude may be refreshing its sign-in, so it's stopped once that's done rather than straight away
+        if self.claude
+            && let Some(child) = self.child.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(stop_claude(child));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -74,7 +92,8 @@ impl Process {
     fn fake(stdin: UnboundedSender<String>) -> Self {
         Self {
             stdin,
-            _child: None,
+            child: None,
+            claude: false,
         }
     }
 }
@@ -440,10 +459,14 @@ impl Agent {
 
     fn transmit(&mut self, text: String, attachments: Vec<String>, steer: bool) {
         if self.settings.provider == Provider::Claude {
-            let line = json!({
+            let mut line = json!({
                 "type": "user",
                 "message": { "role": "user", "content": claude_content(&text, &attachments, &self.skills()) }
             });
+            // "now" breaks into the reply straight away but aborts a running tool, so it waits for "next" then
+            if steer {
+                line["priority"] = json!(if self.tool_running() { "next" } else { "now" });
+            }
             self.claude_waiting.push_back(text);
             self.write(line);
         } else if self.settings.provider == Provider::OpenCode {
@@ -469,6 +492,28 @@ impl Agent {
         } else {
             self.queued.push((text, attachments));
         }
+    }
+
+    // whether the current turn has a tool call in progress, leaving out ones running in the background
+    fn tool_running(&self) -> bool {
+        // the messages being sent now are already in the transcript, so the turn starts before them
+        self.items
+            .iter()
+            .rev()
+            .skip_while(|item| matches!(item, AgentItem::User { .. }))
+            .take_while(|item| !matches!(item, AgentItem::User { .. }))
+            .any(|item| match item {
+                AgentItem::Command {
+                    status, background, ..
+                } => *status == ItemStatus::Running && !background,
+                AgentItem::Subagent {
+                    status, background, ..
+                } => *status == ItemStatus::Running && !background,
+                AgentItem::Tool { status, .. } | AgentItem::FileChange { status, .. } => {
+                    *status == ItemStatus::Running
+                }
+                _ => false,
+            })
     }
 
     // summarises the conversation so far, which only makes sense between turns of a started one
@@ -543,9 +588,13 @@ impl Agent {
         events: &UnboundedSender<Event>,
     ) -> bool {
         let provider = self.settings.provider;
-        // claude bakes model, effort and speed in at launch, so new settings mean relaunching with --resume,
+        // claude takes most new settings while it runs, and the rest mean relaunching with --resume,
         // which waits for a quiet moment rather than cutting off a turn in progress
-        if provider == Provider::Claude && !busy && self.launched.as_ref() != Some(&self.settings) {
+        if provider == Provider::Claude
+            && !busy
+            && self.launched.as_ref() != Some(&self.settings)
+            && !self.reconfigure_claude()
+        {
             self.process = None;
         }
         if self.process.is_some() {
@@ -563,6 +612,59 @@ impl Agent {
         self.push(AgentItem::Error { message });
         self.set_busy(false);
         false
+    }
+
+    // hands new settings to the running claude, written ahead of the message they're for, or says it needs a relaunch
+    fn reconfigure_claude(&mut self) -> bool {
+        let (Some(live), Some(_)) = (self.launched.clone(), self.process.as_ref()) else {
+            return false;
+        };
+        let next = self.settings.clone();
+        // bypassing permissions needs a flag at launch, and a stricter level shouldn't inherit what a looser one allowed
+        let strictness = |access: Access| match access {
+            Access::Full => 0,
+            Access::Auto => 1,
+            Access::AutoEdits => 2,
+            Access::Supervised => 3,
+        };
+        if live.provider != next.provider
+            || live.access == Access::Full
+            || next.access == Access::Full
+            || strictness(next.access) > strictness(live.access)
+        {
+            return false;
+        }
+        if live.model != next.model {
+            self.claude_control("set_model", json!({ "model": next.model }));
+        }
+        if live.effort != next.effort || live.fast != next.fast {
+            // null hands the setting back to whatever the user has claude set to
+            let settings =
+                json!({ "effortLevel": next.effort, "fastMode": next.fast.then_some(true) });
+            self.claude_control("apply_flag_settings", json!({ "settings": settings }));
+        }
+        if permission_mode(&live) != permission_mode(&next) {
+            self.claude_control(
+                "set_permission_mode",
+                json!({ "mode": permission_mode(&next) }),
+            );
+        }
+        log::info!(
+            "session {}: changed claude's settings in place",
+            self.session
+        );
+        self.launched = Some(next);
+        true
+    }
+
+    fn claude_control(&mut self, subtype: &str, mut request: Value) {
+        request["subtype"] = json!(subtype);
+        self.write(json!({
+            "type": "control_request",
+            "request_id": format!("{CONFIG_REQUEST}{}", self.next_call),
+            "request": request,
+        }));
+        self.next_call += 1;
     }
 
     // marks the oldest waiting messages as picked up, up to `count` of them
@@ -769,6 +871,7 @@ impl Agent {
             command
         } else if claude {
             let mut command = Command::from(mux_core::command("claude"));
+            forget_parent_claude(&mut command);
             command.args(claude_args(
                 &self.settings,
                 self.session_id.as_deref(),
@@ -848,12 +951,18 @@ impl Agent {
         self.session = session;
         self.process = Some(Process {
             stdin: tx,
-            _child: Some(child),
+            child: Some(child),
+            claude,
         });
         self.cwd = Some(cwd);
         if claude {
-            // claude needs no handshake, a user message on stdin is enough to start a turn
             self.launched = Some(self.settings.clone());
+            // without this an interrupt stops claude's background agents along with the turn
+            self.write(json!({
+                "type": "control_request",
+                "request_id": "mux-initialize",
+                "request": { "subtype": "initialize", "perTaskStopAffordance": true }
+            }));
             return Ok(());
         }
         if opencode {
@@ -1359,6 +1468,16 @@ impl Agent {
                 }
             }
             Some("control_request") => self.claude_request(msg),
+            // a setting claude wouldn't take in place is applied by relaunching at the next quiet moment instead
+            Some("control_response")
+                if msg["response"]["subtype"] == "error"
+                    && msg["response"]["request_id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with(CONFIG_REQUEST)) =>
+            {
+                log::warn!("claude refused a setting, so it'll be relaunched: {msg}");
+                self.launched = None;
+            }
             Some("rate_limit_event") => {
                 self.usage = Some(usage::claude(&msg["rate_limit_info"]));
             }
@@ -1824,14 +1943,7 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>, at: Option<&str>
         "--permission-prompt-tool",
         "stdio",
         "--permission-mode",
-        // plan mode stands in for the access level until the plan is accepted
-        match settings.access {
-            _ if settings.plan => "plan",
-            Access::Supervised => "manual",
-            Access::AutoEdits => "acceptEdits",
-            Access::Auto => "auto",
-            Access::Full => "bypassPermissions",
-        },
+        permission_mode(settings),
     ]
     .map(str::to_owned)
     .into();
@@ -1859,6 +1971,40 @@ fn claude_args(settings: &AgentSettings, session: Option<&str>, at: Option<&str>
         }
     }
     args
+}
+
+// what a claude session leaves in the environment of everything started from it, like a mux opened from a
+// claude code terminal, which would make each agent think it runs nested inside that session
+const PARENT_CLAUDE: [&str; 12] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_AGENT_SDK_VERSION",
+];
+
+pub(crate) fn forget_parent_claude(command: &mut Command) {
+    for key in PARENT_CLAUDE {
+        command.env_remove(key);
+    }
+}
+
+// plan mode stands in for the access level until the plan is accepted
+fn permission_mode(settings: &AgentSettings) -> &'static str {
+    match settings.access {
+        _ if settings.plan => "plan",
+        Access::Supervised => "manual",
+        Access::AutoEdits => "acceptEdits",
+        Access::Auto => "auto",
+        Access::Full => "bypassPermissions",
+    }
 }
 
 // why a turn failed in words, or none when it didn't or when it only ended because it was stopped

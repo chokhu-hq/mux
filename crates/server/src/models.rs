@@ -157,7 +157,9 @@ fn parse_opencode(list: &Value) -> Vec<ModelOption> {
 
 // claude reports its models in the reply to the initialize control request, before any prompt is sent
 async fn list_claude() -> io::Result<Catalog> {
-    let mut child = Command::from(mux_core::command("claude"))
+    let mut command = Command::from(mux_core::command("claude"));
+    crate::agent::forget_parent_claude(&mut command);
+    let mut child = command
         .args([
             "-p",
             "--input-format",
@@ -171,6 +173,13 @@ async fn list_claude() -> io::Result<Catalog> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
+    let listed = claude_models(&mut child).await;
+    // it may be refreshing the sign-in it started with, which stopping it straight away would lose
+    tokio::spawn(crate::agent::stop_claude(child));
+    listed
+}
+
+async fn claude_models(child: &mut tokio::process::Child) -> io::Result<Catalog> {
     let mut stdin = child
         .stdin
         .take()

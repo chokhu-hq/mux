@@ -86,6 +86,12 @@ impl Link {
                             break;
                         }
                         ServerMsg::Build { id } => connection.server_build = Some(id),
+                        // the tray icon asks the window to come forward, or to close as mux quits
+                        ServerMsg::Focus => {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        ServerMsg::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                         msg => {
                             // a server that sends its state without saying its build is older than build ids
                             if matches!(msg, ServerMsg::State { .. })

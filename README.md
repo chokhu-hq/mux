@@ -90,6 +90,8 @@ For a portable copy, unzip `mux-windows-x86_64.zip` into a folder you own and ru
 
 Either way, Mux updates itself and only asks you to restart.
 
+Closing the window leaves your agents and terminals running, with Mux in the system tray. Click the tray icon to open it again, or choose **Quit Mux** there to stop everything.
+
 To run your agents in Linux instead, open **Settings → General → Run agents in** and pick a WSL distribution. Mux installs its server there and keeps the window on Windows, the way VS Code's remote does.
 
 </details>

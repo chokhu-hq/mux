@@ -5,6 +5,8 @@ mod models;
 mod process;
 mod skills;
 mod store;
+#[cfg(windows)]
+mod tray;
 mod usage;
 mod worktree;
 
@@ -24,6 +26,8 @@ use process::{Change, Process};
 use store::Store;
 
 pub enum Event {
+    #[cfg(windows)]
+    Tray(tray::Action),
     Connected(u64, UnboundedSender<ServerMsg>),
     Disconnected(u64),
     Client(u64, ClientMsg),
@@ -105,6 +109,9 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         stop,
     };
     tokio::spawn(server.run(inbox));
+    // a server on windows shows in the tray, since without a window it's otherwise invisible
+    #[cfg(windows)]
+    tray::start(events.clone());
 
     let mut next_client = 0;
     loop {
@@ -118,6 +125,8 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         }
     }
     listener.remove();
+    #[cfg(windows)]
+    tray::stop();
     Ok(())
 }
 
@@ -201,6 +210,33 @@ impl Server {
 
     fn handle(&mut self, event: Event) {
         match event {
+            #[cfg(windows)]
+            Event::Tray(tray::Action::Open) => {
+                if self.clients.is_empty() {
+                    // the server is the app's own binary, so starting it without --server opens a window
+                    match std::env::current_exe().and_then(|exe| mux_core::command(exe).spawn()) {
+                        Ok(_) => log::info!("opened a window from the tray"),
+                        Err(e) => log::warn!("couldn't open a window from the tray: {e}"),
+                    }
+                } else {
+                    for tx in self.clients.values() {
+                        let _ = tx.send(ServerMsg::Focus);
+                    }
+                }
+            }
+            #[cfg(windows)]
+            Event::Tray(tray::Action::Quit) => {
+                log::info!("quitting from the tray");
+                for tx in self.clients.values() {
+                    let _ = tx.send(ServerMsg::Quit);
+                }
+                // a moment for the windows to hear it before the connections go
+                let stop = self.stop.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    let _ = stop.send(());
+                });
+            }
             Event::Connected(client, tx) => {
                 log::info!("client {client} connected");
                 let _ = tx.send(ServerMsg::Welcome { protocol: PROTOCOL });

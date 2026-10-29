@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 25;
+pub const PROTOCOL: u32 = 26;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -550,6 +550,10 @@ pub enum ServerMsg {
     Build {
         id: String,
     },
+    // the tray icon was clicked, so a window should come forward
+    Focus,
+    // the server is quitting from the tray, and its windows go with it
+    Quit,
 }
 
 // frames are a little-endian u32 length followed by a postcard body

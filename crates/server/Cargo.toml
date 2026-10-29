@@ -13,3 +13,9 @@ base64.workspace = true
 libc.workspace = true
 portable-pty.workspace = true
 alacritty_terminal.workspace = true
+
+# a tray icon on windows, since the server keeps running after the window closes and needs to be seen
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+image.workspace = true

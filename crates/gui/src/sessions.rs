@@ -248,7 +248,10 @@ impl Sessions {
 
     pub fn apply(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { .. } | ServerMsg::Build { .. } => {}
+            ServerMsg::Welcome { .. }
+            | ServerMsg::Build { .. }
+            | ServerMsg::Focus
+            | ServerMsg::Quit => {}
             ServerMsg::State { groups } => {
                 let before: HashMap<u64, SessionStatus> =
                     self.infos().map(|s| (s.id, s.status)).collect();

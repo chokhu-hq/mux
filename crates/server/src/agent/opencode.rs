@@ -219,12 +219,7 @@ impl Agent {
             Some("agent_message_chunk") => {
                 let chunk = update["content"]["text"].as_str().unwrap_or_default();
                 match self.live_text {
-                    Some(index) => {
-                        if let Some(AgentItem::Assistant { text }) = self.items.get_mut(index) {
-                            text.push_str(chunk);
-                            self.changed.insert(index);
-                        }
-                    }
+                    Some(index) => self.append(index, chunk),
                     None => {
                         self.live_text = Some(self.push(AgentItem::Assistant {
                             text: chunk.to_owned(),

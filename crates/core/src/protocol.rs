@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 26;
+pub const PROTOCOL: u32 = 27;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -159,6 +159,16 @@ pub enum AgentItem {
         // none while it's still thinking
         ended: Option<u64>,
     },
+}
+
+impl AgentItem {
+    // the text that grows as the agent streams, which is sent on as just the new part
+    pub fn streamed_text(&mut self) -> Option<&mut String> {
+        match self {
+            AgentItem::Assistant { text } | AgentItem::Reasoning { text, .. } => Some(text),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -554,6 +564,13 @@ pub enum ServerMsg {
     Focus,
     // the server is quitting from the tray, and its windows go with it
     Quit,
+    // more streamed text for the item at `index`, which goes on the end when the item's text is `at` bytes long
+    AgentAppend {
+        id: u64,
+        index: usize,
+        at: usize,
+        text: String,
+    },
 }
 
 // frames are a little-endian u32 length followed by a postcard body

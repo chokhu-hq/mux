@@ -91,7 +91,13 @@ fn many_agents_and_vanishing_clients_leave_nothing_behind() {
     }
     server.wait("every agent to answer", |s| all_replied(s, &ids, 1));
     let files = open_files(server.pid());
-    assert_eq!(children(server.pid()), 16, "one claude per agent");
+    // on unix each agent has a watcher beside it, which stops the agent's helpers with it
+    let per_agent = if cfg!(unix) { 2 } else { 1 };
+    assert_eq!(
+        children(server.pid()),
+        16 * per_agent,
+        "one claude per agent"
+    );
 
     for round in 0..3 {
         // other windows watch every agent, then disappear in the middle of the turns
@@ -128,7 +134,7 @@ fn many_agents_and_vanishing_clients_leave_nothing_behind() {
         after <= files + 4,
         "{files} files open before, {after} after"
     );
-    assert_eq!(children(server.pid()), 16, "no extra processes");
+    assert_eq!(children(server.pid()), 16 * per_agent, "no extra processes");
 
     for id in &ids {
         server.send(ClientMsg::DeleteSession { id: *id });
@@ -142,4 +148,48 @@ fn many_agents_and_vanishing_clients_leave_nothing_behind() {
         0,
         "deleting the agents stopped their processes"
     );
+}
+
+#[test]
+fn a_long_reply_streams_once_not_over_and_over() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "hello");
+    server.wait_idle();
+    let before = server.received.load(std::sync::atomic::Ordering::Relaxed);
+    server.say(id, "scenario:flood");
+    server.wait("the flood to finish", |s| {
+        !s.busy && s.assistant_text().len() > 1
+    });
+    let sent = server.received.load(std::sync::atomic::Ordering::Relaxed) - before;
+    // 300 KB streamed, then the finished reply once more
+    assert!(sent < 1024 * 1024, "a 300 KB reply cost {} KB", sent / 1024);
+    let texts = server.assistant_text();
+    assert_eq!(
+        texts[1].len(),
+        300 * 1024,
+        "every streamed piece arrived, in order"
+    );
+    assert_eq!(texts[2], "ok: scenario:flood");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crashed_server_takes_its_agents_and_their_helpers_with_it() {
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:helper");
+    server.wait_idle();
+    let log = server.claude_log();
+    let helper = log.iter().find_map(|e| e["helper"].as_i64()).unwrap() as i32;
+    let agent = server.claude_launches()[0]["pid"].as_i64().unwrap() as i32;
+    assert!(alive(helper) && alive(agent));
+    server.crash();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while (alive(helper) || alive(agent)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!alive(agent), "the agent outlived the server");
+    assert!(!alive(helper), "the agent's helper outlived the server");
 }

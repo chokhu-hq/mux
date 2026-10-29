@@ -39,6 +39,33 @@ pub fn claude(info: &Value) -> Vec<UsageWindow> {
     out
 }
 
+// when a claude limit that rejects work resets, unless the account can keep going on paid overage
+pub fn claude_blocked_until(info: &Value) -> Option<u64> {
+    let overage = matches!(
+        info["overageStatus"].as_str(),
+        Some("allowed" | "allowed_warning")
+    ) || info["isUsingOverage"] == true;
+    if info["status"] != "rejected" || overage {
+        return None;
+    }
+    info["resetsAt"]
+        .as_u64()
+        .or_else(|| {
+            let kind = info["rateLimitType"].as_str()?;
+            info["unifiedWindows"][kind]["resetsAt"].as_u64()
+        })
+        .or_else(|| blocked_until(&claude(info)))
+}
+
+// when the last of the used up windows resets, since work waits for all of them
+pub fn blocked_until(windows: &[UsageWindow]) -> Option<u64> {
+    windows
+        .iter()
+        .filter(|w| w.used >= 1.0 && w.resets_at > 0)
+        .map(|w| w.resets_at)
+        .max()
+}
+
 fn span(minutes: u64) -> String {
     if minutes < 24 * 60 {
         format!("{}h", minutes.div_ceil(60))
@@ -75,5 +102,30 @@ mod tests {
         } }));
         assert_eq!(claude[0].label, "5h");
         assert!((claude[1].used - 0.29).abs() < 1e-6);
+    }
+
+    #[test]
+    fn knows_when_a_used_up_limit_lets_work_go_on() {
+        let windows = json!({ "five_hour": { "utilization": 1.0, "resetsAt": 50 },
+            "seven_day": { "utilization": 0.4, "resetsAt": 90 } });
+        let rejected = json!({ "status": "rejected", "rateLimitType": "five_hour", "unifiedWindows": windows });
+        assert_eq!(claude_blocked_until(&rejected), Some(50));
+        let mut overage = rejected.clone();
+        overage["overageStatus"] = json!("allowed");
+        assert_eq!(
+            claude_blocked_until(&overage),
+            None,
+            "paid overage keeps it running"
+        );
+        let allowed = json!({ "status": "allowed_warning", "unifiedWindows": windows });
+        assert_eq!(claude_blocked_until(&allowed), None);
+        assert_eq!(
+            blocked_until(&codex(&json!({
+                "primary": { "usedPercent": 100, "windowDurationMins": 300, "resetsAt": 10 },
+                "secondary": { "usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 20 }
+            }))),
+            Some(20),
+            "work waits for every used up window"
+        );
     }
 }

@@ -340,3 +340,116 @@ fn agents_forget_the_claude_session_mux_was_started_from() {
         );
     }
 }
+
+fn continuations(server: &Server) -> usize {
+    server
+        .claude_stdin()
+        .iter()
+        .filter(|m| {
+            m["type"] == "user"
+                && m["message"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("was cut off"))
+        })
+        .count()
+}
+
+fn wait_streaming(server: &mut Server) {
+    server.wait("the reply to start", |s| {
+        s.assistant_text().iter().any(|t| t.contains("more"))
+    });
+}
+
+#[test]
+fn a_turn_a_crash_cut_off_carries_on_in_the_same_conversation() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:slow");
+    wait_streaming(&mut server);
+    server.crash_and_restart();
+    server.wait("the turn to carry on and finish", |s| {
+        !s.busy && s.assistant_text().iter().any(|t| t.contains("was cut off"))
+    });
+    assert_eq!(continuations(&server), 1);
+    let launches = server.claude_launches();
+    assert_eq!(launches.len(), 2);
+    assert!(
+        launches[1]["argv"].to_string().contains("\"--resume\""),
+        "it picks up claude's own conversation"
+    );
+}
+
+#[test]
+fn a_turn_that_keeps_crashing_the_server_stops_after_three_tries() {
+    let mut server = Server::start_with(&[("FAKE_CLAUDE_STALL", "1")]);
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:slow");
+    wait_streaming(&mut server);
+    for _ in 0..3 {
+        server.crash_and_restart();
+        wait_streaming(&mut server);
+    }
+    server.crash_and_restart();
+    server.wait("mux to give up", |s| !s.errors().is_empty());
+    assert!(
+        server.errors()[0].contains("3 times in a row"),
+        "{:?}",
+        server.errors()
+    );
+    assert_eq!(continuations(&server), 3);
+    assert!(!server.busy);
+}
+
+#[test]
+fn quitting_on_purpose_doesnt_carry_on_when_mux_starts_again() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:slow");
+    wait_streaming(&mut server);
+    server.quit_and_restart();
+    server.wait("the transcript", |s| !s.items.is_empty());
+    assert_eq!(continuations(&server), 0);
+    assert_eq!(server.claude_launches().len(), 1);
+}
+
+#[test]
+fn a_turn_a_usage_limit_stopped_carries_on_once_it_resets() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:limit");
+    server.wait("the limit", |s| {
+        s.errors().iter().any(|e| e.contains("carry on by itself"))
+    });
+    server.wait("the turn to carry on", |s| {
+        !s.busy
+            && s.assistant_text()
+                .iter()
+                .any(|t| t.contains("limit has reset"))
+    });
+    assert_eq!(
+        server.claude_launches().len(),
+        1,
+        "the same claude carried on"
+    );
+}
+
+#[test]
+fn a_message_takes_over_from_waiting_for_a_limit() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:limit");
+    server.wait("the limit", |s| {
+        s.errors().iter().any(|e| e.contains("carry on by itself"))
+    });
+    reply(&mut server, id, "never mind");
+    // past when it would have carried on
+    std::thread::sleep(std::time::Duration::from_secs(7));
+    server.wait("anything late", |_| true);
+    let sent = server.claude_stdin();
+    assert!(
+        !sent
+            .iter()
+            .any(|m| m.to_string().contains("limit has reset")),
+        "it waited for the user instead"
+    );
+}

@@ -8,7 +8,9 @@
 //   scenario:approve  asks permission to run a command and waits for the answer
 //   scenario:crash    dies mid-turn
 //   scenario:auth     fails the way claude does when it's signed out
+//   scenario:limit    hits a usage limit that resets a second later
 //   scenario:flood    streams a 300 KB reply as fast as it can
+//   scenario:helper   starts a long-running process of its own, like an mcp server
 // anything else gets a short reply. FAKE_CLAUDE_FAIL lists control request subtypes to refuse, like set_model.
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -165,6 +167,18 @@ impl Fake {
             eprintln!("fake claude crashed on purpose");
             std::process::exit(3);
         }
+        if text.contains("scenario:limit") {
+            let resets = now() + 1;
+            say(json!({ "type": "rate_limit_event", "rate_limit_info": {
+                "status": "rejected", "rateLimitType": "five_hour", "overageStatus": "rejected",
+                "unifiedWindows": { "five_hour": { "utilization": 1.0, "resetsAt": resets } }
+            } }));
+            say(
+                json!({ "type": "result", "subtype": "success", "is_error": true,
+                "result": "You've hit your session limit · resets soon", "session_id": self.session }),
+            );
+            return;
+        }
         if text.contains("scenario:auth") {
             say(
                 json!({ "type": "assistant", "error": "authentication_failed", "message": {
@@ -212,7 +226,10 @@ impl Fake {
                 say(waiting);
             }
         }
-        if text.contains("scenario:slow") {
+        // a turn mux carries on after a crash can be made to stall too, to cut it off again
+        let resumed =
+            text.contains("was cut off") && std::env::var_os("FAKE_CLAUDE_STALL").is_some();
+        if text.contains("scenario:slow") || resumed {
             self.stream_start();
             for _ in 0..200 {
                 self.stream_delta("more ");
@@ -227,6 +244,12 @@ impl Fake {
                 let mut waiting = waiting;
                 waiting["isReplay"] = json!(true);
                 say(waiting);
+            }
+        }
+        if text.contains("scenario:helper") {
+            // like an mcp server the cli starts and leaves running
+            if let Ok(helper) = std::process::Command::new("/bin/sleep").arg("300").spawn() {
+                log(json!({ "helper": helper.id() }));
             }
         }
         if text.contains("scenario:flood") {
@@ -291,6 +314,12 @@ impl Fake {
             "result": null, "terminal_reason": reason, "session_id": self.session }),
         );
     }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn text_of(message: &Value) -> String {

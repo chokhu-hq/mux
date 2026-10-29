@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use crate::{Event, usage};
 
 mod background;
+mod group;
 mod interaction;
 mod opencode;
 mod refresh;
@@ -51,6 +52,8 @@ struct Saved {
     claude_head: Option<String>,
     #[serde(default)]
     queue: Vec<Queued>,
+    #[serde(default)]
+    resumes: u32,
 }
 
 enum Call {
@@ -73,16 +76,24 @@ struct Process {
     // held so the process is killed when the agent is dropped or restarted, and absent in tests
     child: Option<Child>,
     claude: bool,
+    // stops everything the agent started once it's dropped
+    group: Option<group::Group>,
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        let child = self.child.take();
+        let group = self.group.take();
         // claude may be refreshing its sign-in, so it's stopped once that's done rather than straight away
         if self.claude
-            && let Some(child) = self.child.take()
+            && child.is_some()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
-            runtime.spawn(stop_claude(child));
+            runtime.spawn(async move {
+                refresh::refresh_done().await;
+                drop(child);
+                drop(group);
+            });
         }
     }
 }
@@ -94,6 +105,7 @@ impl Process {
             stdin,
             child: None,
             claude: false,
+            group: None,
         }
     }
 }
@@ -108,6 +120,13 @@ struct Pending {
 
 // one coding agent conversation, driven over stdio through either `codex app-server`
 // or claude's stream-json mode, with both mapped onto the same transcript
+// what changed in a conversation since the server last asked
+pub struct Changes {
+    pub items: Vec<(usize, AgentItem)>,
+    pub appends: Vec<(usize, usize, String)>,
+    pub busy: Option<bool>,
+}
+
 pub struct Agent {
     pub generation: u64,
     pub items: Vec<AgentItem>,
@@ -141,6 +160,8 @@ pub struct Agent {
     approvals: HashMap<u64, Pending>,
     next_approval: u64,
     changed: BTreeSet<usize>,
+    // streamed text added to items since the last changes were taken, with where in each item's text it starts
+    appends: BTreeMap<usize, (usize, String)>,
     busy_changed: bool,
     // messages claude hasn't echoed back yet, which it may fold into one turn when they arrive close together
     claude_waiting: VecDeque<String>,
@@ -167,6 +188,16 @@ pub struct Agent {
     pending_revert: Option<String>,
     // messages sent while the agent worked, waiting with mux until it's free
     pub queue: Vec<Queued>,
+    // how many times in a row mux carried on a turn a restart cut off, without the user saying anything since
+    pub resumes: u32,
+    // when the usage limit that blocked the turn in progress resets, in unix seconds
+    limit_reset: Option<u64>,
+    // the agent's latest limit windows, which say when a blocked codex can go again
+    windows: Vec<UsageWindow>,
+    // a turn a usage limit stopped, to carry on at this time, taken by the server to wake it then
+    pause: Option<u64>,
+    // the agent's own conversation ids as last saved, so a new one is saved straight away
+    saved_ids: (Option<String>, Option<String>),
     // a stop holds the queue back until the person sends again or resumes it
     pub held: bool,
     queue_changed: bool,
@@ -188,6 +219,7 @@ impl Agent {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        let ids = (saved.thread_id.clone(), saved.session_id.clone());
         let mut items = saved.items;
         // nothing from a previous process is still running or waiting on an answer
         for item in &mut items {
@@ -237,6 +269,7 @@ impl Agent {
             approvals: HashMap::new(),
             next_approval: 0,
             changed: BTreeSet::new(),
+            appends: BTreeMap::new(),
             busy_changed: false,
             claude_waiting: VecDeque::new(),
             claude_turn: false,
@@ -253,6 +286,11 @@ impl Agent {
             // nothing runs a saved queue until the person asks, since the agent it was meant for has gone
             held: !saved.queue.is_empty(),
             queue: saved.queue,
+            resumes: saved.resumes,
+            limit_reset: None,
+            windows: Vec::new(),
+            pause: None,
+            saved_ids: ids,
             queue_changed: false,
             compacting: None,
             compact_queued: false,
@@ -345,6 +383,7 @@ impl Agent {
             commands: self.commands.clone(),
             claude_head: self.claude_head.clone(),
             queue: self.queue.clone(),
+            resumes: self.resumes,
         };
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
@@ -399,13 +438,77 @@ impl Agent {
     }
 
     // the items and busy flag that changed since the last call, for pushing to clients
-    pub fn take_changes(&mut self) -> (Vec<(usize, AgentItem)>, Option<bool>) {
-        let items = std::mem::take(&mut self.changed)
+    pub fn take_changes(&mut self) -> Changes {
+        let changed = std::mem::take(&mut self.changed);
+        // an item sent whole already carries whatever was streamed into it
+        let appends = std::mem::take(&mut self.appends)
+            .into_iter()
+            .filter(|(index, _)| !changed.contains(index))
+            .map(|(index, (at, text))| (index, at, text))
+            .collect();
+        let items = changed
             .into_iter()
             .filter_map(|i| Some((i, self.items.get(i)?.clone())))
             .collect();
         let busy = std::mem::take(&mut self.busy_changed).then_some(self.busy);
-        (items, busy)
+        Changes {
+            items,
+            appends,
+            busy,
+        }
+    }
+
+    // a usage limit stopped the turn, so it carries on by itself once the limit resets
+    fn pause_until(&mut self, reset: u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let wait = reset.saturating_sub(now);
+        let when = match wait {
+            0..=90 => "in a minute or so".to_owned(),
+            91..=3599 => format!("in about {} min", wait.div_ceil(60)),
+            _ => format!("in about {} h {} min", wait / 3600, (wait % 3600) / 60),
+        };
+        self.push(AgentItem::Error {
+            message: format!(
+                "Mux will carry on by itself {when}, once the limit resets. Sending a message takes over instead."
+            ),
+        });
+        self.pause = Some(reset);
+    }
+
+    pub fn take_pause(&mut self) -> Option<u64> {
+        self.pause.take()
+    }
+
+    // whether the agent's conversation id changed since this was last asked, which has to be saved at once,
+    // since a crash before the turn ends would otherwise leave nothing to resume it with
+    pub fn ids_changed(&mut self) -> bool {
+        let ids = (self.thread_id.clone(), self.session_id.clone());
+        if ids == self.saved_ids {
+            return false;
+        }
+        self.saved_ids = ids;
+        true
+    }
+
+    // streamed text joins an item's text, and is sent on as just the new part rather than the whole item again
+    fn append(&mut self, index: usize, chunk: &str) {
+        let Some(text) = self.items.get_mut(index).and_then(AgentItem::streamed_text) else {
+            return;
+        };
+        let at = text.len();
+        text.push_str(chunk);
+        self.appends
+            .entry(index)
+            .or_insert_with(|| (at, String::new()))
+            .1
+            .push_str(chunk);
+    }
+
+    // the item codex's notification is about, for adding streamed text to
+    fn codex_index(&self, params: &Value) -> Option<usize> {
+        self.by_codex_id.get(params["itemId"].as_str()?).copied()
     }
 
     pub fn send(
@@ -889,7 +992,16 @@ impl Agent {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .current_dir(&cwd);
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command.spawn()?;
+        let group = match group::watch(&child) {
+            Ok(group) => Some(group),
+            Err(err) => {
+                log::warn!("session {session}: couldn't watch the agent's processes: {err}");
+                None
+            }
+        };
         let provider = self.settings.provider.label();
         log::info!("session {session}: started {provider} in {}", cwd.display());
         // what the cli says on stderr is often the only clue when it fails, so the start of it is kept in the log
@@ -953,6 +1065,7 @@ impl Agent {
             stdin: tx,
             child: Some(child),
             claude,
+            group,
         });
         self.cwd = Some(cwd);
         if claude {
@@ -1141,6 +1254,11 @@ impl Agent {
                     self.push(AgentItem::Error {
                         message: message.to_owned(),
                     });
+                    if turn["error"]["codexErrorInfo"] == "usageLimitExceeded"
+                        && let Some(reset) = usage::blocked_until(&self.windows)
+                    {
+                        self.pause_until(reset);
+                    }
                 }
                 self.turn_id = None;
                 self.expire_approvals();
@@ -1171,24 +1289,20 @@ impl Agent {
             }
             "turn/plan/updated" => self.codex_todos(params),
             "account/rateLimits/updated" => {
-                self.usage = Some(usage::codex(&params["rateLimits"]));
+                self.windows = usage::codex(&params["rateLimits"]);
+                self.usage = Some(self.windows.clone());
             }
             "item/started" => self.item_started(&params["item"]),
             "item/completed" => self.item_completed(&params["item"]),
-            "item/reasoning/summaryTextDelta" => {
-                if let Some(AgentItem::Reasoning { text, .. }) = self.target_mut(params) {
-                    text.push_str(params["delta"].as_str().unwrap_or_default());
+            "item/reasoning/summaryTextDelta" | "item/agentMessage/delta" => {
+                if let Some(index) = self.codex_index(params) {
+                    self.append(index, params["delta"].as_str().unwrap_or_default());
                 }
             }
             // each new part of a summary is its own paragraph
             "item/reasoning/summaryPartAdded" if params["summaryIndex"].as_u64() > Some(0) => {
-                if let Some(AgentItem::Reasoning { text, .. }) = self.target_mut(params) {
-                    text.push_str("\n\n");
-                }
-            }
-            "item/agentMessage/delta" => {
-                if let Some(AgentItem::Assistant { text }) = self.target_mut(params) {
-                    text.push_str(params["delta"].as_str().unwrap_or_default());
+                if let Some(index) = self.codex_index(params) {
+                    self.append(index, "\n\n");
                 }
             }
             "item/commandExecution/outputDelta" => {
@@ -1399,11 +1513,8 @@ impl Agent {
                         self.reason(event["delta"]["thinking"].as_str().unwrap_or_default());
                     }
                     Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
-                        if let Some(index) = self.live_text
-                            && let Some(AgentItem::Assistant { text }) = self.items.get_mut(index)
-                        {
-                            text.push_str(event["delta"]["text"].as_str().unwrap_or_default());
-                            self.changed.insert(index);
+                        if let Some(index) = self.live_text {
+                            self.append(index, event["delta"]["text"].as_str().unwrap_or_default());
                         }
                     }
                     _ => {}
@@ -1479,7 +1590,9 @@ impl Agent {
                 self.launched = None;
             }
             Some("rate_limit_event") => {
-                self.usage = Some(usage::claude(&msg["rate_limit_info"]));
+                let info = &msg["rate_limit_info"];
+                self.usage = Some(usage::claude(info));
+                self.limit_reset = usage::claude_blocked_until(info);
             }
             Some("result") => {
                 // only the result says how big the model's window is
@@ -1495,6 +1608,9 @@ impl Agent {
                 if let Some(message) = claude_failure(msg, self.claude_stopping) {
                     log::warn!("claude turn failed: {msg}");
                     self.push(AgentItem::Error { message });
+                    if let Some(reset) = self.limit_reset.take() {
+                        self.pause_until(reset);
+                    }
                 }
                 self.claude_stopping = false;
                 self.live_text = None;
@@ -1762,10 +1878,9 @@ impl Agent {
     // streamed reasoning joins the thought in progress, or starts one
     fn reason(&mut self, chunk: &str) -> usize {
         if let Some(index) = self.live_reasoning
-            && let Some(AgentItem::Reasoning { text, .. }) = self.items.get_mut(index)
+            && matches!(self.items.get(index), Some(AgentItem::Reasoning { .. }))
         {
-            text.push_str(chunk);
-            self.changed.insert(index);
+            self.append(index, chunk);
             return index;
         }
         let index = self.push(AgentItem::Reasoning {

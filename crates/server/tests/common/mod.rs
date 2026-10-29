@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,10 @@ const PATIENCE: Duration = Duration::from_secs(15);
 pub struct Server {
     pub dir: PathBuf,
     pub socket: PathBuf,
+    env: Vec<(String, String)>,
+    open_files: Option<u64>,
+    live: bool,
+    patience: Duration,
     child: Child,
     stream: Stream,
     inbox: Receiver<ServerMsg>,
@@ -31,6 +36,8 @@ pub struct Server {
     // every opened agent's transcript and whether it's working
     pub agents: HashMap<u64, (Vec<AgentItem>, bool)>,
     pub seen: Vec<ServerMsg>,
+    // how many bytes the server has sent this client
+    pub received: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -45,6 +52,16 @@ impl Server {
 
     // like start_with, with the server allowed only this many open files, so leaks show up as failures
     pub fn start_limited(env: &[(&str, &str)], open_files: Option<u64>) -> Self {
+        Self::start_in(env, open_files, false)
+    }
+
+    // the real agent clis on this machine, signed in as the user, for the few checks a fake can't answer.
+    // they cost real tokens, so the tests using this are ignored unless asked for
+    pub fn start_live() -> Self {
+        Self::start_in(&[], None, true)
+    }
+
+    fn start_in(env: &[(&str, &str)], open_files: Option<u64>, live: bool) -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         // cargo's scratch folder for tests, under target, so a failed run's folder is there to look at
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
@@ -57,54 +74,27 @@ impl Server {
         for folder in [&bin, &dir.join("home"), &dir.join("project")] {
             std::fs::create_dir_all(folder).unwrap();
         }
-        install_fake(&bin);
+        if !live {
+            install_fake(&bin);
+        }
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let socket = dir.join("mux.sock");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mux-server"));
-        // only the fake is on PATH, so no real agent cli ever runs
-        command
-            .env_clear()
-            .env("PATH", &bin)
-            .env("HOME", dir.join("home"))
-            .env("MUX_SOCKET", &socket)
-            .env("MUX_DATA_DIR", dir.join("data"))
-            .env("FAKE_CLAUDE_LOG", dir.join("claude.log"));
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        #[cfg(unix)]
-        if let Some(limit) = open_files {
-            use std::os::unix::process::CommandExt;
-            let limit = libc::rlimit {
-                rlim_cur: limit as libc::rlim_t,
-                rlim_max: limit as libc::rlim_t,
-            };
-            // runs in the child between fork and exec, and only makes one system call
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = open_files;
-        let child = command.spawn().expect("the server starts");
-        let stream = connect(&socket);
-        let reader = stream.try_clone().unwrap();
-        let (tx, inbox) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = reader;
-            while let Ok(msg) = protocol::read::<ServerMsg>(&mut reader) {
-                if tx.send(msg).is_err() {
-                    break;
-                }
-            }
-        });
+        let child = launch(&dir, &env, open_files, live);
+        let (stream, inbox, received) = listen(&socket);
         let mut server = Server {
             dir,
             socket,
+            env,
+            open_files,
+            live,
+            patience: if live {
+                Duration::from_secs(120)
+            } else {
+                PATIENCE
+            },
             child,
             stream,
             inbox,
@@ -114,18 +104,59 @@ impl Server {
             busy: false,
             agents: HashMap::new(),
             seen: Vec::new(),
+            received,
         };
-        server.send(ClientMsg::Hello { protocol: PROTOCOL });
-        server.wait("the welcome", |s| {
+        server.hello();
+        server
+    }
+
+    fn hello(&mut self) {
+        self.send(ClientMsg::Hello { protocol: PROTOCOL });
+        self.wait("the welcome", |s| {
             s.seen
                 .iter()
                 .any(|m| matches!(m, ServerMsg::Welcome { .. }))
         });
-        server
+    }
+
+    // kills the server the way a crash would and starts a new one on the same data, opening the same agent again
+    pub fn crash_and_restart(&mut self) {
+        self.crash();
+        self.relaunch();
+    }
+
+    // quits the server the way the tray's quit does, then starts it again
+    pub fn quit_and_restart(&mut self) {
+        self.send(ClientMsg::Shutdown);
+        let deadline = Instant::now() + PATIENCE;
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the server never quit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.relaunch();
+    }
+
+    fn relaunch(&mut self) {
+        self.child = launch(&self.dir, &self.env, self.open_files, self.live);
+        (self.stream, self.inbox, self.received) = listen(&self.socket);
+        self.seen.clear();
+        self.agents.clear();
+        self.items.clear();
+        self.busy = false;
+        self.hello();
+        if let Some(id) = self.focus {
+            self.send(ClientMsg::AgentOpen { id });
+        }
     }
 
     pub fn send(&mut self, msg: ClientMsg) {
         protocol::write(&mut self.stream, &msg).unwrap();
+    }
+
+    // kills the server outright, the way a crash or a force quit would
+    pub fn crash(&mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
     }
 
     pub fn pid(&self) -> u32 {
@@ -141,6 +172,14 @@ impl Server {
 
     // a claude agent in its own project folder, opened so its updates come here
     pub fn claude_agent(&mut self, settings: AgentSettings) -> u64 {
+        self.agent(Provider::Claude, settings)
+    }
+
+    pub fn codex_agent(&mut self, settings: AgentSettings) -> u64 {
+        self.agent(Provider::Codex, settings)
+    }
+
+    fn agent(&mut self, provider: Provider, settings: AgentSettings) -> u64 {
         let group = match self.group {
             Some(group) => group,
             None => {
@@ -169,7 +208,7 @@ impl Server {
         self.send(ClientMsg::AgentConfigure {
             id,
             settings: AgentSettings {
-                provider: Provider::Claude,
+                provider,
                 ..settings
             },
         });
@@ -190,15 +229,16 @@ impl Server {
 
     // takes in messages until `done` holds, keeping the agent's transcript up to date on the way
     pub fn wait(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + self.patience;
         while !done(self) {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.inbox.recv_timeout(left) {
                 Ok(msg) => self.take(msg),
                 Err(_) => panic!(
-                    "gave up waiting for {what}\ntranscript: {:#?}\nfake claude saw: {:#?}",
+                    "gave up waiting for {what}\ntranscript: {:#?}\nfake claude saw: {:#?}\nfake codex saw: {:#?}",
                     self.items,
-                    self.claude_log()
+                    self.claude_log(),
+                    self.codex_stdin()
                 ),
             }
         }
@@ -206,7 +246,7 @@ impl Server {
 
     // takes in messages until one gives a value
     pub fn wait_for<T>(&mut self, what: &str, pick: impl Fn(&ServerMsg) -> Option<T>) -> T {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + self.patience;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let Ok(msg) = self.inbox.recv_timeout(left) else {
@@ -250,6 +290,21 @@ impl Server {
                 self.agents.entry(*id).or_default().1 = *busy;
                 Some(*id)
             }
+            ServerMsg::AgentAppend {
+                id,
+                index,
+                at,
+                text,
+            } => {
+                let (items, _) = self.agents.entry(*id).or_default();
+                let current = items
+                    .get_mut(*index)
+                    .and_then(AgentItem::streamed_text)
+                    .expect("streamed text goes to an item the client has");
+                assert_eq!(current.len(), *at, "streamed text lands where it was cut");
+                current.push_str(text);
+                Some(*id)
+            }
             _ => None,
         };
         if id.is_some()
@@ -282,6 +337,45 @@ impl Server {
                 AgentItem::Error { message } => Some(message.clone()),
                 _ => None,
             })
+            .collect()
+    }
+
+    // every line the fake codex wrote down, from every codex mux started
+    pub fn codex_log(&self) -> Vec<Value> {
+        read_log(&self.dir.join("codex.log"))
+    }
+
+    // the json-rpc mux sent the codexes that ran conversations, leaving out the ones that only listed things
+    pub fn codex_stdin(&self) -> Vec<Value> {
+        let lines: Vec<(Value, Value)> = self
+            .codex_log()
+            .into_iter()
+            .filter_map(|e| {
+                let msg = serde_json::from_str(e["stdin"].as_str()?).ok()?;
+                Some((e["pid"].clone(), msg))
+            })
+            .collect();
+        let agents: Vec<&Value> = lines
+            .iter()
+            .filter(|(_, m)| {
+                m["method"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("thread/"))
+            })
+            .map(|(pid, _)| pid)
+            .collect();
+        lines
+            .iter()
+            .filter(|(pid, _)| agents.contains(&pid))
+            .map(|(_, m)| m.clone())
+            .collect()
+    }
+
+    // the calls mux made of the conversation codexes, by method, in order
+    pub fn codex_calls(&self, method: &str) -> Vec<Value> {
+        self.codex_stdin()
+            .into_iter()
+            .filter(|m| m["method"] == method)
             .collect()
     }
 
@@ -336,12 +430,82 @@ impl Drop for Server {
     }
 }
 
-fn install_fake(bin: &Path) {
-    let fake = PathBuf::from(env!("CARGO_BIN_EXE_fake-claude"));
+fn launch(dir: &Path, env: &[(String, String)], open_files: Option<u64>, live: bool) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mux-server"));
+    command.env_clear();
+    if live {
+        // the real clis, with the user's own sign-in
+        for key in ["PATH", "HOME", "USER", "LOGNAME", "LANG"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+    } else {
+        // only the fake is on PATH, so no real agent cli ever runs
+        command
+            .env("PATH", dir.join("bin"))
+            .env("HOME", dir.join("home"));
+    }
+    command
+        .env("MUX_SOCKET", dir.join("mux.sock"))
+        .env("MUX_DATA_DIR", dir.join("data"))
+        .env("FAKE_CLAUDE_LOG", dir.join("claude.log"))
+        .env("FAKE_CODEX_LOG", dir.join("codex.log"));
+    for (key, value) in env {
+        command.env(key, value);
+    }
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&fake, bin.join("claude")).unwrap();
-    #[cfg(windows)]
-    std::fs::copy(&fake, bin.join("claude.exe")).unwrap();
+    if let Some(limit) = open_files {
+        use std::os::unix::process::CommandExt;
+        let limit = libc::rlimit {
+            rlim_cur: limit as libc::rlim_t,
+            rlim_max: limit as libc::rlim_t,
+        };
+        // runs in the child between fork and exec, and only makes one system call
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = open_files;
+    command.spawn().expect("the server starts")
+}
+
+// connects to the server and reads what it sends on a thread of its own, counting the bytes
+fn listen(socket: &Path) -> (Stream, Receiver<ServerMsg>, Arc<AtomicUsize>) {
+    let stream = connect(socket);
+    let reader = stream.try_clone().unwrap();
+    let (tx, inbox) = mpsc::channel();
+    let received = Arc::new(AtomicUsize::new(0));
+    let counted = received.clone();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        while let Ok(msg) = protocol::read::<ServerMsg>(&mut reader) {
+            let size = protocol::encode(&msg).map_or(0, |frame| frame.len());
+            counted.fetch_add(size, Ordering::Relaxed);
+            if tx.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+    (stream, inbox, received)
+}
+
+fn install_fake(bin: &Path) {
+    for (name, fake) in [
+        ("claude", env!("CARGO_BIN_EXE_fake-claude")),
+        ("codex", env!("CARGO_BIN_EXE_fake-codex")),
+    ] {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(fake, bin.join(name)).unwrap();
+        #[cfg(windows)]
+        std::fs::copy(fake, bin.join(name).with_extension("exe")).unwrap();
+    }
 }
 
 fn connect(socket: &Path) -> Stream {

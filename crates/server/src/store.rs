@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 pub struct Store {
     next_id: u64,
     pub groups: Vec<GroupInfo>,
+    // agents that were mid-turn when the server last stopped, which it was too abrupt to stop itself
+    #[serde(skip)]
+    pub cut_off: Vec<u64>,
+    // agents a usage limit stopped, and when to carry on with each, in unix seconds
+    #[serde(default)]
+    pub wake: std::collections::HashMap<u64, u64>,
 }
 
 impl Store {
@@ -32,7 +38,12 @@ impl Store {
             Err(_) => Store::default(),
         };
         // processes never outlive the server, so anything that was live starts fresh
+        let mut cut_off = Vec::new();
         for session in store.sessions_mut() {
+            // one waiting on an answer can't pick up again, since the question went with the process
+            if session.status == SessionStatus::Running && session.kind == SessionKind::Agent {
+                cut_off.push(session.id);
+            }
             if matches!(
                 session.status,
                 SessionStatus::Running | SessionStatus::Waiting
@@ -40,6 +51,7 @@ impl Store {
                 session.status = SessionStatus::Idle;
             }
         }
+        store.cut_off = cut_off;
         store
     }
 

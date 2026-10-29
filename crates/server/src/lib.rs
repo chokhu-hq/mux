@@ -57,6 +57,8 @@ pub enum Event {
     History(Box<history::History>),
     // the skills found for a session's agent, tagged with which agent they're for
     Skills(u64, Provider, Vec<mux_core::protocol::Skill>),
+    // an agent's usage limit has reset, given with the reset it was waiting for
+    Wake(u64, u64),
     // more output from a command an agent left running in the background
     BackgroundOutput {
         session: u64,
@@ -110,6 +112,7 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         generation: 0,
         events: events.clone(),
         stop,
+        leaving: false,
     };
     tokio::spawn(server.run(inbox));
     // a server on windows shows in the tray, since without a window it's otherwise invisible
@@ -132,6 +135,14 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     tray::stop();
     Ok(())
 }
+
+// what an agent is told when it picks up a turn that a crash or forced quit cut off
+const CUT_OFF: &str = "Mux restarted while you were working, so your last turn was cut off. Carry on where you left off. Anything you already finished, like edits, commands or commits, is done, so check before repeating it.";
+const MAX_RESUMES: u32 = 3;
+// and when a usage limit that stopped it has reset
+const LIMIT_RESET: &str = "Your usage limit has reset, so carry on where you left off. Anything you already finished, like edits, commands or commits, is done, so check before repeating it.";
+// seconds past a limit's reset before carrying on, since the clis round the time they report
+const WAKE_SLACK: u64 = 5;
 
 // how much may wait to be sent to one client, past which it's cut off rather than held for, like a window that
 // froze while watching a long reply. it reconnects and is sent everything afresh once it reads again
@@ -243,11 +254,17 @@ struct Server {
     // bumped per spawn so output from a killed process can't leak into its replacement
     generation: u64,
     events: UnboundedSender<Event>,
+    // set once the server is quitting on purpose
+    leaving: bool,
     stop: UnboundedSender<()>,
 }
 
 impl Server {
     async fn run(mut self, mut inbox: UnboundedReceiver<Event>) {
+        self.resume_cut_off();
+        for (&id, &reset) in &self.store.wake {
+            self.wake_at(id, reset);
+        }
         while let Some(event) = inbox.recv().await {
             self.handle(event);
         }
@@ -272,6 +289,7 @@ impl Server {
             #[cfg(windows)]
             Event::Tray(tray::Action::Quit) => {
                 log::info!("quitting from the tray");
+                self.quitting();
                 for tx in self.clients.values() {
                     let _ = tx.send(ServerMsg::Quit);
                 }
@@ -311,6 +329,7 @@ impl Server {
                 }
             }
             Event::Client(client, msg) => self.message(client, msg),
+            Event::Wake(id, reset) => self.wake(id, reset),
             Event::Output {
                 session,
                 generation,
@@ -443,6 +462,7 @@ impl Server {
         match msg {
             ClientMsg::Hello { .. } => {}
             ClientMsg::Shutdown => {
+                self.quitting();
                 let _ = self.stop.send(());
             }
             ClientMsg::CreateGroup { name, path } => {
@@ -475,6 +495,7 @@ impl Server {
                 self.changed();
             }
             ClientMsg::DeleteSession { id } => {
+                self.take_over(id);
                 if let Some(path) = self.store.session(id).and_then(|s| s.worktree.clone()) {
                     worktree::remove(path);
                 }
@@ -603,7 +624,11 @@ impl Server {
                 id,
                 text,
                 attachments,
-            } => self.agent_send(id, text, attachments),
+            } => {
+                self.agent(id).resumes = 0;
+                self.take_over(id);
+                self.agent_send(id, text, attachments);
+            }
             ClientMsg::AgentDecide {
                 id,
                 approval,
@@ -613,6 +638,7 @@ impl Server {
                 self.agent_changed(id);
             }
             ClientMsg::AgentStop { id } => {
+                self.take_over(id);
                 self.agent(id).stop();
                 self.agent_changed(id);
             }
@@ -711,6 +737,80 @@ impl Server {
         self.state
             .with_file_name("agents")
             .join(format!("{id}.json"))
+    }
+
+    // the moment a limit resets is when it's lifted, so the agent waits a little longer to be sure
+    fn wake_at(&self, id: u64, reset: u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let wait = std::time::Duration::from_secs(reset.saturating_sub(now) + WAKE_SLACK);
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let _ = events.send(Event::Wake(id, reset));
+        });
+    }
+
+    fn wake(&mut self, id: u64, reset: u64) {
+        // the user took over since, or a later limit set another time
+        if self.store.wake.get(&id) != Some(&reset) {
+            return;
+        }
+        self.store.wake.remove(&id);
+        self.changed();
+        let agent = self.agent(id);
+        if agent.resumes >= MAX_RESUMES {
+            agent.error(format!(
+                "The usage limit reset, but this agent has picked back up {MAX_RESUMES} times in a row, so it's waiting for you this time."
+            ));
+            self.agent_changed(id);
+            return;
+        }
+        agent.resumes += 1;
+        log::info!("session {id}: carrying on now that the usage limit reset");
+        self.agent_send(id, LIMIT_RESET.to_owned(), Vec::new());
+    }
+
+    // the user is acting on the agent themselves, so it no longer carries on by itself
+    fn take_over(&mut self, id: u64) {
+        if self.store.wake.remove(&id).is_some() {
+            self.changed();
+        }
+    }
+
+    // quitting on purpose stops what's running, so the next start doesn't pick it back up as if it crashed
+    fn quitting(&mut self) {
+        self.leaving = true;
+        for info in self.store.sessions_mut() {
+            if info.status == SessionStatus::Running {
+                info.status = SessionStatus::Idle;
+            }
+        }
+        if let Err(err) = self.store.save(&self.state) {
+            log::error!("could not save {}: {err}", self.state.display());
+        }
+    }
+
+    // agents cut off mid-turn by a crash carry on, a few times at most so a turn that crashes the server can't loop
+    fn resume_cut_off(&mut self) {
+        for id in std::mem::take(&mut self.store.cut_off) {
+            // one waiting for a usage limit to reset carries on then instead
+            if self.store.wake.contains_key(&id) {
+                continue;
+            }
+            let agent = self.agent(id);
+            if agent.resumes >= MAX_RESUMES {
+                agent.error(format!(
+                    "Mux restarted while this agent was working. It has picked back up {MAX_RESUMES} times in a row, so it's waiting for you this time."
+                ));
+                self.agent_changed(id);
+                continue;
+            }
+            agent.resumes += 1;
+            log::info!("session {id}: carrying on a turn the last server didn't finish");
+            self.agent_send(id, CUT_OFF.to_owned(), Vec::new());
+        }
     }
 
     fn agent(&mut self, id: u64) -> &mut Agent {
@@ -845,11 +945,25 @@ impl Server {
 
     // pushes what changed to the clients watching, and keeps the sidebar status in step
     fn agent_changed(&mut self, id: u64) {
+        // the agents are about to stop with the server, which shouldn't be saved as them still working
+        if self.leaving {
+            return;
+        }
+        // saved before the app hears of it, so a crash straight after still carries on at the reset
+        if let Some(reset) = self.agents.get_mut(&id).and_then(Agent::take_pause) {
+            self.store.wake.insert(id, reset);
+            self.changed();
+            self.wake_at(id, reset);
+        }
         let path = self.agent_path(id);
         let Some(agent) = self.agents.get_mut(&id) else {
             return;
         };
-        let (items, busy) = agent.take_changes();
+        let agent::Changes {
+            items,
+            appends,
+            busy,
+        } = agent.take_changes();
         let status = agent.status();
         let provider = agent.settings.provider;
         let label = provider.label();
@@ -859,7 +973,9 @@ impl Server {
         let queue = agent.take_queue();
         let background = agent.take_background();
         // saved when a turn starts or ends rather than on every streamed word, and the sidebar's summary with it
-        let settled = busy.is_some() || (!agent.busy && !items.is_empty());
+        let settled = busy.is_some()
+            || agent.ids_changed()
+            || (!agent.busy && (!items.is_empty() || !appends.is_empty()));
         if settled && let Err(err) = agent.save(&path) {
             log::error!("could not save {}: {err}", path.display());
         }
@@ -870,6 +986,17 @@ impl Server {
                 log::warn!("session {id}: {label} error: {message}");
             }
             self.send_watchers(id, ServerMsg::AgentItem { id, index, item });
+        }
+        for (index, at, text) in appends {
+            self.send_watchers(
+                id,
+                ServerMsg::AgentAppend {
+                    id,
+                    index,
+                    at,
+                    text,
+                },
+            );
         }
         if let Some(busy) = busy {
             self.send_watchers(id, ServerMsg::AgentBusy { id, busy });

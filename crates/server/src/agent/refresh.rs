@@ -11,8 +11,13 @@ const LIVE: Duration = Duration::from_secs(20);
 const PATIENCE: Duration = Duration::from_secs(40);
 
 pub(crate) async fn stop_claude(child: Child) {
-    settled(&config_dir()).await;
+    refresh_done().await;
     drop(child);
+}
+
+// once no claude is in the middle of refreshing the sign-in, or it's been long enough to give up waiting
+pub(crate) async fn refresh_done() {
+    settled(&config_dir()).await;
 }
 
 async fn settled(config: &Path) {

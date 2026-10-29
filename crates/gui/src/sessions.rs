@@ -367,6 +367,29 @@ impl Sessions {
                     local.rebuild();
                 }
             }
+            ServerMsg::AgentAppend {
+                id,
+                index,
+                at,
+                text,
+            } => {
+                if let Some(local) = self.locals.get_mut(&id)
+                    && let Some(current) = local
+                        .transcript
+                        .get_mut(index)
+                        .and_then(AgentItem::streamed_text)
+                {
+                    // text already there came with a full copy of the item sent after this was queued
+                    if current.len() == at {
+                        current.push_str(&text);
+                        local.rebuild();
+                    } else if current.len() < at {
+                        log::warn!(
+                            "missed streamed text in session {id}, it'll catch up when the item finishes"
+                        );
+                    }
+                }
+            }
             ServerMsg::AgentSettings { id, settings } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.settings = settings;
@@ -1514,6 +1537,35 @@ mod tests {
         assert!(sessions.unread.contains(&2));
         sessions.take_alerts(Some(2));
         assert!(!sessions.unread.contains(&2));
+    }
+
+    #[test]
+    fn streamed_text_joins_the_reply_once_and_in_place() {
+        let mut sessions = Sessions::default();
+        sessions.locals.insert(5, Local::default());
+        sessions.apply(ServerMsg::AgentTranscript {
+            id: 5,
+            items: vec![AgentItem::Assistant { text: "Hel".into() }],
+            busy: true,
+            settings: AgentSettings::default(),
+            context: None,
+        });
+        let append = |at: usize, text: &str| ServerMsg::AgentAppend {
+            id: 5,
+            index: 0,
+            at,
+            text: text.into(),
+        };
+        sessions.apply(append(3, "lo"));
+        // the same piece again, from before a full copy of the reply was sent
+        sessions.apply(append(3, "lo"));
+        sessions.apply(append(99, "?"));
+        assert_eq!(
+            sessions.locals[&5].transcript,
+            [AgentItem::Assistant {
+                text: "Hello".into()
+            }]
+        );
     }
 
     #[test]

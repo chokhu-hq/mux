@@ -212,10 +212,19 @@ async fn list_claude() -> io::Result<Catalog> {
 }
 
 fn parse_claude(model: &Value) -> Option<ModelOption> {
+    let description = model["description"].as_str().unwrap_or_default();
+    let mut name = model["displayName"].as_str().unwrap_or_default().to_owned();
+    // claude's default entry is called "Default (recommended)" and says which model it is only in its
+    // description, "Opus 5.5 · Best for everyday, complex tasks", so the name carries the model instead
+    if model["value"] == "default"
+        && let Some((model_name, _)) = description.split_once(" · ")
+    {
+        name = format!("Default ({model_name})");
+    }
     Some(ModelOption {
         id: model["value"].as_str()?.to_owned(),
-        name: model["displayName"].as_str().unwrap_or_default().to_owned(),
-        description: model["description"].as_str().unwrap_or_default().to_owned(),
+        name,
+        description: description.to_owned(),
         efforts: model["supportedEffortLevels"]
             .as_array()
             .map(|e| {
@@ -287,6 +296,11 @@ mod tests {
                 .unwrap()
                 .is_default
         );
+        let default = json!({
+            "value": "default", "displayName": "Default (recommended)",
+            "description": "Opus 5.5 · Best for everyday, complex tasks"
+        });
+        assert_eq!(parse_claude(&default).unwrap().name, "Default (Opus 5.5)");
     }
 
     #[test]

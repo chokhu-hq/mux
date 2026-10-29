@@ -262,6 +262,9 @@ struct App {
     // whether the system's frosted background is on, or why it can't be, once it's first wanted
     #[cfg(any(windows, target_os = "macos"))]
     backdrop: Option<Result<bool, String>>,
+    // whether windows was last told the window is dark, so it's only told again when that changes
+    #[cfg(windows)]
+    told_dark: Option<bool>,
     // started on the first frame, since winit doesn't pass wayland drops on
     #[cfg(target_os = "linux")]
     drops: Option<Option<std::sync::mpsc::Receiver<drop::DropEvent>>>,
@@ -336,6 +339,8 @@ impl App {
             blur: None,
             #[cfg(any(windows, target_os = "macos"))]
             backdrop: None,
+            #[cfg(windows)]
+            told_dark: None,
             #[cfg(target_os = "linux")]
             drops: None,
             #[cfg(target_os = "linux")]
@@ -2516,6 +2521,15 @@ impl eframe::App for App {
         };
         #[cfg(any(windows, target_os = "macos"))]
         let blurred = self.backdrop(frame);
+        // windows picks light or dark acrylic from what it's told, so it follows mux's own mode
+        #[cfg(windows)]
+        {
+            let dark = ctx.theme() == egui::Theme::Dark;
+            if self.told_dark != Some(dark) {
+                backdrop::set_dark(frame, dark);
+                self.told_dark = Some(dark);
+            }
+        }
         #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         let blurred = {
             let _ = frame;

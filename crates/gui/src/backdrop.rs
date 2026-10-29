@@ -33,3 +33,27 @@ pub fn clear(window: &impl HasWindowHandle) {
         log::warn!("couldn't take the frosted background away: {e}");
     }
 }
+
+// windows 11 draws its acrylic light or dark by the window's own dark mode, which starts out light whatever
+// the app looks like, so a dark mux would otherwise sit on a pale frost that greys everything out
+#[cfg(windows)]
+pub fn set_dark(window: &impl HasWindowHandle, dark: bool) {
+    use raw_window_handle::RawWindowHandle;
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let value: i32 = dark.into();
+    // the handle is the live window winit owns, and the value is read during the call
+    unsafe {
+        DwmSetWindowAttribute(
+            handle.hwnd.get() as _,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&value as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}

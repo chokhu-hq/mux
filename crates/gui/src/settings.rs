@@ -550,9 +550,13 @@ fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Mo
         );
         divider(ui);
         let list = models.get(&defaults.provider);
-        let default_name = list
+        // the model "default" means right now: claude names it in its default entry, codex marks its default model
+        let default_model = list
             .and_then(|l| l.iter().find(|m| m.is_default).or(l.first()))
-            .map(|m| m.name.clone());
+            .map(|m| match m.description.split_once(" · ") {
+                Some((model, _)) if m.id == "default" => model.to_owned(),
+                _ => m.name.clone(),
+            });
         setting(
             ui,
             "Model",
@@ -570,7 +574,9 @@ fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Mo
                         .iter()
                         .find(|m| &m.id == id)
                         .map_or(id.clone(), |m| m.name.clone()),
-                    None => "Default".to_owned(),
+                    None => default_model
+                        .as_deref()
+                        .map_or("Default".to_owned(), |model| format!("Default ({model})")),
                 };
                 let button = mux_ui::Button::new(current)
                     .size(mux_ui::Size::Sm)
@@ -581,7 +587,7 @@ fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Mo
                     .gap(space::XS)
                     .show(|ui| {
                         ui.set_width(260.0);
-                        let detail = default_name.as_deref().unwrap_or_default();
+                        let detail = default_model.as_deref().unwrap_or_default();
                         if mux_ui::MenuItem::new("Default")
                             .detail(detail)
                             .checked(defaults.model.is_none())
@@ -593,7 +599,8 @@ fn new_agents(ui: &mut egui::Ui, prefs: &mut Prefs, models: &crate::sessions::Mo
                         egui::ScrollArea::vertical()
                             .max_height(300.0)
                             .show(ui, |ui| {
-                                for model in list {
+                                // claude's own default entry is the same choice as the one above
+                                for model in list.iter().filter(|m| m.id != "default") {
                                     let chosen =
                                         defaults.model.as_deref() == Some(model.id.as_str());
                                     if mux_ui::MenuItem::new(&model.name)

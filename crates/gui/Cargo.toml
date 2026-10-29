@@ -26,6 +26,10 @@ mac-notification-sys = "0.6"
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 window-vibrancy = "0.8"
 
+# tells windows the window is dark, which decides whether its acrylic is drawn light or dark
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }

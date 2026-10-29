@@ -2572,6 +2572,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "window-vibrancy",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

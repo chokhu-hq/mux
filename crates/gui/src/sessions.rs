@@ -381,7 +381,13 @@ impl Sessions {
                 self.usage.insert(provider, windows);
             }
             ServerMsg::TokenHistory { today, days } => self.tokens = Some((today, days)),
-            ServerMsg::AgentModels { provider, models } => {
+            ServerMsg::AgentModels {
+                provider,
+                mut models,
+            } => {
+                for model in &mut models {
+                    name_default(model);
+                }
                 self.models.insert(provider, models);
             }
             ServerMsg::AgentBusy { id, busy } => {
@@ -1034,6 +1040,17 @@ fn row_context(session: &SessionInfo) -> String {
 }
 
 // the model an agent runs as people know it, falling back to its id and then to the cli's default
+// claude's default entry says which model it is only in its description, "Opus 5.5 · Best for everyday tasks",
+// so its name carries the model wherever it shows, even from a server that hasn't named it that way
+fn name_default(model: &mut ModelOption) {
+    if model.id == "default"
+        && let Some((name, _)) = model.description.split_once(" · ")
+        && !model.name.contains(name)
+    {
+        model.name = format!("Default ({name})");
+    }
+}
+
 fn model_name(models: &Models, session: &SessionInfo) -> String {
     if session.kind != SessionKind::Agent {
         return String::new();
@@ -1371,6 +1388,26 @@ pub fn ended(status: SessionStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_model_says_which_model_it_is() {
+        let mut default = ModelOption {
+            id: "default".into(),
+            name: "Default (recommended)".into(),
+            description: "Opus 5.5 · Best for everyday, complex tasks".into(),
+            efforts: Vec::new(),
+            default_effort: String::new(),
+            is_default: true,
+            fast: None,
+        };
+        name_default(&mut default);
+        assert_eq!(default.name, "Default (Opus 5.5)");
+        name_default(&mut default);
+        assert_eq!(
+            default.name, "Default (Opus 5.5)",
+            "naming it twice changes nothing"
+        );
+    }
 
     #[test]
     fn new_agents_start_with_the_defaults_from_settings() {

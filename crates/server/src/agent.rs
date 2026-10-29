@@ -165,6 +165,12 @@ pub struct Agent {
     busy_changed: bool,
     // messages claude hasn't echoed back yet, which it may fold into one turn when they arrive close together
     claude_waiting: VecDeque<String>,
+    // the messages written to this claude, kept to send again if it has to start over
+    claude_sent: Vec<Value>,
+    // claude no longer had the conversation it was resumed into, so it starts a fresh one once it exits
+    claude_lost: bool,
+    // the retry row of the turn in progress, while the agent is still trying again
+    live_retry: Option<usize>,
     // claude is mid turn, whether answering a message or one it started itself, like a background subagent waking
     claude_turn: bool,
     // a stop was sent this turn, so the error result claude ends it with is expected
@@ -272,6 +278,9 @@ impl Agent {
             appends: BTreeMap::new(),
             busy_changed: false,
             claude_waiting: VecDeque::new(),
+            claude_sent: Vec::new(),
+            claude_lost: false,
+            live_retry: None,
             claude_turn: false,
             claude_stopping: false,
             sub_steps: HashMap::new(),
@@ -571,6 +580,7 @@ impl Agent {
                 line["priority"] = json!(if self.tool_running() { "next" } else { "now" });
             }
             self.claude_waiting.push_back(text);
+            self.claude_sent.push(line.clone());
             self.write(line);
         } else if self.settings.provider == Provider::OpenCode {
             if self.thread_live {
@@ -715,6 +725,57 @@ impl Agent {
         self.push(AgentItem::Error { message });
         self.set_busy(false);
         false
+    }
+
+    // the agent is trying a failed request again, shown on one row that counts the attempts
+    fn retrying(&mut self, reason: String, attempt: u32, of: Option<u32>) {
+        let item = AgentItem::Retry {
+            reason,
+            attempt,
+            of,
+            status: ItemStatus::Running,
+        };
+        match self.live_retry {
+            Some(index) if matches!(self.items.get(index), Some(AgentItem::Retry { .. })) => {
+                self.items[index] = item;
+                self.changed.insert(index);
+            }
+            _ => self.live_retry = Some(self.push(item)),
+        }
+    }
+
+    // the turn got going again, or ended, so the retrying is over one way or the other
+    fn retried(&mut self, outcome: ItemStatus) {
+        if let Some(index) = self.live_retry.take()
+            && let Some(AgentItem::Retry { status, .. }) = self.items.get_mut(index)
+        {
+            *status = outcome;
+            self.changed.insert(index);
+        }
+    }
+
+    // starts claude on a new conversation after the old one was lost, sending again what the old one never read
+    fn start_over(&mut self) -> bool {
+        let (Some(events), Some(cwd)) = (self.events.clone(), self.cwd.clone()) else {
+            return false;
+        };
+        let sent = std::mem::take(&mut self.claude_sent);
+        self.process = None;
+        self.session_id = None;
+        self.claude_head = None;
+        self.resume_at = None;
+        self.push(AgentItem::Error {
+            message: "Claude no longer had this conversation, so it started a new one. It won't remember what was said before.".to_owned(),
+        });
+        if let Err(err) = self.start(self.session, self.generation, cwd, &events) {
+            log::warn!("couldn't start claude again: {err}");
+            return false;
+        }
+        for line in sent {
+            self.claude_sent.push(line.clone());
+            self.write(line);
+        }
+        true
     }
 
     // hands new settings to the running claude, written ahead of the message they're for, or says it needs a relaunch
@@ -930,6 +991,9 @@ impl Agent {
     }
 
     pub fn exited(&mut self) {
+        if std::mem::take(&mut self.claude_lost) && self.start_over() {
+            return;
+        }
         self.process = None;
         self.claude_stopping = false;
         if !self.queue.is_empty() {
@@ -943,6 +1007,7 @@ impl Agent {
                 message: format!("{} stopped unexpectedly.", self.settings.provider.label()),
             });
         }
+        self.retried(ItemStatus::Failed);
         self.expire_approvals();
         self.expire_questions();
         self.turn_id = None;
@@ -1070,6 +1135,7 @@ impl Agent {
         self.cwd = Some(cwd);
         if claude {
             self.launched = Some(self.settings.clone());
+            self.claude_sent.clear();
             // without this an interrupt stops claude's background agents along with the turn
             self.write(json!({
                 "type": "control_request",
@@ -1247,6 +1313,11 @@ impl Agent {
             }
             "turn/completed" => {
                 let turn = &params["turn"];
+                self.retried(if turn["status"] == "failed" {
+                    ItemStatus::Failed
+                } else {
+                    ItemStatus::Done
+                });
                 if turn["status"] == "failed" {
                     let message = turn["error"]["message"]
                         .as_str()
@@ -1268,7 +1339,12 @@ impl Agent {
                 self.set_busy(false);
                 self.next_queued();
             }
-            "error" if params["willRetry"] != true => {
+            "error" if params["willRetry"] == true => {
+                let (reason, attempt, of) =
+                    codex_retry(params["error"]["message"].as_str().unwrap_or_default());
+                self.retrying(reason, attempt, of);
+            }
+            "error" => {
                 let message = params["error"]["message"]
                     .as_str()
                     .unwrap_or("Codex reported an error.");
@@ -1292,9 +1368,13 @@ impl Agent {
                 self.windows = usage::codex(&params["rateLimits"]);
                 self.usage = Some(self.windows.clone());
             }
-            "item/started" => self.item_started(&params["item"]),
+            "item/started" => {
+                self.retried(ItemStatus::Done);
+                self.item_started(&params["item"]);
+            }
             "item/completed" => self.item_completed(&params["item"]),
             "item/reasoning/summaryTextDelta" | "item/agentMessage/delta" => {
+                self.retried(ItemStatus::Done);
                 if let Some(index) = self.codex_index(params) {
                     self.append(index, params["delta"].as_str().unwrap_or_default());
                 }
@@ -1456,6 +1536,14 @@ impl Agent {
                     self.claude_task(msg)
                 }
             }
+            // a single quick retry is nothing to show, so the row waits for the second
+            Some("system") if msg["subtype"] == "api_retry" => {
+                let attempt = msg["attempt"].as_u64().unwrap_or(1) as u32;
+                if attempt >= 2 || self.live_retry.is_some() {
+                    let of = msg["max_retries"].as_u64().map(|m| m as u32);
+                    self.retrying(claude_retry_reason(msg), attempt, of);
+                }
+            }
             Some("system") if msg["subtype"] == "init" => {
                 self.session_id = msg["session_id"].as_str().map(str::to_owned);
                 // skills are prompts and work when claude runs headless, unlike its terminal commands
@@ -1498,6 +1586,7 @@ impl Agent {
             }
             Some("stream_event") => {
                 self.claude_turn = true;
+                self.retried(ItemStatus::Done);
                 let event = &msg["event"];
                 match event["type"].as_str() {
                     Some("content_block_start") if event["content_block"]["type"] == "text" => {
@@ -1522,6 +1611,7 @@ impl Agent {
             }
             Some("assistant") => {
                 self.claude_turn = true;
+                self.retried(ItemStatus::Done);
                 // the latest reply is where a message sent next would be rewound to
                 if let Some(uuid) = msg["uuid"].as_str() {
                     self.claude_head = Some(uuid.to_owned());
@@ -1594,6 +1684,11 @@ impl Agent {
                 self.usage = Some(usage::claude(info));
                 self.limit_reset = usage::claude_blocked_until(info);
             }
+            // a resumed claude that can't find its conversation says so straight away, then exits
+            Some("result") if self.session_id.is_some() && !self.claude_turn && lost(msg) => {
+                log::warn!("claude no longer has its conversation: {msg}");
+                self.claude_lost = true;
+            }
             Some("result") => {
                 // only the result says how big the model's window is
                 let window = msg["modelUsage"]
@@ -1605,7 +1700,13 @@ impl Agent {
                 if let (Some(window), Some(context)) = (window, self.context) {
                     self.set_context(ContextUsage { window, ..context });
                 }
-                if let Some(message) = claude_failure(msg, self.claude_stopping) {
+                let failure = claude_failure(msg, self.claude_stopping);
+                self.retried(if failure.is_some() {
+                    ItemStatus::Failed
+                } else {
+                    ItemStatus::Done
+                });
+                if let Some(message) = failure {
                     log::warn!("claude turn failed: {msg}");
                     self.push(AgentItem::Error { message });
                     if let Some(reset) = self.limit_reset.take() {
@@ -1645,6 +1746,8 @@ impl Agent {
         if self.claude_waiting.pop_front().is_none() {
             return;
         }
+        // it's reading the conversation, so it was there and nothing needs sending again
+        self.claude_sent.clear();
         while let Some(next) = self.claude_waiting.front() {
             if next.trim().is_empty() || !text.contains(next.trim()) {
                 break;
@@ -2120,6 +2223,47 @@ fn permission_mode(settings: &AgentSettings) -> &'static str {
         Access::Auto => "auto",
         Access::Full => "bypassPermissions",
     }
+}
+
+// what's wrong in a few words, from the status and kind claude gives a retry
+fn claude_retry_reason(msg: &Value) -> String {
+    match (msg["error_status"].as_u64(), msg["error"].as_str()) {
+        (Some(429), _) | (_, Some("rate_limit")) => "Claude is rate limited".to_owned(),
+        (Some(529), _) | (_, Some("overloaded")) => "Claude's servers are busy".to_owned(),
+        (Some(status), _) => format!("Claude returned an error ({status})"),
+        (None, _) => "Couldn't reach Claude".to_owned(),
+    }
+}
+
+// codex says "Reconnecting... 2/5 (stream disconnected)", with the attempt and why
+fn codex_retry(message: &str) -> (String, u32, Option<u32>) {
+    let counted = message.split_whitespace().find_map(|word| {
+        let (n, of) = word.split_once('/')?;
+        Some((n.parse().ok()?, of.parse().ok()?))
+    });
+    let why = message
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(why, _)| why.trim())
+        .filter(|why| !why.is_empty());
+    let reason = match why {
+        Some(why) => format!("Codex lost its connection ({why})"),
+        None => "Codex lost its connection".to_owned(),
+    };
+    match counted {
+        Some((attempt, of)) => (reason, attempt, Some(of)),
+        None => (reason, 1, None),
+    }
+}
+
+// whether a result says claude couldn't find the conversation it was told to resume
+fn lost(msg: &Value) -> bool {
+    msg["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|e| e.starts_with("No conversation found"))
 }
 
 // why a turn failed in words, or none when it didn't or when it only ended because it was stopped

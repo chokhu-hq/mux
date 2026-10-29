@@ -8,6 +8,7 @@
 //   scenario:slow     streams a long reply until it's interrupted
 //   scenario:fail     ends the turn as failed with a message
 //   scenario:limit    hits a usage limit that resets a second later
+//   scenario:retry    reconnects a few times before answering, or giving up with retry-fail
 //   scenario:crash    dies mid-turn
 //   scenario:flood    streams a 300 KB reply as fast as it can
 // anything else gets a short reply. FAKE_CODEX_FORGET makes thread/resume fail, like a thread codex lost,
@@ -171,6 +172,22 @@ impl Fake {
         if text.contains("scenario:crash") {
             eprintln!("fake codex crashed on purpose");
             std::process::exit(3);
+        }
+        if text.contains("scenario:retry") {
+            for attempt in 1..=2 {
+                note(
+                    "error",
+                    json!({ "threadId": self.thread, "turnId": turn, "willRetry": true,
+                    "error": { "message": format!("Reconnecting... {attempt}/5 (stream disconnected)") } }),
+                );
+                if self.pause(60) {
+                    return self.interrupted_end(&turn);
+                }
+            }
+            if text.contains("scenario:retry-fail") {
+                return self.end(json!({ "id": turn, "status": "failed",
+                    "error": { "message": "stream disconnected before completion" } }));
+            }
         }
         if text.contains("scenario:limit") {
             let resets = std::time::SystemTime::now()

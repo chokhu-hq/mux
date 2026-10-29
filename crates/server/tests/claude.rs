@@ -453,3 +453,85 @@ fn a_message_takes_over_from_waiting_for_a_limit() {
         "it waited for the user instead"
     );
 }
+
+#[test]
+fn a_conversation_claude_lost_carries_on_in_a_new_one() {
+    let mut server = Server::start_with(&[("FAKE_CLAUDE_FORGET", "1")]);
+    let id = server.claude_agent(AgentSettings {
+        access: mux_core::Access::Auto,
+        ..AgentSettings::default()
+    });
+    reply(&mut server, id, "first");
+    // a stricter level relaunches claude into the same conversation, which it no longer has
+    configure(
+        &mut server,
+        id,
+        AgentSettings {
+            access: mux_core::Access::Supervised,
+            ..AgentSettings::default()
+        },
+    );
+    reply(&mut server, id, "second");
+    assert_eq!(server.errors().len(), 1, "{:?}", server.errors());
+    assert!(server.errors()[0].contains("started a new one"));
+    assert_eq!(
+        server.assistant_text().last().map(String::as_str),
+        Some("ok: second")
+    );
+    let launches: Vec<String> = server
+        .claude_launches()
+        .iter()
+        .map(|l| l["argv"].to_string())
+        .collect();
+    assert_eq!(launches.len(), 3, "{launches:#?}");
+    assert!(launches[1].contains("\"--resume\""));
+    assert!(
+        !launches[2].contains("\"--resume\""),
+        "the new one starts fresh"
+    );
+    assert!(!server.busy);
+}
+
+fn retry(server: &Server) -> Option<(String, u32, Option<u32>, ItemStatus)> {
+    server.items.iter().find_map(|i| match i {
+        AgentItem::Retry {
+            reason,
+            attempt,
+            of,
+            status,
+        } => Some((reason.clone(), *attempt, *of, *status)),
+        _ => None,
+    })
+}
+
+#[test]
+fn retries_show_while_they_happen_and_settle_once_claude_answers() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:retry");
+    server.wait("the retries to show", |s| {
+        retry(s).is_some_and(|r| r.3 == ItemStatus::Running)
+    });
+    server.wait_idle();
+    let (reason, attempt, of, status) = retry(&server).unwrap();
+    assert_eq!((attempt, of, status), (3, Some(10), ItemStatus::Done));
+    assert!(reason.contains("busy"), "{reason}");
+    assert_eq!(
+        server
+            .items
+            .iter()
+            .filter(|i| matches!(i, AgentItem::Retry { .. }))
+            .count(),
+        1,
+        "one row for all the attempts"
+    );
+    assert!(server.errors().is_empty(), "{:?}", server.errors());
+
+    server.say(id, "scenario:retry-fail");
+    server.wait("the turn to fail", |s| !s.busy && !s.errors().is_empty());
+    let failed = server.items.iter().rev().find_map(|i| match i {
+        AgentItem::Retry { status, .. } => Some(*status),
+        _ => None,
+    });
+    assert_eq!(failed, Some(ItemStatus::Failed));
+}

@@ -1297,6 +1297,21 @@ fn chat_items(
             AgentItem::Error { message } => {
                 items.push(ChatItem::Assistant(format!("**Error:** {message}")))
             }
+            AgentItem::Retry {
+                reason,
+                attempt,
+                of,
+                status,
+            } => items.push(ChatItem::Retry {
+                reason: reason.clone(),
+                attempt: *attempt,
+                of: *of,
+                status: match status {
+                    ItemStatus::Running => ToolStatus::Running,
+                    ItemStatus::Done => ToolStatus::Done,
+                    ItemStatus::Failed | ItemStatus::Declined => ToolStatus::Failed,
+                },
+            }),
         }
         approvals.push(approval);
     }

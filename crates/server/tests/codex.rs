@@ -265,3 +265,32 @@ fn a_turn_a_usage_limit_stopped_carries_on_after_a_restart_too() {
     });
     assert_eq!(server.codex_calls("thread/resume").len(), 1);
 }
+
+#[test]
+fn reconnects_show_while_they_happen_and_settle_once_codex_answers() {
+    let mut server = Server::start();
+    let id = server.codex_agent(AgentSettings::default());
+    server.say(id, "scenario:retry");
+    server.wait_idle();
+    let retry = server.items.iter().find_map(|i| match i {
+        AgentItem::Retry {
+            reason,
+            attempt,
+            of,
+            status,
+        } => Some((reason.clone(), *attempt, *of, *status)),
+        _ => None,
+    });
+    let (reason, attempt, of, status) = retry.expect("a retry row");
+    assert_eq!((attempt, of, status), (2, Some(5), ItemStatus::Done));
+    assert_eq!(reason, "Codex lost its connection (stream disconnected)");
+    assert!(server.errors().is_empty(), "{:?}", server.errors());
+
+    server.say(id, "scenario:retry-fail");
+    server.wait("the turn to fail", |s| !s.busy && !s.errors().is_empty());
+    let failed = server.items.iter().rev().find_map(|i| match i {
+        AgentItem::Retry { status, .. } => Some(*status),
+        _ => None,
+    });
+    assert_eq!(failed, Some(ItemStatus::Failed));
+}

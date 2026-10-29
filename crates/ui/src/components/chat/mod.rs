@@ -53,6 +53,13 @@ pub enum ChatItem {
         started: u64,
         ended: Option<u64>,
     },
+    // the agent retrying requests to its model, counted on one row
+    Retry {
+        reason: String,
+        attempt: u32,
+        of: Option<u32>,
+        status: ToolStatus,
+    },
     Thinking,
 }
 
@@ -538,6 +545,12 @@ fn show_item(
             started,
             ended,
         } => cards::reasoning(ui, text, *started, *ended),
+        ChatItem::Retry {
+            reason,
+            attempt,
+            of,
+            status,
+        } => cards::retry(ui, reason, *attempt, *of, *status),
         ChatItem::Thinking => cards::thinking(ui, turns),
     }
     action

@@ -1221,6 +1221,40 @@ pub fn compaction(ui: &mut Ui, status: ToolStatus) {
         .hline(left + width + space::MD..=rect.right(), y, stroke);
 }
 
+// the agent trying again after its model failed to answer, which would otherwise look like it's stuck
+pub fn retry(ui: &mut Ui, reason: &str, attempt: u32, of: Option<u32>, status: ToolStatus) {
+    let p = theme::palette(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+    let y = rect.center().y;
+    let center = pos2(rect.left() + space::SM + icon::MD / 2.0, y);
+    let tries = |n: u32| if n == 1 { "try" } else { "tries" };
+    let label = match status {
+        ToolStatus::Running => {
+            spinner(ui, center, icon::MD, p.text_muted);
+            match of {
+                Some(of) => format!("{reason}, trying again ({attempt} of {of})"),
+                None => format!("{reason}, trying again"),
+            }
+        }
+        ToolStatus::Done => {
+            glyph(ui, center, icons::ARROW_CLOCKWISE, icon::MD, p.text_faint);
+            format!("Recovered after {attempt} {}", tries(attempt))
+        }
+        ToolStatus::Failed => {
+            glyph(ui, center, icons::WARNING, icon::MD, p.text_faint);
+            format!("Gave up after {attempt} {}", tries(attempt))
+        }
+    };
+    let clip = Rect::from_min_max(pos2(center.x, rect.top()), rect.max);
+    ui.painter().with_clip_rect(clip).text(
+        pos2(center.x + icon::MD / 2.0 + space::SM, y),
+        Align2::LEFT_CENTER,
+        label,
+        font::regular(text::MD),
+        p.text_muted,
+    );
+}
+
 // a helper agent as its own card: what it was asked, what it's doing now, and what it found once done
 pub fn subagent(ui: &mut Ui, agent: &Subagent) -> Option<String> {
     let p = theme::palette(ui);

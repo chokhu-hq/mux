@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 27;
+pub const PROTOCOL: u32 = 28;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -158,6 +158,14 @@ pub enum AgentItem {
         started: u64,
         // none while it's still thinking
         ended: Option<u64>,
+    },
+    // the agent's requests to its model keep failing and it's trying again, which a turn would otherwise sit
+    // silently through. running while it retries, done once the turn goes on and failed if it gave up
+    Retry {
+        reason: String,
+        attempt: u32,
+        of: Option<u32>,
+        status: ItemStatus,
     },
 }
 

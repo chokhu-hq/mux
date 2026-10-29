@@ -9,9 +9,11 @@
 //   scenario:crash    dies mid-turn
 //   scenario:auth     fails the way claude does when it's signed out
 //   scenario:limit    hits a usage limit that resets a second later
+//   scenario:retry    retries an overloaded request a few times before answering, or giving up with retry-fail
 //   scenario:flood    streams a 300 KB reply as fast as it can
 //   scenario:helper   starts a long-running process of its own, like an mcp server
-// anything else gets a short reply. FAKE_CLAUDE_FAIL lists control request subtypes to refuse, like set_model.
+// anything else gets a short reply. FAKE_CLAUDE_FAIL lists control request subtypes to refuse, like set_model,
+// and FAKE_CLAUDE_FORGET makes a resume fail the way it does for a conversation claude no longer has.
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -30,6 +32,15 @@ fn main() {
         .position(|a| a == "--resume")
         .and_then(|i| args.get(i + 1).cloned())
         .unwrap_or_else(|| format!("fake-{}", std::process::id()));
+    // like claude resumed into a conversation it no longer has, which it says before reading anything
+    if args.iter().any(|a| a == "--resume") && std::env::var_os("FAKE_CLAUDE_FORGET").is_some() {
+        say(
+            json!({ "type": "result", "subtype": "error_during_execution", "is_error": true,
+            "errors": [format!("No conversation found with session ID: {session}")], "session_id": session }),
+        );
+        eprintln!("No conversation found with session ID: {session}");
+        std::process::exit(1);
+    }
     let (lines, inbox) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -166,6 +177,24 @@ impl Fake {
         if text.contains("scenario:crash") {
             eprintln!("fake claude crashed on purpose");
             std::process::exit(3);
+        }
+        if text.contains("scenario:retry") {
+            for attempt in 1..=3 {
+                say(
+                    json!({ "type": "system", "subtype": "api_retry", "attempt": attempt, "max_retries": 10,
+                    "retry_delay_ms": 50, "error_status": 529, "error": "overloaded" }),
+                );
+                if self.pause(60) {
+                    return self.aborted("aborted_streaming");
+                }
+            }
+            if text.contains("scenario:retry-fail") {
+                say(
+                    json!({ "type": "result", "subtype": "success", "is_error": true,
+                    "result": "API Error: 529 Overloaded", "session_id": self.session }),
+                );
+                return;
+            }
         }
         if text.contains("scenario:limit") {
             let resets = now() + 1;

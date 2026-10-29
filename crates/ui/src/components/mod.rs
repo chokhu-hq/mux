@@ -3,7 +3,7 @@ mod button;
 pub mod chat;
 mod chip;
 mod command_palette;
-mod context_menu;
+pub(crate) mod context_menu;
 mod context_ring;
 mod empty_state;
 mod file_viewer;

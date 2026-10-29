@@ -578,6 +578,26 @@ fn paint<L: EventListener>(
     let offset = content.display_offset;
     let selection = content.selection;
     let default_bg = resolve(Color::Named(NamedColor::Background), colors, p);
+    let selected_bg = ui.visuals().selection.bg_fill;
+
+    // backgrounds go under all the text, so they're gathered into this slot and filled in at the end
+    let backdrop = painter.add(egui::Shape::Noop);
+    let mut fills: Vec<egui::Shape> = Vec::new();
+    // a stretch of one row sharing a background, painted as one rectangle so see-through colours
+    // like the selection don't show a seam at every cell where neighbours overlap
+    let mut fill: Option<(usize, usize, usize, Color32)> = None;
+    let push_fill = |fill: Option<(usize, usize, usize, Color32)>, fills: &mut Vec<egui::Shape>| {
+        if let Some((line, start, end, color)) = fill {
+            let rect = grid.cell_rect(line, start, end - start);
+            // a solid fill is nudged a pixel so it meets the next one without a hairline gap
+            let rect = if color.a() == u8::MAX {
+                rect.expand2(vec2(0.5, 0.0))
+            } else {
+                rect
+            };
+            fills.push(egui::Shape::rect_filled(rect, 0.0, color));
+        }
+    };
 
     let mut run: Option<Run> = None;
     let flush = |run: Option<Run>| {
@@ -613,7 +633,7 @@ fn paint<L: EventListener>(
             std::mem::swap(&mut fg, &mut bg);
         }
         if selection.is_some_and(|s| s.contains(indexed.point)) {
-            bg = p.accent.gamma_multiply(0.35);
+            bg = selected_bg;
         }
         if cell.flags.contains(Flags::HIDDEN) {
             fg = bg;
@@ -625,9 +645,17 @@ fn paint<L: EventListener>(
             1
         };
         let rect = grid.cell_rect(line, col, width);
-        if bg != default_bg {
-            // nudge by a pixel so neighbouring cells overlap instead of leaving hairline gaps
-            painter.rect_filled(rect.expand2(vec2(0.5, 0.0)), 0.0, bg);
+        let continues =
+            fill.is_some_and(|(l, _, end, color)| l == line && end == col && color == bg);
+        if bg == default_bg {
+            push_fill(fill.take(), &mut fills);
+        } else if continues {
+            if let Some(f) = &mut fill {
+                f.2 += width;
+            }
+        } else {
+            push_fill(fill.take(), &mut fills);
+            fill = Some((line, col, col + width, bg));
         }
         if cell.flags.intersects(Flags::ALL_UNDERLINES) {
             painter.hline(rect.x_range(), rect.bottom() - 1.5, Stroke::new(1.0, fg));
@@ -668,6 +696,8 @@ fn paint<L: EventListener>(
         }
     }
     flush(run);
+    push_fill(fill.take(), &mut fills);
+    painter.set(backdrop, egui::Shape::Vec(fills));
 
     let cursor = content.cursor;
     if cursor.shape == CursorShape::Hidden || cursor_state == Cursor::BlinkedOff {

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Response, Sense, Ui, Vec2,
-    WidgetInfo, pos2,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Margin, Rect, Response, Sense,
+    TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 
@@ -25,6 +25,8 @@ pub struct SessionRow<'a> {
     model: &'a str,
     // lines added and removed by an agent, shown at the end of the bottom line
     changes: Option<(u32, u32)>,
+    // the new name being typed in place of the title, while the row is renamed
+    rename: Option<&'a mut String>,
 }
 
 impl<'a> SessionRow<'a> {
@@ -43,7 +45,14 @@ impl<'a> SessionRow<'a> {
             unread: false,
             model: "",
             changes: None,
+            rename: None,
         }
+    }
+
+    // turns the title into a field holding `draft`, with the rest of the row as it was
+    pub fn rename(mut self, draft: &'a mut String) -> Self {
+        self.rename = Some(draft);
+        self
     }
 
     // the faint line above the title, which turns amber or red when the session needs attention
@@ -91,7 +100,13 @@ impl<'a> SessionRow<'a> {
     }
 
     pub fn show(self, ui: &mut Ui) -> Response {
+        self.show_with_field(ui).0
+    }
+
+    // the row, and the title's field while it's being renamed
+    pub fn show_with_field(mut self, ui: &mut Ui) -> (Response, Option<Response>) {
         let p = theme::palette(ui);
+        let mut field = None;
         let size = Vec2::new(ui.available_width(), Self::HEIGHT);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         response.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, self.title));
@@ -151,19 +166,40 @@ impl<'a> SessionRow<'a> {
                 p.text_faint,
             );
 
-            let title = elided(
-                ui,
-                self.title,
-                font::medium(text::MD + 1.0),
-                p.text,
-                inner.width(),
-            );
-            cut = title.elided;
-            ui.painter().galley(
-                pos2(inner.left(), row(1.0) - title.size().y / 2.0),
-                title,
-                p.text,
-            );
+            if let Some(draft) = self.rename.take() {
+                // the title's own font and place, on a faint backing so it reads as editable
+                let line = Rect::from_center_size(
+                    pos2(inner.center().x, row(1.0)),
+                    vec2(inner.width(), 20.0),
+                );
+                ui.painter().rect_filled(
+                    line.expand2(vec2(6.0, 2.0)),
+                    CornerRadius::same(radius::MD),
+                    theme::tint(p, theme::fill::SELECTED),
+                );
+                let edit = TextEdit::singleline(draft)
+                    .id(response.id.with("rename"))
+                    .frame(egui::Frame::NONE)
+                    .margin(Margin::ZERO)
+                    .font(font::medium(text::MD + 1.0))
+                    .text_color(p.text)
+                    .desired_width(line.width());
+                field = Some(ui.put(line, edit));
+            } else {
+                let title = elided(
+                    ui,
+                    self.title,
+                    font::medium(text::MD + 1.0),
+                    p.text,
+                    inner.width(),
+                );
+                cut = title.elided;
+                ui.painter().galley(
+                    pos2(inner.left(), row(1.0) - title.size().y / 2.0),
+                    title,
+                    p.text,
+                );
+            }
 
             let mark_center = pos2(inner.left() + icon::SM / 2.0, row(2.0));
             if let Some(provider) = self.provider {
@@ -236,11 +272,12 @@ impl<'a> SessionRow<'a> {
 
         let response = response.on_hover_cursor(CursorIcon::PointingHand);
         // everything else is already on the row, so only a title cut short needs a tooltip
-        if cut {
+        let response = if cut {
             response.tip(self.title)
         } else {
             response
-        }
+        };
+        (response, field)
     }
 }
 

@@ -26,6 +26,9 @@
 
 </div>
 
+> [!WARNING]
+> Mux is experimental software, so expect it to be unstable. It's in active development and changes a lot from one build to the next, sometimes in big ways.
+
 ## About
 
 Mux is a desktop app for working with coding agents. It drives the Codex, Claude Code and OpenCode CLIs you already use, keeps every session running in a background server, and gives each one a fast native interface built with Rust and egui. Shells and long running tasks live next to your agents, grouped by project.

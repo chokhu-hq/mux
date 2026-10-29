@@ -278,6 +278,8 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
     // pictures in chat are read from disk by path
     egui_extras::install_image_loaders(ctx);
+    // remembers what's selected in chat, for the right-click menu's copy
+    ctx.add_plugin(crate::components::context_menu::SelectionWatch);
     // egui's 40 points a wheel notch crawls through long chats and files
     ctx.options_mut(|o| o.input_options.line_scroll_speed = 90.0);
     let (dark, light) = *ACTIVE.read().unwrap_or_else(|e| e.into_inner());
@@ -403,7 +405,8 @@ fn apply(style: &mut Style, p: &Palette, dark: bool) {
     v.error_fg_color = p.danger;
     // letters on whole pixels look sharper, most of all on the normal density screens windows often runs at
     v.text_options.subpixel_binning = false;
-    v.selection.bg_fill = p.accent.gamma_multiply(0.35);
+    // strong enough to see on every theme's background, while the selected text stays readable over it
+    v.selection.bg_fill = p.accent.gamma_multiply(0.45);
     // egui paints selected text in this colour, and the accent of some themes is unreadable on its own tint
     v.selection.stroke = Stroke::new(1.0, p.text);
 

@@ -14,7 +14,7 @@ use mux_ui::chat::{
 };
 use mux_ui::motion::{Spring, spring_bool};
 use mux_ui::theme;
-use mux_ui::{GroupHeader, MenuItem, SessionRow, TextInput, TooltipExt, icons};
+use mux_ui::{GroupHeader, MenuItem, SessionRow, TooltipExt, icons};
 
 use crate::terminal::Terminal;
 
@@ -569,20 +569,27 @@ impl Sessions {
             if let Some((id, draft)) = &mut self.renaming
                 && *id == group.id
             {
-                let input = ui
-                    .push_id(group.id, |ui| TextInput::new(draft).show(ui))
+                let shown = ui
+                    .push_id(group.id, |ui| {
+                        GroupHeader::new(&group.name)
+                            .open(group.open)
+                            .rename(draft)
+                            .show(ui)
+                    })
                     .inner;
-                if !input.has_focus() && !input.lost_focus() {
-                    input.request_focus();
-                    select_all(ui.ctx(), input.id, draft);
-                }
-                let (enter, escape) =
-                    ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
-                if input.lost_focus() {
-                    if enter && !escape {
-                        actions.push(Action::Rename(group.id, std::mem::take(draft)));
+                if let Some(input) = shown.field {
+                    if !input.has_focus() && !input.lost_focus() {
+                        input.request_focus();
+                        select_all(ui.ctx(), input.id, draft);
                     }
-                    actions.push(Action::EndRename);
+                    let (enter, escape) =
+                        ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+                    if input.lost_focus() {
+                        if enter && !escape {
+                            actions.push(Action::Rename(group.id, std::mem::take(draft)));
+                        }
+                        actions.push(Action::EndRename);
+                    }
                 }
             } else {
                 let shown = ui
@@ -690,38 +697,14 @@ impl Sessions {
                 rows.spacing_mut().item_spacing.y = 0.0;
                 for (i, session) in group.sessions.iter().enumerate() {
                     rows.add_space(ROW_GAP);
-                    if let Some((id, draft)) = &mut self.renaming
-                        && *id == session.id
-                    {
-                        // the field takes the row's place at the row's height, so nothing below it moves
-                        let (rect, _) = rows
-                            .allocate_exact_size(vec2(width, SessionRow::HEIGHT), Sense::hover());
-                        let field = Rect::from_center_size(
-                            rect.center(),
-                            vec2(width, mux_ui::theme::control::MD),
-                        );
-                        let input = rows
-                            .scope_builder(
-                                UiBuilder::new().max_rect(field).id_salt(session.id),
-                                |ui| TextInput::new(draft).show(ui),
-                            )
-                            .inner;
-                        if !input.has_focus() && !input.lost_focus() {
-                            input.request_focus();
-                            select_all(rows.ctx(), input.id, draft);
-                        }
-                        let (enter, escape) =
-                            rows.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
-                        if input.lost_focus() {
-                            if enter && !escape {
-                                actions.push(Action::Rename(session.id, std::mem::take(draft)));
-                            }
-                            actions.push(Action::EndRename);
-                        }
-                        continue;
-                    }
                     let is_dragged = dragging == Some(session.id);
-                    let row = rows
+                    // a row being renamed keeps everything but its title, which becomes the field
+                    let renaming = self
+                        .renaming
+                        .as_mut()
+                        .filter(|(id, _)| *id == session.id)
+                        .map(|(_, draft)| draft);
+                    let (row, field) = rows
                         .push_id(session.id, |ui| {
                             if is_dragged {
                                 ui.multiply_opacity(0.35);
@@ -747,9 +730,32 @@ impl Sessions {
                             if let Some(summary) = &session.summary {
                                 row = row.changes(summary.added, summary.removed);
                             }
-                            row.show(ui)
+                            if let Some(draft) = renaming {
+                                row = row.rename(draft);
+                            }
+                            row.show_with_field(ui)
                         })
                         .inner;
+                    if let Some(input) = field {
+                        if !input.has_focus() && !input.lost_focus() {
+                            input.request_focus();
+                            if let Some((_, draft)) = &self.renaming {
+                                select_all(rows.ctx(), input.id, draft);
+                            }
+                        }
+                        let (enter, escape) =
+                            rows.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+                        if input.lost_focus() {
+                            if enter
+                                && !escape
+                                && let Some((_, draft)) = &mut self.renaming
+                            {
+                                actions.push(Action::Rename(session.id, std::mem::take(draft)));
+                            }
+                            actions.push(Action::EndRename);
+                        }
+                        continue;
+                    }
                     if row.clicked() {
                         actions.push(Action::Select(session.id));
                     }
@@ -1334,15 +1340,16 @@ fn diff_lines(diff: &str) -> Vec<DiffLine> {
         .collect()
 }
 
-// a name being changed starts out selected, so typing replaces it the way renaming a file does
+// a name being changed starts out selected, so typing replaces it the way renaming a file does,
+// with the cursor at the start so a long name shows from its beginning rather than its end
 fn select_all(ctx: &egui::Context, id: Id, text: &str) {
     let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
     let end = egui::text::CCursor::new(text.chars().count());
     state
         .cursor
         .set_char_range(Some(egui::text::CCursorRange::two(
-            egui::text::CCursor::new(0),
             end,
+            egui::text::CCursor::new(0),
         )));
     state.store(ctx, id);
 }

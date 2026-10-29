@@ -2,7 +2,8 @@ use std::f32::consts::FRAC_PI_2;
 
 use egui::epaint::TextShape;
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, Rect, Response, Sense, Ui, Vec2, WidgetInfo, pos2,
+    Align2, Color32, CornerRadius, CursorIcon, Margin, Rect, Response, Sense, TextEdit, Ui, Vec2,
+    WidgetInfo, pos2, vec2,
 };
 
 use super::hover_t;
@@ -17,12 +18,16 @@ pub struct GroupHeader<'a> {
     detail: &'a str,
     open: bool,
     drop_target: bool,
+    // the new name being typed in place of the label, while the group is renamed
+    rename: Option<&'a mut String>,
 }
 
 pub struct GroupHeaderResponse {
     pub response: Response,
     // the + on the right, for starting something new in this group
     pub add: Response,
+    // the name's field while it's being renamed
+    pub field: Option<Response>,
 }
 
 impl<'a> GroupHeader<'a> {
@@ -32,7 +37,14 @@ impl<'a> GroupHeader<'a> {
             detail: "",
             open: true,
             drop_target: false,
+            rename: None,
         }
+    }
+
+    // turns the name into a field holding `draft`, with the rest of the header as it was
+    pub fn rename(mut self, draft: &'a mut String) -> Self {
+        self.rename = Some(draft);
+        self
     }
 
     // faint text after the name, like the folder the group points at
@@ -51,7 +63,7 @@ impl<'a> GroupHeader<'a> {
         self
     }
 
-    pub fn show(self, ui: &mut Ui) -> GroupHeaderResponse {
+    pub fn show(mut self, ui: &mut Ui) -> GroupHeaderResponse {
         let p = theme::palette(ui);
         let size = Vec2::new(ui.available_width(), HEIGHT);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
@@ -67,6 +79,7 @@ impl<'a> GroupHeader<'a> {
         let add = ui
             .interact(add_rect, response.id.with("add"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
+        let mut field = None;
 
         if ui.is_rect_visible(rect) {
             let t = hover_t(ui, &response);
@@ -94,14 +107,42 @@ impl<'a> GroupHeader<'a> {
                 font::icon(icon::LG),
                 p.text_muted,
             );
-            let name = ui.painter().text(
-                pos2(folder_x + icon::LG / 2.0 + space::SM, rect.center().y),
-                Align2::LEFT_CENTER,
-                self.label,
-                font::semibold(text::MD + 1.0),
-                p.text,
-            );
-            if !self.detail.is_empty() {
+            let name_x = folder_x + icon::LG / 2.0 + space::SM;
+            if let Some(draft) = self.rename.take() {
+                // the name's own font and place, on a faint backing so it reads as editable
+                let line = Rect::from_min_max(
+                    pos2(name_x, rect.center().y - 10.0),
+                    pos2(
+                        caret_center.x - button.x / 2.0 - space::XS,
+                        rect.center().y + 10.0,
+                    ),
+                );
+                ui.painter().rect_filled(
+                    line.expand2(vec2(6.0, 2.0)),
+                    CornerRadius::same(radius::MD),
+                    theme::tint(p, theme::fill::SELECTED),
+                );
+                let edit = TextEdit::singleline(draft)
+                    .id(response.id.with("rename"))
+                    .frame(egui::Frame::NONE)
+                    .margin(Margin::ZERO)
+                    .font(font::semibold(text::MD + 1.0))
+                    .text_color(p.text)
+                    .desired_width(line.width());
+                field = Some(ui.put(line, edit));
+            }
+            let name = if field.is_some() {
+                Rect::NOTHING
+            } else {
+                ui.painter().text(
+                    pos2(name_x, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    self.label,
+                    font::semibold(text::MD + 1.0),
+                    p.text,
+                )
+            };
+            if !self.detail.is_empty() && field.is_none() {
                 let room = Rect::from_min_max(
                     pos2(name.right() + space::SM, rect.top()),
                     pos2(caret_center.x - button.x / 2.0, rect.bottom()),
@@ -150,6 +191,7 @@ impl<'a> GroupHeader<'a> {
         GroupHeaderResponse {
             response: response.on_hover_cursor(CursorIcon::PointingHand),
             add,
+            field,
         }
     }
 }

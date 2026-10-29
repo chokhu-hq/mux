@@ -434,7 +434,7 @@ impl App {
         // the server waits for a click here while something runs in it, since restarting it stops that
         if stale
             && notice_row(&mut ui_footer, icons::ARROW_CLOCKWISE, "Restart server")
-                .tip("The background server is from another build of Mux, so recent fixes aren't in it yet. Restarting it stops the terminals and agent turns running now.")
+                .tip("The background server is from another build of Mux. Restarting it stops running terminals and agents.")
                 .clicked()
         {
             self.link.restart_server();

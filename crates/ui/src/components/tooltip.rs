@@ -42,16 +42,22 @@ struct HoverState {
 fn show(response: Response, label: String, shortcut: Option<KeyboardShortcut>) -> Response {
     show_ui(response, Margin::symmetric(8, 5), DELAY, |ui| {
         let p = theme::palette(ui);
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(&label)
-                    .font(font::regular(text::SM))
-                    .color(p.text),
-            );
-            if let Some(shortcut) = &shortcut {
-                Kbd::shortcut(ui, shortcut);
+        let text = egui::RichText::new(&label)
+            .font(font::regular(text::SM))
+            .color(p.text);
+        // a long tip wraps into a few lines rather than running across the window
+        ui.set_max_width(300.0);
+        match &shortcut {
+            Some(shortcut) => {
+                ui.horizontal(|ui| {
+                    ui.label(text);
+                    Kbd::shortcut(ui, shortcut);
+                });
             }
-        });
+            None => {
+                ui.add(egui::Label::new(text).wrap());
+            }
+        }
     })
 }
 

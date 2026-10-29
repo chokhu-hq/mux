@@ -16,6 +16,8 @@ pub struct MenuItem<'a> {
     label: &'a str,
     // a faint second line under the label, for choices that need a word of explanation
     detail: &'a str,
+    // a keyboard shortcut at the right of the row, the way native menus show them
+    shortcut: &'a str,
     danger: bool,
     checked: bool,
 }
@@ -27,6 +29,7 @@ impl<'a> MenuItem<'a> {
             meter: None,
             label,
             detail: "",
+            shortcut: "",
             danger: false,
             checked: false,
         }
@@ -39,6 +42,11 @@ impl<'a> MenuItem<'a> {
 
     pub fn detail(mut self, detail: &'a str) -> Self {
         self.detail = detail;
+        self
+    }
+
+    pub fn shortcut(mut self, shortcut: &'a str) -> Self {
+        self.shortcut = shortcut;
         self
     }
 
@@ -78,6 +86,15 @@ impl<'a> MenuItem<'a> {
             );
         // every row leaves room for a check, so a menu sizes the same whichever row is ticked
         let check_w = icon::MD + space::SM;
+        let shortcut = (!self.shortcut.is_empty()).then(|| {
+            ui.painter().layout_no_wrap(
+                self.shortcut.to_owned(),
+                font::regular(text::SM + 1.0),
+                p.text_faint,
+            )
+        });
+        let shortcut_w = shortcut.as_ref().map_or(0.0, |s| s.size().x + space::LG);
+        let label_w = label_w + shortcut_w;
         let natural = MIN_WIDTH.max(space::SM * 3.0 + icon_w + label_w + check_w);
         // menus measure on a sizing pass first, then every row fills exactly the settled width, so checks
         // and dividers line up and a long row shortens its text rather than poking out
@@ -137,7 +154,18 @@ impl<'a> MenuItem<'a> {
                 x += meter_width(total) + space::SM;
             }
             // room is always kept for the check, so text ends at the same place whether or not this row has it
-            let room = rect.right() - space::SM - icon::MD - space::SM - x;
+            let room = rect.right() - space::SM - icon::MD - space::SM - x - shortcut_w;
+            if let Some(shortcut) = shortcut {
+                let right = rect.right() - space::SM;
+                ui.painter().galley(
+                    pos2(
+                        right - shortcut.size().x,
+                        rect.center().y - shortcut.size().y / 2.0,
+                    ),
+                    shortcut,
+                    p.text_faint,
+                );
+            }
             let line = |text: &str, font: egui::FontId, color: egui::Color32| {
                 let mut job =
                     egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);

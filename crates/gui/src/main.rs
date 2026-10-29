@@ -88,6 +88,10 @@ fn main() -> eframe::Result {
         wgpu_options: renderer(),
         ..Default::default()
     };
+    // the see-through renderer draws into a composition visual, which the window's own surface would sit on top of
+    #[cfg(windows)]
+    egui_winit::NO_REDIRECTION_BITMAP
+        .store(see_through_renderer(), std::sync::atomic::Ordering::Relaxed);
     let start = || -> eframe::AppCreator<'static> {
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
@@ -99,6 +103,8 @@ fn main() -> eframe::Result {
         Err(e) if cfg!(windows) && see_through_renderer() => {
             log::warn!("the see-through renderer didn't start, so the window is solid: {e}");
             SEE_THROUGH.store(false, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(windows)]
+            egui_winit::NO_REDIRECTION_BITMAP.store(false, std::sync::atomic::Ordering::Relaxed);
             let options = eframe::NativeOptions {
                 wgpu_options: Default::default(),
                 ..options

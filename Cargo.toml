@@ -32,6 +32,10 @@ log = "0.4"
 pulldown-cmark = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "io-util", "sync", "process", "time"] }
 
+# egui-winit with one change, so windows can be made without the surface that hides see-through drawing on windows
+[patch.crates-io]
+egui-winit = { path = "patches/egui-winit" }
+
 # egui, syntect and the image decoders are many times slower unoptimised, so dependencies build optimised even in dev
 [profile.dev.package."*"]
 opt-level = 3

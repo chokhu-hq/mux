@@ -7,6 +7,8 @@ on:
     paths-ignore:
       - "README.md"
       - "LICENSE"
+      - "CLAUDE.md"
+      - "AGENTS.md"
       - "assets/screenshot.png"
   workflow_dispatch:
 

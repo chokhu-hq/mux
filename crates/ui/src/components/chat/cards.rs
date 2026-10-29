@@ -496,41 +496,7 @@ pub fn activity(ui: &mut Ui, steps: &[&super::ChatItem]) {
     let p = theme::palette(ui);
     let id = ui.make_persistent_id("activity");
     let running = tools.iter().any(|t| t.status == ToolStatus::Running);
-    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(running);
-
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
-    if response.clicked() {
-        open = !open;
-        ui.data_mut(|d| d.insert_temp(id, open));
-    }
-    let t = hover_t(ui, &response);
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(radius::MD),
-        p.hover.gamma_multiply(t),
-    );
-    let y = rect.center().y;
-    let turn = spring_bool(ui.ctx(), id.with("caret"), open, Spring::SMOOTH);
-    caret(
-        ui,
-        pos2(rect.left() + space::SM + 6.0, y),
-        turn,
-        p.text_faint,
-    );
-    let mut x = rect.left() + space::SM + 12.0 + space::SM;
-    if running {
-        spinner(ui, pos2(x + icon::MD / 2.0, y), icon::MD, p.text_muted);
-        x += icon::MD + space::SM;
-    }
-    ui.painter().text(
-        pos2(x, y),
-        Align2::LEFT_CENTER,
-        summary(&tools),
-        font::medium(text::MD),
-        p.text_muted.lerp_to_gamma(p.text, t),
-    );
-    response.on_hover_cursor(CursorIcon::PointingHand);
-
+    let (rect, open) = summary_row(ui, id, running, running, &summary(&tools));
     let guide_x = rect.left() + space::SM + 6.0;
     reveal(ui, id.with("calls"), open, |ui| {
         let top = ui.cursor().top();
@@ -562,21 +528,134 @@ pub fn activity(ui: &mut Ui, steps: &[&super::ChatItem]) {
     });
 }
 
+// a line that opens and closes what's under it, open at first when `open_at_first`, and remembered once clicked
+pub fn summary_row(
+    ui: &mut Ui,
+    id: egui::Id,
+    open_at_first: bool,
+    running: bool,
+    label: &str,
+) -> (Rect, bool) {
+    let p = theme::palette(ui);
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(open_at_first);
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    let t = hover_t(ui, &response);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(radius::MD),
+        p.hover.gamma_multiply(t),
+    );
+    let y = rect.center().y;
+    let turn = spring_bool(ui.ctx(), id.with("caret"), open, Spring::SMOOTH);
+    caret(
+        ui,
+        pos2(rect.left() + space::SM + 6.0, y),
+        turn,
+        p.text_faint,
+    );
+    let mut x = rect.left() + space::SM + 12.0 + space::SM;
+    if running {
+        spinner(ui, pos2(x + icon::MD / 2.0, y), icon::MD, p.text_muted);
+        x += icon::MD + space::SM;
+    }
+    ui.painter().text(
+        pos2(x, y),
+        Align2::LEFT_CENTER,
+        label,
+        font::medium(text::MD),
+        p.text_muted.lerp_to_gamma(p.text, t),
+    );
+    response.on_hover_cursor(CursorIcon::PointingHand);
+    (rect, open)
+}
+
 fn summary(tools: &[&ToolCall]) -> String {
     let count = |kind| tools.iter().filter(|t| t.kind == kind).count();
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    counts(
+        count(ToolKind::Read),
+        count(ToolKind::Search),
+        count(ToolKind::Edit),
+        count(ToolKind::Run),
+    )
+    .join(" · ")
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn counts(read: usize, searched: usize, edited: usize, ran: usize) -> Vec<String> {
     [
-        (count(ToolKind::Read), "Read", "file", "files"),
-        (count(ToolKind::Search), "Searched", "time", "times"),
-        (count(ToolKind::Edit), "Edited", "file", "files"),
-        (count(ToolKind::Run), "Ran", "command", "commands"),
+        (read, "Read", "file", "files"),
+        (searched, "Searched", "time", "times"),
+        (edited, "Edited", "file", "files"),
+        (ran, "Ran", "command", "commands"),
     ]
     .into_iter()
     .filter(|(n, ..)| *n > 0)
     .map(|(n, verb, one, many)| format!("{verb} {}", plural(n, one, many)))
-    .collect::<Vec<_>>()
-    .join(" · ")
+    .collect()
+}
+
+// what a turn did, in the words the tool groups use, for the line its steps fold behind
+pub fn turn_summary(work: &[&super::ChatItem], live: bool) -> String {
+    use super::ChatItem;
+    let tools: Vec<&ToolCall> = work
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect();
+    let count = |kind| tools.iter().filter(|t| t.kind == kind).count();
+    // claude's edits come as diffs rather than tool calls, one per file
+    let mut edited: Vec<&str> = work
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Diff(diff) => Some(diff.path.as_str()),
+            _ => None,
+        })
+        .collect();
+    edited.sort_unstable();
+    edited.dedup();
+    let mut parts = counts(
+        count(ToolKind::Read),
+        count(ToolKind::Search),
+        count(ToolKind::Edit) + edited.len(),
+        count(ToolKind::Run),
+    );
+    let helpers = work
+        .iter()
+        .filter(|item| matches!(item, ChatItem::Subagent(_)))
+        .count();
+    if helpers > 0 {
+        parts.push(format!("Used {}", plural(helpers, "agent", "agents")));
+    }
+    if !parts.is_empty() {
+        return parts.join(" · ");
+    }
+    let thought: u64 = work
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Reasoning {
+                started,
+                ended: Some(ended),
+                ..
+            } => Some(ended.saturating_sub(*started)),
+            _ => None,
+        })
+        .sum();
+    if live {
+        return "Working".to_owned();
+    }
+    if thought > 0 {
+        return format!("Thought for {}", duration(thought));
+    }
+    plural(work.len(), "step", "steps")
 }
 
 // a file the agent changed, with the start of its changes, whose header opens the full diff
@@ -765,10 +844,24 @@ pub fn permission(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> 
     }
 }
 
+// how long a new request's answers stay off, so a click meant for something else, like the spot where the
+// request just appeared or moved to, can't approve it
+const ARMING: f64 = 0.6;
+
 // an open request: what the agent wants to do, then the three answers on the right
 fn pending(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> {
     let p = theme::palette(ui);
     let mut decision = None;
+    let now = ui.input(|i| i.time);
+    let seen = ui
+        .scope_id()
+        .with(("permission-shown", &request.title, &request.detail));
+    let shown = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(seen, || now));
+    let armed = now - shown >= ARMING;
+    if !armed {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(ARMING - (now - shown)));
+    }
     let command = request.title.starts_with("Run");
     let glyph = if command {
         icons::TERMINAL
@@ -861,18 +954,37 @@ fn pending(ui: &mut Ui, request: &PermissionRequest) -> Option<Decision> {
             let layout = egui::Layout::right_to_left(egui::Align::Center);
             ui.allocate_ui_with_layout(row, layout, |ui| {
                 ui.spacing_mut().item_spacing.x = space::SM;
-                if Button::new("Allow").primary().show(ui).clicked() {
-                    decision = Some(Decision::Allow);
-                }
-                if Button::new("Always allow").show(ui).clicked() {
-                    decision = Some(Decision::AlwaysAllow);
-                }
-                if Button::new("Deny").ghost().show(ui).clicked() {
-                    decision = Some(Decision::Deny);
-                }
+                // a press that began while they were off never becomes a click once they're on
+                answers(ui, armed, &mut decision);
             });
         });
     decision
+}
+
+fn answers(ui: &mut Ui, armed: bool, decision: &mut Option<Decision>) {
+    if Button::new("Allow")
+        .primary()
+        .enabled(armed)
+        .show(ui)
+        .clicked()
+    {
+        *decision = Some(Decision::Allow);
+    }
+    if Button::new("Always allow")
+        .enabled(armed)
+        .show(ui)
+        .clicked()
+    {
+        *decision = Some(Decision::AlwaysAllow);
+    }
+    if Button::new("Deny")
+        .ghost()
+        .enabled(armed)
+        .show(ui)
+        .clicked()
+    {
+        *decision = Some(Decision::Deny);
+    }
 }
 
 // an answered request settles into one quiet line, like the tool calls around it
@@ -1322,7 +1434,8 @@ pub(super) fn caret(ui: &Ui, center: Pos2, turn: f32, color: Color32) {
 
 #[cfg(test)]
 mod tool_row_tests {
-    use super::one_line;
+    use super::{Decision, PermissionRequest, one_line, permission};
+    use egui::vec2;
 
     #[test]
     fn long_commands_run_together_onto_one_line() {
@@ -1336,5 +1449,75 @@ mod tool_row_tests {
         );
         assert_eq!(one_line("cargo test"), ("cargo test".to_owned(), 0));
         assert_eq!(one_line("\n  ls -la  \n"), ("ls -la".to_owned(), 0));
+    }
+
+    fn request() -> PermissionRequest {
+        PermissionRequest {
+            title: "Run a command?".into(),
+            detail: Some("rm -rf build".into()),
+            decision: None,
+        }
+    }
+
+    // one frame at `time` seconds with these pointer events, returning what the card was answered with
+    fn frame(ctx: &egui::Context, time: f64, events: Vec<egui::Event>) -> Option<Decision> {
+        let input = egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(480.0, 240.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut answer = None;
+        ctx.run_ui(input, |ui| answer = permission(ui, &request()))
+            .drop_without_applying_deltas();
+        answer
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    // clicks every few points across the window at `time`, returning where a click answered the card
+    fn sweep(ctx: &egui::Context, time: f64) -> Option<egui::Pos2> {
+        for y in (0..240).step_by(6) {
+            for x in (0..480).step_by(6) {
+                let at = egui::pos2(x as f32, y as f32);
+                frame(
+                    ctx,
+                    time,
+                    vec![egui::Event::PointerMoved(at), button(at, true)],
+                );
+                if frame(ctx, time, vec![button(at, false)]).is_some() {
+                    return Some(at);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_new_request_cant_be_answered_until_it_has_been_seen_a_moment() {
+        let ctx = egui::Context::default();
+        frame(&ctx, 0.0, Vec::new());
+        assert_eq!(sweep(&ctx, 0.3), None, "nothing answers it while it's new");
+        let allow = sweep(&ctx, 1.0).expect("its answers work once it's settled");
+
+        // a press made while it was new, let go of once it's settled, still isn't an answer
+        let ctx = egui::Context::default();
+        frame(&ctx, 0.0, Vec::new());
+        frame(
+            &ctx,
+            0.3,
+            vec![egui::Event::PointerMoved(allow), button(allow, true)],
+        );
+        assert_eq!(frame(&ctx, 1.0, vec![button(allow, false)]), None);
     }
 }

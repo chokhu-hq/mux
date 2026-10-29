@@ -20,6 +20,8 @@ pub struct GroupHeader<'a> {
     drop_target: bool,
     // the new name being typed in place of the label, while the group is renamed
     rename: Option<&'a mut String>,
+    // the most pressing status among its sessions, shown while they're tucked away
+    status: Option<mux_core::SessionStatus>,
 }
 
 pub struct GroupHeaderResponse {
@@ -38,6 +40,7 @@ impl<'a> GroupHeader<'a> {
             open: true,
             drop_target: false,
             rename: None,
+            status: None,
         }
     }
 
@@ -50,6 +53,11 @@ impl<'a> GroupHeader<'a> {
     // faint text after the name, like the folder the group points at
     pub fn detail(mut self, detail: &'a str) -> Self {
         self.detail = detail;
+        self
+    }
+
+    pub fn status(mut self, status: Option<mux_core::SessionStatus>) -> Self {
+        self.status = status;
         self
     }
 
@@ -142,9 +150,15 @@ impl<'a> GroupHeader<'a> {
                     p.text,
                 )
             };
+            let mut after = name.right();
+            if let Some(status) = self.status.filter(|_| field.is_none()) {
+                let dot = pos2(after + space::SM + 3.5, rect.center().y);
+                super::status_dot::paint(ui, dot, status);
+                after = dot.x + 3.5;
+            }
             if !self.detail.is_empty() && field.is_none() {
                 let room = Rect::from_min_max(
-                    pos2(name.right() + space::SM, rect.top()),
+                    pos2(after + space::SM, rect.top()),
                     pos2(caret_center.x - button.x / 2.0, rect.bottom()),
                 );
                 ui.painter().with_clip_rect(room).text(

@@ -2411,7 +2411,12 @@ impl App {
             .sessions
             .selected_id()
             .filter(|_| focused && !self.settings_open);
-        for alert in self.sessions.take_alerts(looking) {
+        let now = ctx.input(|i| i.time);
+        let alerts = self.sessions.take_alerts(looking, now);
+        if self.sessions.alert_due() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        for alert in alerts {
             if focused {
                 continue;
             }

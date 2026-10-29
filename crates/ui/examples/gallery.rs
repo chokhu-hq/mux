@@ -5,8 +5,8 @@ use mux_ui::motion::{self, Spring, spring_bool};
 use mux_ui::theme::{self, font, radius, space, text};
 use mux_ui::window::{self, WindowFrame};
 use mux_ui::{
-    Badge, Button, Command, CommandPalette, Icon, Kbd, PALETTE_SHORTCUT, Segmented, SessionRow,
-    Size, StatusDot, TextInput, Tone, TooltipExt,
+    Badge, Button, Command, CommandPalette, GroupHeader, Icon, Kbd, PALETTE_SHORTCUT, Segmented,
+    SessionRow, Size, StatusDot, TextInput, Tone, TooltipExt,
 };
 use mux_ui::{icons, shortcut};
 
@@ -339,6 +339,13 @@ impl eframe::App for Gallery {
                                         .show(ui, |ui| {
                                             ui.set_width(280.0);
                                             ui.spacing_mut().item_spacing.y = 2.0;
+                                            // closed projects show the most pressing status inside them
+                                            GroupHeader::new("web")
+                                                .open(false)
+                                                .status(Some(SessionStatus::Waiting))
+                                                .show(ui);
+                                            GroupHeader::new("api").open(false).show(ui);
+                                            GroupHeader::new("mux").show(ui);
                                             for (i, (title, kind, status, meta)) in
                                                 SESSIONS.iter().enumerate()
                                             {

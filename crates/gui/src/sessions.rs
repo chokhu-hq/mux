@@ -91,11 +91,15 @@ enum Action {
     Split(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Finished,
     Waiting,
     Failed,
 }
+
+// seconds an agent has to stay finished before that's announced
+const SETTLE: f64 = 3.0;
 
 pub struct Alert {
     pub id: u64,
@@ -130,7 +134,8 @@ pub struct Sessions {
     // sessions where an agent finished or stopped to ask something, since they were last looked at
     unread: HashSet<u64>,
     // agents that just finished, failed or started waiting, for the app to point out
-    alerts: Vec<Alert>,
+    // what to tell the person, with when a finish was first seen so it can settle before it's announced
+    alerts: Vec<(Alert, Option<f64>)>,
     pub outbox: Vec<ClientMsg>,
     // what each session asked for should start with, in the order the server confirms them
     creating: std::collections::VecDeque<Creating>,
@@ -142,8 +147,33 @@ pub struct Sessions {
 
 impl Sessions {
     // what agents did since the last call, marking each unread unless it's the one being looked at
-    pub fn take_alerts(&mut self, looking: Option<u64>) -> Vec<Alert> {
-        let alerts = std::mem::take(&mut self.alerts);
+    fn status(&self, id: u64) -> Option<SessionStatus> {
+        self.infos().find(|s| s.id == id).map(|s| s.status)
+    }
+
+    // a finish waiting to be announced, so the window wakes when it's due
+    pub fn alert_due(&self) -> bool {
+        !self.alerts.is_empty()
+    }
+
+    // the alerts ready at `now`, in seconds. a finish only counts once it has lasted a moment, since some agents
+    // carry straight on by themselves, like a claude its own background task wakes, or one mux picks back up
+    pub fn take_alerts(&mut self, looking: Option<u64>, now: f64) -> Vec<Alert> {
+        let mut alerts = Vec::new();
+        for (alert, since) in std::mem::take(&mut self.alerts) {
+            let since = since.unwrap_or(now);
+            if alert.event == Event::Finished {
+                // it started working again, or went away, so there's nothing to announce
+                if self.status(alert.id) != Some(SessionStatus::Done) {
+                    continue;
+                }
+                if now - since < SETTLE {
+                    self.alerts.push((alert, Some(since)));
+                    continue;
+                }
+            }
+            alerts.push(alert);
+        }
         for alert in &alerts {
             if looking != Some(alert.id) {
                 self.unread.insert(alert.id);
@@ -277,7 +307,7 @@ impl Sessions {
                             })
                         })
                         .collect();
-                    self.alerts.extend(alerts);
+                    self.alerts.extend(alerts.into_iter().map(|a| (a, None)));
                     // a shell left with exit closes like a terminal tab, while one that failed stays to show why
                     let exited: Vec<u64> = self
                         .infos()
@@ -625,6 +655,12 @@ impl Sessions {
                 let shown = ui
                     .push_id(group.id, |ui| {
                         GroupHeader::new(&group.name)
+                            // a closed project still says when something in it needs looking at
+                            .status(
+                                (!group.open)
+                                    .then(|| most_pressing(&group.sessions, &self.unread))
+                                    .flatten(),
+                            )
                             .detail(if group.path.is_some() {
                                 ""
                             } else {
@@ -1408,6 +1444,27 @@ pub fn ended(status: SessionStatus) -> bool {
     matches!(status, SessionStatus::Done | SessionStatus::Failed)
 }
 
+// the status most worth knowing about among a project's sessions: one waiting on the person, then one that
+// failed or finished since it was last looked at, with work in progress in between
+fn most_pressing(sessions: &[SessionInfo], unread: &HashSet<u64>) -> Option<SessionStatus> {
+    sessions
+        .iter()
+        .filter_map(|session| {
+            let unseen = unread.contains(&session.id);
+            let rank = match session.status {
+                SessionStatus::Waiting => 4,
+                SessionStatus::Failed if unseen => 3,
+                // a shell runs for as long as it's open, which is nothing to point out
+                SessionStatus::Running if session.kind != SessionKind::Shell => 2,
+                SessionStatus::Done if unseen => 1,
+                _ => return None,
+            };
+            Some((rank, session.status))
+        })
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, status)| status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1497,6 +1554,57 @@ mod tests {
     }
 
     #[test]
+    fn a_finish_is_announced_only_once_it_lasts() {
+        let state = |status| ServerMsg::State {
+            groups: vec![GroupInfo {
+                id: 1,
+                name: "p".into(),
+                path: None,
+                branch: None,
+                open: true,
+                sessions: vec![SessionInfo {
+                    id: 2,
+                    title: "fix tests".into(),
+                    kind: SessionKind::Agent,
+                    status,
+                    meta: String::new(),
+                    updated: 0,
+                    provider: Provider::Claude,
+                    worktree: None,
+                    branch: None,
+                    summary: None,
+                }],
+            }],
+        };
+        let mut sessions = Sessions::default();
+        sessions.apply(state(SessionStatus::Running));
+        sessions.apply(state(SessionStatus::Done));
+        assert!(
+            sessions.take_alerts(None, 10.0).is_empty(),
+            "not straight away"
+        );
+        assert!(sessions.take_alerts(None, 11.0).is_empty());
+        assert!(!sessions.unread.contains(&2), "and no dot yet either");
+        // it carried on by itself before the moment was up
+        sessions.apply(state(SessionStatus::Running));
+        assert!(sessions.take_alerts(None, 20.0).is_empty());
+        assert!(!sessions.alert_due());
+
+        sessions.apply(state(SessionStatus::Done));
+        assert!(sessions.take_alerts(None, 30.0).is_empty());
+        let alerts = sessions.take_alerts(None, 33.5);
+        assert!(matches!(
+            alerts.as_slice(),
+            [Alert {
+                id: 2,
+                event: Event::Finished,
+                ..
+            }]
+        ));
+        assert!(sessions.unread.contains(&2));
+    }
+
+    #[test]
     fn finished_agents_alert_once_and_stay_unread_until_looked_at() {
         let state = |status| ServerMsg::State {
             groups: vec![GroupInfo {
@@ -1522,10 +1630,10 @@ mod tests {
         let mut sessions = Sessions::default();
         // what's already done at startup isn't news
         sessions.apply(state(SessionStatus::Done));
-        assert!(sessions.take_alerts(None).is_empty());
+        assert!(sessions.take_alerts(None, 0.0).is_empty());
         sessions.apply(state(SessionStatus::Running));
         sessions.apply(state(SessionStatus::Waiting));
-        let alerts = sessions.take_alerts(None);
+        let alerts = sessions.take_alerts(None, 0.0);
         assert!(matches!(
             alerts.as_slice(),
             [Alert {
@@ -1535,7 +1643,7 @@ mod tests {
             }]
         ));
         assert!(sessions.unread.contains(&2));
-        sessions.take_alerts(Some(2));
+        sessions.take_alerts(Some(2), 0.0);
         assert!(!sessions.unread.contains(&2));
     }
 
@@ -1565,6 +1673,51 @@ mod tests {
             [AgentItem::Assistant {
                 text: "Hello".into()
             }]
+        );
+    }
+
+    #[test]
+    fn a_closed_project_shows_what_most_needs_looking_at() {
+        let session = |id, kind, status| SessionInfo {
+            id,
+            title: String::new(),
+            kind,
+            status,
+            meta: String::new(),
+            updated: 0,
+            provider: Provider::Claude,
+            worktree: None,
+            branch: None,
+            summary: None,
+        };
+        let shell = session(1, SessionKind::Shell, SessionStatus::Running);
+        let done = session(2, SessionKind::Agent, SessionStatus::Done);
+        let failed = session(3, SessionKind::Agent, SessionStatus::Failed);
+        let working = session(4, SessionKind::Agent, SessionStatus::Running);
+        let waiting = session(5, SessionKind::Agent, SessionStatus::Waiting);
+        let mut unread = HashSet::new();
+        assert_eq!(
+            most_pressing(std::slice::from_ref(&shell), &unread),
+            None,
+            "an open shell is nothing new"
+        );
+        assert_eq!(
+            most_pressing(&[done.clone(), failed.clone()], &unread),
+            None,
+            "already seen"
+        );
+        unread.extend([2, 3]);
+        assert_eq!(
+            most_pressing(&[done.clone(), working.clone()], &unread),
+            Some(SessionStatus::Running)
+        );
+        assert_eq!(
+            most_pressing(&[done.clone(), working.clone(), failed.clone()], &unread),
+            Some(SessionStatus::Failed)
+        );
+        assert_eq!(
+            most_pressing(&[shell, done, failed, working, waiting], &unread),
+            Some(SessionStatus::Waiting)
         );
     }
 

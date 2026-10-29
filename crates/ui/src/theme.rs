@@ -325,6 +325,32 @@ fn fonts() -> FontDefinitions {
         defs.font_data
             .insert(name.into(), Arc::new(FontData::from_static(bytes)));
     }
+    #[cfg(windows)]
+    if std::env::var("MUX_FONT").is_ok_and(|f| f == "segoe") {
+        use_segoe(&mut defs);
+    }
+    // how letters are fitted to the pixel grid, switchable while text on windows is being tuned
+    let hinting = std::env::var("MUX_FONT_HINTING").unwrap_or_default();
+    if !hinting.is_empty() {
+        log::info!("font hinting set to {hinting:?}");
+    }
+    for (name, data) in defs.font_data.iter_mut() {
+        if name.starts_with("phosphor") {
+            continue;
+        }
+        let tweak = &mut Arc::make_mut(data).tweak;
+        match hinting.as_str() {
+            "off" => tweak.hinting = Some(false),
+            "light" => {
+                tweak.hinting_target =
+                    egui::epaint::text::HintingTarget::Smooth(egui::epaint::text::SmoothHinting {
+                        light: true,
+                        ..Default::default()
+                    })
+            }
+            _ => {}
+        }
+    }
 
     // icons are drawn with the icon font directly because inter has its own glyphs at some of phosphor's codepoints
     let sans_fallback = defs.families[&FontFamily::Proportional].clone();
@@ -369,6 +395,28 @@ fn fonts() -> FontDefinitions {
         defs.families.insert(family, list);
     }
     defs
+}
+
+// the interface in windows' own font, segoe ui variable at the weights mux uses, when windows has it
+#[cfg(windows)]
+fn use_segoe(defs: &mut FontDefinitions) {
+    let fonts =
+        std::path::PathBuf::from(std::env::var_os("WINDIR").unwrap_or("C:\\Windows".into()))
+            .join("Fonts");
+    let Ok(bytes) = std::fs::read(fonts.join("SegUIVar.ttf")) else {
+        log::warn!("segoe ui variable isn't installed, so the interface stays in inter");
+        return;
+    };
+    log::info!("drawing the interface in segoe ui variable");
+    for (name, weight) in [
+        ("inter", 400.0),
+        (font::MEDIUM, 500.0),
+        (font::SEMIBOLD, 600.0),
+    ] {
+        let mut data = FontData::from_owned(bytes.clone());
+        data.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", weight)]);
+        defs.font_data.insert(name.into(), Arc::new(data));
+    }
 }
 
 fn apply(style: &mut Style, p: &Palette, dark: bool) {

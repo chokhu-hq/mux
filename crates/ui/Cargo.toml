@@ -13,6 +13,7 @@ image.workspace = true
 syntect.workspace = true
 two-face.workspace = true
 pulldown-cmark.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 eframe.workspace = true

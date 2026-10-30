@@ -2035,12 +2035,8 @@ fn claude_content(text: &str, attachments: &[String], skills: &[Skill]) -> Value
     // a mentioned skill needs its own block to start with `/name`, and the rest goes ahead of it
     let mut blocks = crate::skills::claude_blocks(text, skills);
     let mut text = blocks.pop().unwrap_or_default();
-    if !files.is_empty() {
-        text.push_str("\n\nAttached files:");
-        for path in files {
-            text.push_str(&format!("\n- {path}"));
-        }
-    }
+    text.push_str(&attached(&files));
+    let mut text = text.trim_start().to_owned();
     let mut content = Vec::new();
     for path in images {
         match fs::read(path) {
@@ -2061,6 +2057,23 @@ fn claude_content(text: &str, attachments: &[String], skills: &[Skill]) -> Value
     }
     content.push(json!({ "type": "text", "text": text }));
     Value::Array(content)
+}
+
+// attached files and folders as paths in the message, which an agent can read or list itself
+fn attached(paths: &[&String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut out = "\n\nAttached:".to_owned();
+    for path in paths {
+        let kind = if Path::new(path.as_str()).is_dir() {
+            " (folder)"
+        } else {
+            ""
+        };
+        out.push_str(&format!("\n- {path}{kind}"));
+    }
+    out
 }
 
 fn media_type(path: &str) -> &'static str {
@@ -2114,13 +2127,13 @@ fn turn_params(
     attachments: &[String],
     settings: &AgentSettings,
 ) -> Value {
-    let mut input = vec![json!({ "type": "text", "text": text })];
-    for path in attachments {
-        input.push(if is_image(path) {
-            json!({ "type": "localImage", "path": path })
-        } else {
-            json!({ "type": "mention", "name": file_name(path), "path": path })
-        });
+    let (images, files): (Vec<&String>, Vec<&String>) =
+        attachments.iter().partition(|p| is_image(p));
+    // codex's mention input is for its own apps and plugins, and passes over a file or folder in silence
+    let text = format!("{text}{}", attached(&files));
+    let mut input = vec![json!({ "type": "text", "text": text.trim_start() })];
+    for path in images {
+        input.push(json!({ "type": "localImage", "path": path }));
     }
     let mut params = json!({ "threadId": thread, "input": input });
     if let Some(model) = &settings.model {
@@ -3157,18 +3170,29 @@ mod tests {
     }
 
     #[test]
-    fn attachments_go_to_codex_as_images_and_mentions() {
-        let files = ["/p/shot.PNG".to_owned(), "/p/notes.md".to_owned()];
+    fn attachments_go_to_codex_as_images_and_paths() {
+        let folder = std::env::temp_dir();
+        let files = [
+            "/p/shot.PNG".to_owned(),
+            "/p/notes.md".to_owned(),
+            folder.to_string_lossy().into_owned(),
+        ];
         let input = &turn_params("t", "look", &files, &AgentSettings::default())["input"];
-        assert_eq!(input[0]["text"], "look");
+        assert_eq!(
+            input[0]["text"],
+            format!(
+                "look\n\nAttached:\n- /p/notes.md\n- {} (folder)",
+                folder.display()
+            )
+        );
         assert_eq!(
             input[1],
             json!({ "type": "localImage", "path": "/p/shot.PNG" })
         );
-        assert_eq!(
-            input[2],
-            json!({ "type": "mention", "name": "notes.md", "path": "/p/notes.md" })
-        );
+        assert_eq!(input.as_array().unwrap().len(), 2);
+        // a folder sent on its own still reaches codex, with nothing blank ahead of it
+        let alone = &turn_params("t", "", &files[1..2], &AgentSettings::default())["input"];
+        assert_eq!(alone[0]["text"], "Attached:\n- /p/notes.md");
     }
 
     #[test]
@@ -3181,7 +3205,7 @@ mod tests {
         let content = claude_content("look", &[image, "/p/notes.md".to_owned()], &[]);
         assert_eq!(content[0]["source"]["media_type"], "image/png");
         assert_eq!(content[0]["source"]["data"], "cG5n");
-        assert_eq!(content[1]["text"], "look\n\nAttached files:\n- /p/notes.md");
+        assert_eq!(content[1]["text"], "look\n\nAttached:\n- /p/notes.md");
         fs::remove_dir_all(dir).unwrap();
     }
 

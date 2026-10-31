@@ -72,7 +72,7 @@ enum Call {
     Interrupt,
     Compact,
     // an opencode session setting, like its model or mode
-    Configure,
+    Configure(&'static str, String),
 }
 
 struct Process {
@@ -215,6 +215,8 @@ pub struct Agent {
     compacting: Option<usize>,
     compact_queued: bool,
     applied: opencode::Applied,
+    pending_prompt: Option<Value>,
+    stop_requested: bool,
     // commands the agent left running in the background, and ones that finished since the last message
     background: Vec<background::Tracked>,
     background_changed: bool,
@@ -308,6 +310,8 @@ impl Agent {
             compacting: None,
             compact_queued: false,
             applied: opencode::Applied::default(),
+            pending_prompt: None,
+            stop_requested: false,
             background: Vec::new(),
             background_changed: false,
             events: None,
@@ -983,16 +987,37 @@ impl Agent {
             }
             return;
         }
+        if !self.thread_live {
+            self.queued.clear();
+            self.compact_queued = false;
+            self.unqueue(usize::MAX);
+            self.finish_compaction(ItemStatus::Failed);
+            self.set_busy(false);
+            return;
+        }
         if self.settings.provider == Provider::OpenCode {
+            if self.pending_prompt.take().is_some() {
+                self.finish_compaction(ItemStatus::Failed);
+                self.set_busy(false);
+                return;
+            }
             self.opencode_stop();
             return;
         }
         if let (Some(thread), Some(turn)) = (self.thread_id.clone(), self.turn_id.clone()) {
+            self.stop_requested = false;
             self.call(
                 Call::Interrupt,
                 "turn/interrupt",
                 json!({ "threadId": thread, "turnId": turn }),
             );
+        } else if self.busy
+            && self
+                .calls
+                .values()
+                .any(|call| matches!(call, Call::StartTurn))
+        {
+            self.stop_requested = true;
         }
     }
 
@@ -1007,6 +1032,8 @@ impl Agent {
             self.queue_changed = true;
         }
         self.thread_live = false;
+        self.pending_prompt = None;
+        self.stop_requested = false;
         self.calls.clear();
         if self.busy {
             self.push(AgentItem::Error {
@@ -1222,14 +1249,19 @@ impl Agent {
             },
             Call::StartTurn => match error {
                 Some(message) => self.fail(format!("Codex didn't start the turn: {message}")),
-                None => self.turn_id = msg["result"]["turn"]["id"].as_str().map(str::to_owned),
+                None => {
+                    self.turn_id = msg["result"]["turn"]["id"].as_str().map(str::to_owned);
+                    if self.stop_requested {
+                        self.stop();
+                    }
+                }
             },
             Call::Steer(text, attachments) => {
                 if error.is_some() {
                     self.start_turn(text, attachments);
                 }
             }
-            Call::Interrupt | Call::Configure => {}
+            Call::Interrupt | Call::Configure(..) => {}
             Call::Revert => {
                 if let Some(message) = error {
                     self.push(AgentItem::Error {
@@ -1316,6 +1348,9 @@ impl Agent {
                     self.mark_turn(&turn);
                 }
                 self.set_busy(true);
+                if self.stop_requested {
+                    self.stop();
+                }
             }
             "turn/completed" => {
                 let turn = &params["turn"];
@@ -2012,6 +2047,7 @@ impl Agent {
 
     fn set_busy(&mut self, busy: bool) {
         if !busy {
+            self.stop_requested = false;
             self.end_reasoning();
         }
         if self.busy != busy {
@@ -2444,6 +2480,73 @@ mod tests {
 
     fn agent() -> Agent {
         Agent::load(Path::new("/nonexistent/mux-agent.json"))
+    }
+
+    #[test]
+    fn stopping_before_initialization_prevents_the_queued_turn() {
+        for provider in [Provider::Codex, Provider::OpenCode] {
+            let mut agent = agent();
+            agent.settings.provider = provider;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            agent.process = Some(Process::fake(tx));
+            agent.record("cancel me", &[], false);
+            agent.transmit("cancel me".into(), Vec::new(), false);
+            agent.calls.insert(0, Call::Initialize);
+            agent.next_call = 1;
+            agent.stop();
+            assert!(!agent.busy);
+            agent.handle(json!({ "id": 0, "result": {} }));
+            while rx.try_recv().is_ok() {}
+            agent.handle(json!({ "id": 1, "result": {
+                "sessionId": "s", "thread": { "id": "t" }
+            } }));
+            assert!(rx.try_recv().is_err());
+            assert!(agent.queued.is_empty());
+            assert!(agent.thread_live);
+            assert!(!agent.busy);
+            agent.record("try again", &[], false);
+            agent.transmit("try again".into(), Vec::new(), false);
+            let sent: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(
+                sent["method"],
+                match provider {
+                    Provider::Codex => "turn/start",
+                    Provider::OpenCode => "session/prompt",
+                    Provider::Claude => unreachable!(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn codex_stop_waits_for_the_turn_id() {
+        for notification_first in [false, true] {
+            let mut agent = agent();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            agent.process = Some(Process::fake(tx));
+            agent.thread_id = Some("t".into());
+            agent.thread_live = true;
+            agent.record("go", &[], false);
+            agent.transmit("go".into(), Vec::new(), false);
+            let start: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            agent.stop();
+            assert!(rx.try_recv().is_err());
+            let response = json!({ "id": start["id"], "result": { "turn": { "id": "turn" } } });
+            let notification =
+                json!({ "method": "turn/started", "params": { "turn": { "id": "turn" } } });
+            let messages = if notification_first {
+                [notification, response]
+            } else {
+                [response, notification]
+            };
+            for message in messages {
+                agent.handle(message);
+            }
+            let interrupt: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(interrupt["method"], "turn/interrupt");
+            assert_eq!(interrupt["params"]["turnId"], "turn");
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[test]

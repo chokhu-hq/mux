@@ -51,6 +51,10 @@ struct Saved {
     #[serde(default)]
     claude_head: Option<String>,
     #[serde(default)]
+    resume_at: Option<String>,
+    #[serde(default)]
+    pending_revert: Option<String>,
+    #[serde(default)]
     queue: Vec<Queued>,
     #[serde(default)]
     resumes: u32,
@@ -290,8 +294,8 @@ impl Agent {
             todos: None,
             default_model: None,
             claude_head: saved.claude_head,
-            resume_at: None,
-            pending_revert: None,
+            resume_at: saved.resume_at,
+            pending_revert: saved.pending_revert,
             // nothing runs a saved queue until the person asks, since the agent it was meant for has gone
             held: !saved.queue.is_empty(),
             queue: saved.queue,
@@ -391,6 +395,8 @@ impl Agent {
             context: self.context,
             commands: self.commands.clone(),
             claude_head: self.claude_head.clone(),
+            resume_at: self.resume_at.clone(),
+            pending_revert: self.pending_revert.clone(),
             queue: self.queue.clone(),
             resumes: self.resumes,
         };

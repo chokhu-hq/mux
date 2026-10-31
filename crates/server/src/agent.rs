@@ -1049,6 +1049,7 @@ impl Agent {
         self.claude_waiting.clear();
         self.claude_turn = false;
         // whatever was waiting will never run on this process
+        self.queued.clear();
         self.unqueue(usize::MAX);
         self.compact_queued = false;
         self.finish_compaction(ItemStatus::Failed);
@@ -2546,6 +2547,75 @@ mod tests {
             assert_eq!(interrupt["method"], "turn/interrupt");
             assert_eq!(interrupt["params"]["turnId"], "turn");
             assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn an_exit_during_startup_does_not_replay_the_abandoned_prompt() {
+        for provider in [Provider::Codex, Provider::OpenCode] {
+            let mut agent = agent();
+            agent.settings.provider = provider;
+            let (tx, _) = mpsc::unbounded_channel();
+            agent.process = Some(Process::fake(tx));
+            agent.record("abandoned", &[], false);
+            agent.transmit("abandoned".into(), Vec::new(), false);
+            agent.exited();
+            assert!(!agent.busy);
+
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            agent.process = Some(Process::fake(tx));
+            agent.record("replacement", &[], false);
+            agent.transmit("replacement".into(), Vec::new(), false);
+            agent.calls.insert(0, Call::ResumeThread);
+            agent.next_call = 1;
+            agent.handle(json!({ "id": 0, "result": {
+                "thread": { "id": "thread" }, "sessionId": "session"
+            } }));
+            let prompt: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            let text = match provider {
+                Provider::Codex => &prompt["params"]["input"][0]["text"],
+                Provider::OpenCode => &prompt["params"]["prompt"][0]["text"],
+                Provider::Claude => unreachable!(),
+            };
+            assert_eq!(text, "replacement");
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn stopping_compaction_while_resuming_prevents_the_compaction_request() {
+        for provider in [Provider::Codex, Provider::OpenCode] {
+            for initialized in [false, true] {
+                let mut agent = agent();
+                agent.settings.provider = provider;
+                agent.thread_id = Some("thread".into());
+                agent.session_id = Some("session".into());
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                agent.process = Some(Process::fake(tx));
+                agent.calls.insert(0, Call::Initialize);
+                agent.next_call = 1;
+                let (events, _) = mpsc::unbounded_channel();
+                agent.compact(1, 1, PathBuf::from("/project"), &events);
+                if initialized {
+                    agent.handle(json!({ "id": 0, "result": {} }));
+                }
+                agent.stop();
+                if !initialized {
+                    agent.handle(json!({ "id": 0, "result": {} }));
+                }
+                while rx.try_recv().is_ok() {}
+                agent.handle(json!({ "id": 1, "result": {
+                    "thread": { "id": "thread" }, "sessionId": "session"
+                } }));
+                assert!(!agent.busy);
+                assert!(matches!(
+                    agent.items.last(),
+                    Some(AgentItem::Compaction {
+                        status: ItemStatus::Failed
+                    })
+                ));
+                assert!(rx.try_recv().is_err());
+            }
         }
     }
 

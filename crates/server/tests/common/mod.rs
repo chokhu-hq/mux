@@ -138,6 +138,11 @@ impl Server {
 
     fn relaunch(&mut self) {
         self.child = launch(&self.dir, &self.env, self.open_files, self.live);
+        self.reconnect();
+    }
+
+    pub fn reconnect(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
         (self.stream, self.inbox, self.received) = listen(&self.socket);
         self.seen.clear();
         self.agents.clear();
@@ -177,6 +182,30 @@ impl Server {
 
     pub fn codex_agent(&mut self, settings: AgentSettings) -> u64 {
         self.agent(Provider::Codex, settings)
+    }
+
+    pub fn hold_codex(&self, method: &str) {
+        std::fs::write(self.dir.join("codex-hold"), method).unwrap();
+    }
+
+    pub fn wait_codex_held(&mut self, method: &str) {
+        let deadline = Instant::now() + self.patience;
+        while !self.codex_log().iter().any(|entry| entry["held"] == method) {
+            assert!(Instant::now() < deadline, "codex never paused at {method}");
+            match self.inbox.recv_timeout(Duration::from_millis(10)) {
+                Ok(msg) => self.take(msg),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(err) => panic!("server disconnected while waiting for codex: {err}"),
+            }
+        }
+    }
+
+    pub fn release_codex(&self) {
+        std::fs::remove_file(self.dir.join("codex-hold")).unwrap();
+    }
+
+    pub fn crash_held_codex(&self) {
+        std::fs::write(self.dir.join("codex-hold"), "crash").unwrap();
     }
 
     fn agent(&mut self, provider: Provider, settings: AgentSettings) -> u64 {
@@ -450,7 +479,8 @@ fn launch(dir: &Path, env: &[(String, String)], open_files: Option<u64>, live: b
         .env("MUX_SOCKET", dir.join("mux.sock"))
         .env("MUX_DATA_DIR", dir.join("data"))
         .env("FAKE_CLAUDE_LOG", dir.join("claude.log"))
-        .env("FAKE_CODEX_LOG", dir.join("codex.log"));
+        .env("FAKE_CODEX_LOG", dir.join("codex.log"))
+        .env("FAKE_CODEX_HOLD", dir.join("codex-hold"));
     for (key, value) in env {
         command.env(key, value);
     }

@@ -709,6 +709,80 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_configuration_failure_retries_only_unconfirmed_settings() {
+        for rejected in ["effort", "mode"] {
+            let mut agent = Agent::load(std::path::Path::new("/nonexistent"));
+            agent.settings.provider = Provider::OpenCode;
+            agent.settings.model = Some("chosen".into());
+            agent.settings.effort = Some("high".into());
+            agent.settings.plan = true;
+            agent.session_id = Some("s".into());
+            agent.thread_live = true;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            agent.process = Some(Process::fake(tx));
+            agent.record("first", &[], false);
+            agent.opencode_send("first".into(), Vec::new());
+            for config in ["model", "effort", "mode"] {
+                let call: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+                assert_eq!(call["params"]["configId"], config);
+                assert!(rx.try_recv().is_err());
+                if config == rejected {
+                    agent.handle(json!({ "id": call["id"], "error": { "message": "rejected" } }));
+                    break;
+                }
+                agent.handle(json!({ "id": call["id"], "result": {} }));
+            }
+            assert!(!agent.busy);
+            assert!(rx.try_recv().is_err());
+            agent.record("second", &[], false);
+            agent.opencode_send("second".into(), Vec::new());
+            for config in ["effort", "mode"]
+                .into_iter()
+                .skip(usize::from(rejected == "mode"))
+            {
+                let call: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+                assert_eq!(call["params"]["configId"], config);
+                assert!(rx.try_recv().is_err());
+                agent.handle(json!({ "id": call["id"], "result": {} }));
+            }
+            let prompt: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(prompt["method"], "session/prompt");
+            assert_eq!(prompt["params"]["prompt"][0]["text"], "second");
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn settings_changed_during_configuration_apply_before_the_pending_prompt() {
+        let mut agent = Agent::load(std::path::Path::new("/nonexistent"));
+        agent.settings.provider = Provider::OpenCode;
+        agent.settings.model = Some("first-model".into());
+        agent.session_id = Some("s".into());
+        agent.thread_live = true;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        agent.process = Some(Process::fake(tx));
+        agent.record("go", &[], false);
+        agent.opencode_send("go".into(), Vec::new());
+        let first: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        agent.settings.model = Some("second-model".into());
+        agent.settings.plan = true;
+        agent.handle(json!({ "id": first["id"], "result": {} }));
+        let second: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(second["params"]["configId"], "model");
+        assert_eq!(second["params"]["value"], "second-model");
+        assert!(rx.try_recv().is_err());
+        agent.handle(json!({ "id": second["id"], "result": {} }));
+        let mode: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(mode["params"]["value"], "plan");
+        assert!(rx.try_recv().is_err());
+        agent.handle(json!({ "id": mode["id"], "result": {} }));
+        let prompt: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(prompt["method"], "session/prompt");
+        assert_eq!(prompt["params"]["prompt"][0]["text"], "go");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn maps_an_acp_turn_onto_the_transcript() {
         let mut agent = Agent::load(std::path::Path::new("/nonexistent"));
         agent.settings.provider = Provider::OpenCode;

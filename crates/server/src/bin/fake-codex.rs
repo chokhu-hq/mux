@@ -95,6 +95,7 @@ impl Fake {
                 }
                 continue;
             };
+            hold(method);
             match method {
                 "initialize" => reply(&id, json!({ "userAgent": "fake-codex" })),
                 "thread/start" => {
@@ -160,11 +161,17 @@ impl Fake {
         let turn = format!("turn-{}", self.turns);
         self.turn = Some(turn.clone());
         self.interrupted = false;
-        reply(&id, json!({ "turn": { "id": turn } }));
+        let notify_first = std::env::var_os("FAKE_CODEX_NOTIFY_FIRST").is_some();
+        if !notify_first {
+            reply(&id, json!({ "turn": { "id": turn } }));
+        }
         note(
             "turn/started",
             json!({ "threadId": self.thread, "turn": { "id": turn } }),
         );
+        if notify_first {
+            reply(&id, json!({ "turn": { "id": turn } }));
+        }
         note(
             "item/started",
             json!({ "item": { "type": "userMessage", "id": format!("{turn}-user") } }),
@@ -325,6 +332,25 @@ impl Fake {
             "turn/completed",
             json!({ "threadId": self.thread, "turn": turn }),
         );
+    }
+}
+
+fn hold(method: &str) {
+    let Some(path) = std::env::var_os("FAKE_CODEX_HOLD") else {
+        return;
+    };
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(method) {
+        return;
+    }
+    log(json!({ "held": method }));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while std::path::Path::new(&path).exists() {
+        if std::fs::read_to_string(&path).ok().as_deref() == Some("crash") {
+            std::fs::remove_file(&path).unwrap();
+            std::process::exit(3);
+        }
+        assert!(Instant::now() < deadline, "test never released {method}");
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

@@ -253,7 +253,15 @@ fn a_turn_a_usage_limit_stopped_carries_on_after_a_restart_too() {
     let id = server.codex_agent(AgentSettings::default());
     server.say(id, "scenario:limit");
     server.wait("the limit", |s| {
-        s.errors().iter().any(|e| e.contains("carry on by itself"))
+        s.items.iter().any(|item| {
+            matches!(
+                item,
+                AgentItem::UsageLimit {
+                    retry_at: Some(_),
+                    ..
+                }
+            )
+        })
     });
     // the wake-up is saved, so a server that restarts meanwhile still carries on
     server.crash_and_restart();

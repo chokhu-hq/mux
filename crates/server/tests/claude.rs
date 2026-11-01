@@ -413,12 +413,55 @@ fn quitting_on_purpose_doesnt_carry_on_when_mux_starts_again() {
 }
 
 #[test]
+fn a_weekly_limit_is_one_notice_instead_of_duplicate_errors() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "scenario:limit-week");
+    server.wait("the limit notice", |s| {
+        !s.busy
+            && s.items.iter().any(|item| {
+                matches!(
+                    item,
+                    AgentItem::UsageLimit {
+                        retry_at: Some(_),
+                        ..
+                    }
+                )
+            })
+    });
+    assert_eq!(server.items.len(), 2);
+    assert!(
+        matches!(&server.items[1], AgentItem::UsageLimit { message, retry_at: Some(_) }
+        if message.contains("weekly limit") && message.contains("Asia/Dhaka"))
+    );
+    assert!(server.errors().is_empty());
+    assert!(server.assistant_text().is_empty());
+    server.quit_and_restart();
+    server.wait("the saved notice", |s| s.items.len() == 2);
+    assert!(matches!(
+        &server.items[1],
+        AgentItem::UsageLimit {
+            retry_at: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_turn_a_usage_limit_stopped_carries_on_once_it_resets() {
     let mut server = Server::start();
     let id = server.claude_agent(AgentSettings::default());
     server.say(id, "scenario:limit");
     server.wait("the limit", |s| {
-        s.errors().iter().any(|e| e.contains("carry on by itself"))
+        s.items.iter().any(|item| {
+            matches!(
+                item,
+                AgentItem::UsageLimit {
+                    retry_at: Some(_),
+                    ..
+                }
+            )
+        })
     });
     server.wait("the turn to carry on", |s| {
         !s.busy
@@ -439,7 +482,15 @@ fn a_message_takes_over_from_waiting_for_a_limit() {
     let id = server.claude_agent(AgentSettings::default());
     server.say(id, "scenario:limit");
     server.wait("the limit", |s| {
-        s.errors().iter().any(|e| e.contains("carry on by itself"))
+        s.items.iter().any(|item| {
+            matches!(
+                item,
+                AgentItem::UsageLimit {
+                    retry_at: Some(_),
+                    ..
+                }
+            )
+        })
     });
     reply(&mut server, id, "never mind");
     // past when it would have carried on

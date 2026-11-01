@@ -30,6 +30,10 @@ pub enum ChatItem {
         queued: bool,
     },
     Assistant(String),
+    UsageLimit {
+        message: String,
+        retry_at: Option<u64>,
+    },
     Tool(ToolCall),
     Diff(FileDiff),
     Permission(PermissionRequest),
@@ -428,7 +432,7 @@ fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
         let stays = match item {
             ChatItem::Permission(request) => request.decision.is_none(),
             ChatItem::Question { answers, .. } => answers.is_none(),
-            ChatItem::Thinking => true,
+            ChatItem::Thinking | ChatItem::UsageLimit { .. } => true,
             ChatItem::Assistant(text) => Some(i) == reply || (!live && error(text)),
             ChatItem::Changes(_) | ChatItem::Plan { .. } => !live,
             _ => false,
@@ -508,6 +512,7 @@ fn show_item(
             });
         }
         ChatItem::Tool(tool) => cards::tool_call(ui, tool),
+        ChatItem::UsageLimit { message, retry_at } => cards::usage_limit(ui, message, *retry_at),
         ChatItem::Diff(diff) => {
             if cards::diff(ui, diff) {
                 action = Some(ChatAction::OpenDiff(index));
@@ -726,6 +731,23 @@ mod tests {
 
     fn reply(text: &str) -> ChatItem {
         ChatItem::Assistant(text.into())
+    }
+
+    #[test]
+    fn a_usage_limit_notice_stays_visible_when_other_work_is_folded() {
+        let items = vec![
+            user("go"),
+            tool(ToolKind::Read, ToolStatus::Done),
+            ChatItem::UsageLimit {
+                message: "Limit reached".into(),
+                retry_at: Some(100),
+            },
+        ];
+        for running in [false, true] {
+            let turn = fold(&items, 1, running);
+            assert_eq!(turn.kept, [2]);
+            assert_eq!(turn.work, [1]);
+        }
     }
 
     #[test]

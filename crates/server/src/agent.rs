@@ -478,22 +478,27 @@ impl Agent {
     }
 
     // a usage limit stopped the turn, so it carries on by itself once the limit resets
-    fn pause_until(&mut self, reset: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let wait = reset.saturating_sub(now);
-        let when = match wait {
-            0..=90 => "in a minute or so".to_owned(),
-            91..=3599 => format!("in about {} min", wait.div_ceil(60)),
-            _ => format!("in about {} h {} min", wait / 3600, (wait % 3600) / 60),
-        };
-        self.push(AgentItem::Error {
-            message: format!(
-                "Mux will carry on by itself {when}, once the limit resets. Sending a message takes over instead."
-            ),
-        });
+    fn pause_until(&mut self, reset: u64, message: String) {
+        self.usage_limit(message, Some(reset));
         self.pause = Some(reset);
+    }
+
+    fn usage_limit(&mut self, message: String, retry_at: Option<u64>) {
+        let duplicate = self.items.last().is_some_and(|item| match item {
+            AgentItem::Assistant { text } => text.trim() == message.trim(),
+            AgentItem::UsageLimit {
+                message: previous, ..
+            } => previous.trim() == message.trim(),
+            _ => false,
+        });
+        let item = AgentItem::UsageLimit { message, retry_at };
+        if duplicate {
+            let index = self.items.len() - 1;
+            self.items[index] = item;
+            self.changed.insert(index);
+        } else {
+            self.push(item);
+        }
     }
 
     pub fn take_pause(&mut self) -> Option<u64> {
@@ -1364,13 +1369,15 @@ impl Agent {
                     let message = turn["error"]["message"]
                         .as_str()
                         .unwrap_or("The turn failed.");
-                    self.push(AgentItem::Error {
-                        message: message.to_owned(),
-                    });
-                    if turn["error"]["codexErrorInfo"] == "usageLimitExceeded"
-                        && let Some(reset) = usage::blocked_until(&self.windows)
-                    {
-                        self.pause_until(reset);
+                    if turn["error"]["codexErrorInfo"] == "usageLimitExceeded" {
+                        match usage::blocked_until(&self.windows) {
+                            Some(reset) => self.pause_until(reset, message.to_owned()),
+                            None => self.usage_limit(message.to_owned(), None),
+                        }
+                    } else {
+                        self.push(AgentItem::Error {
+                            message: message.to_owned(),
+                        });
                     }
                 }
                 self.turn_id = None;
@@ -1666,6 +1673,10 @@ impl Agent {
                     match block["type"].as_str() {
                         Some("text") => {
                             let text = block["text"].as_str().unwrap_or_default().to_owned();
+                            if msg["error"] == "rate_limit" {
+                                self.usage_limit(text, None);
+                                continue;
+                            }
                             // the finished block is authoritative over what streamed in
                             match self.live_text.take() {
                                 Some(index) => {
@@ -1750,9 +1761,14 @@ impl Agent {
                 });
                 if let Some(message) = failure {
                     log::warn!("claude turn failed: {msg}");
-                    self.push(AgentItem::Error { message });
                     if let Some(reset) = self.limit_reset.take() {
-                        self.pause_until(reset);
+                        self.pause_until(reset, message);
+                    } else if self.items.last().is_some_and(|item| matches!(item,
+                        AgentItem::UsageLimit { message: previous, .. } if previous.trim() == message.trim()
+                    )) {
+                        self.usage_limit(message, None);
+                    } else {
+                        self.push(AgentItem::Error { message });
                     }
                 }
                 self.claude_stopping = false;

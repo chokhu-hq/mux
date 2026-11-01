@@ -19,6 +19,60 @@ use crate::theme::{self, control, font, icon, radius, space, text};
 pub(super) const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
 
+pub fn usage_limit(ui: &mut Ui, message: &str, retry_at: Option<u64>) {
+    let p = theme::palette(ui);
+    theme::card(ui)
+        .inner_margin(Margin::same(space::MD as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(icons::CLOCK)
+                        .font(font::icon(icon::MD))
+                        .color(p.text_muted),
+                );
+                ui.label(
+                    RichText::new("Usage limit reached")
+                        .font(font::medium(text::MD))
+                        .color(p.text),
+                );
+            });
+            ui.add_space(space::SM);
+            ui.add(
+                Label::new(RichText::new(message).color(p.text_muted))
+                    .wrap()
+                    .selectable(true),
+            );
+            if let Some(at) = retry_at {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let left = at.saturating_sub(now);
+                let when = match left {
+                    0..=90 => "shortly after the limit resets".to_owned(),
+                    91..=3599 => format!("in about {} min", left.div_ceil(60)),
+                    _ => format!("in about {} h {} min", left / 3600, left % 3600 / 60),
+                };
+                ui.add_space(space::SM);
+                let status = format!(
+                    "Mux will retry automatically {when}. Sending a message takes over instead."
+                );
+                ui.add(
+                    Label::new(
+                        RichText::new(status)
+                            .font(font::regular(text::SM))
+                            .color(p.text_muted),
+                    )
+                    .wrap()
+                    .selectable(true),
+                );
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs(60));
+            }
+        });
+}
+
 // one of the person's messages, returning true when they asked to rewind the chat to it
 pub fn user_message(
     ui: &mut Ui,

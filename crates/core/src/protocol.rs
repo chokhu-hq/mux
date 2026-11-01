@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 28;
+pub const PROTOCOL: u32 = 29;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -111,6 +111,10 @@ pub enum AgentItem {
     },
     Error {
         message: String,
+    },
+    UsageLimit {
+        message: String,
+        retry_at: Option<u64>,
     },
     // any other tool call, like reading a file or searching
     Tool {

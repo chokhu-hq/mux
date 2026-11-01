@@ -197,14 +197,25 @@ impl Fake {
             }
         }
         if text.contains("scenario:limit") {
-            let resets = now() + 1;
+            let weekly = text.contains("scenario:limit-week");
+            let resets = now() + if weekly { 122_820 } else { 1 };
+            let message = if weekly {
+                "You've hit your weekly limit · resets Nov 3, 2am (Asia/Dhaka)"
+            } else {
+                "You've hit your session limit · resets soon"
+            };
             say(json!({ "type": "rate_limit_event", "rate_limit_info": {
                 "status": "rejected", "rateLimitType": "five_hour", "overageStatus": "rejected",
                 "unifiedWindows": { "five_hour": { "utilization": 1.0, "resetsAt": resets } }
             } }));
             say(
+                json!({ "type": "assistant", "error": "rate_limit", "message": {
+                "content": [{ "type": "text", "text": message }]
+            } }),
+            );
+            say(
                 json!({ "type": "result", "subtype": "success", "is_error": true,
-                "result": "You've hit your session limit · resets soon", "session_id": self.session }),
+                "result": message, "session_id": self.session }),
             );
             return;
         }

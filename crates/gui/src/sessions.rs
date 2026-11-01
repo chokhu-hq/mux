@@ -1151,8 +1151,21 @@ fn chat_items(
 ) -> (Vec<ChatItem>, Vec<Option<u64>>) {
     let mut items = Vec::new();
     let mut approvals = Vec::new();
+    let legacy_retry = |item: &AgentItem| {
+        matches!(item,
+            AgentItem::Error { message } if message.starts_with("Mux will carry on by itself ")
+        )
+    };
     for (position, entry) in transcript.iter().enumerate() {
         let mut approval = None;
+        // older servers saved one limit event as a reply followed by two errors
+        if let AgentItem::Assistant { text } = entry
+            && let Some(AgentItem::Error { message }) = transcript.get(position + 1)
+            && text.trim() == message.trim()
+            && transcript.get(position + 2).is_some_and(legacy_retry)
+        {
+            continue;
+        }
         match entry {
             AgentItem::User {
                 text,
@@ -1295,7 +1308,30 @@ fn chat_items(
                 ended: *ended,
             }),
             AgentItem::Error { message } => {
-                items.push(ChatItem::Assistant(format!("**Error:** {message}")))
+                if let Some(AgentItem::Error { message: retry }) = transcript.get(position + 1)
+                    && transcript.get(position + 1).is_some_and(legacy_retry)
+                {
+                    items.push(ChatItem::UsageLimit {
+                        message: format!("{message}\n\n{retry}"),
+                        retry_at: None,
+                    });
+                } else if legacy_retry(entry)
+                    && position > 0
+                    && matches!(transcript[position - 1], AgentItem::Error { .. })
+                {
+                    continue;
+                } else {
+                    items.push(ChatItem::Assistant(format!("**Error:** {message}")))
+                }
+            }
+            AgentItem::UsageLimit { message, retry_at } => {
+                let replied = transcript[position + 1..]
+                    .iter()
+                    .any(|item| matches!(item, AgentItem::User { .. }));
+                items.push(ChatItem::UsageLimit {
+                    message: message.clone(),
+                    retry_at: if replied { None } else { *retry_at },
+                });
             }
             AgentItem::Retry {
                 reason,
@@ -1483,6 +1519,53 @@ fn most_pressing(sessions: &[SessionInfo], unread: &HashSet<u64>) -> Option<Sess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_limit_messages_become_one_notice_and_real_errors_stay_errors() {
+        let transcript = vec![
+            AgentItem::Assistant {
+                text: "Weekly limit reached".into(),
+            },
+            AgentItem::Error {
+                message: "Weekly limit reached".into(),
+            },
+            AgentItem::Error {
+                message: "Mux will carry on by itself in about 34 h, once the limit resets.".into(),
+            },
+            AgentItem::Error {
+                message: "Connection failed".into(),
+            },
+        ];
+        let (items, approvals) = chat_items(&transcript, false, Provider::Claude);
+        assert_eq!(items.len(), 2);
+        assert_eq!(approvals.len(), 2);
+        assert!(matches!(&items[0], ChatItem::UsageLimit { message, .. }
+            if message.matches("Weekly limit reached").count() == 1 && message.contains("34 h")));
+        assert!(
+            matches!(&items[1], ChatItem::Assistant(text) if text == "**Error:** Connection failed")
+        );
+    }
+
+    #[test]
+    fn sending_another_message_hides_the_old_automatic_retry_status() {
+        let transcript = vec![
+            AgentItem::UsageLimit {
+                message: "Limit reached".into(),
+                retry_at: Some(100),
+            },
+            AgentItem::User {
+                text: "try again".into(),
+                attachments: Vec::new(),
+                queued: false,
+                rewind: None,
+            },
+        ];
+        let (items, _) = chat_items(&transcript, false, Provider::Claude);
+        assert!(matches!(
+            &items[0],
+            ChatItem::UsageLimit { retry_at: None, .. }
+        ));
+    }
 
     #[test]
     fn the_default_model_says_which_model_it_is() {

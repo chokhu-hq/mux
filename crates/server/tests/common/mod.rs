@@ -136,7 +136,15 @@ impl Server {
         self.relaunch();
     }
 
-    fn relaunch(&mut self) {
+    pub fn relaunch(&mut self) {
+        assert!(
+            self.child.try_wait().unwrap().is_some(),
+            "stop the old server before relaunching"
+        );
+        // forked helpers can briefly keep a killed server's listener alive
+        if self.socket.exists() {
+            std::fs::remove_file(&self.socket).unwrap();
+        }
         self.child = launch(&self.dir, &self.env, self.open_files, self.live);
         self.reconnect();
     }

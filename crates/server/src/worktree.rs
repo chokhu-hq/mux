@@ -20,6 +20,7 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
         .arg(repo)
         .args(["worktree", "add", "-b", &branch])
         .arg(&dir)
+        .arg("HEAD")
         .output()
         .map_err(|err| format!("Couldn't run git to make a worktree: {err}"))?;
     if !output.status.success() {
@@ -30,6 +31,8 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
             .unwrap_or_default();
         return Err(if reason.contains("not a git repository") {
             "This project isn't a git repository, so the agent can't get its own worktree. Switch it to Local to work in the folder itself.".to_owned()
+        } else if reason.contains("invalid reference: HEAD") {
+            "This project has no initial commit, so the agent can't get its own worktree. Make a commit first or switch it to Local.".to_owned()
         } else {
             format!(
                 "Couldn't make a worktree: {}",
@@ -80,6 +83,50 @@ fn slug(title: &str) -> String {
 mod tests {
     use super::*;
 
+    fn repository() -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "mux-worktree-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        let hooks = root.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        git(
+            &repo,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+        (root, repo)
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> std::process::Output {
+        let output = mux_core::command("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
     #[test]
     fn titles_become_short_branch_names() {
         assert_eq!(
@@ -92,32 +139,48 @@ mod tests {
 
     #[test]
     fn makes_and_removes_a_worktree_on_its_own_branch() {
-        let root = std::env::temp_dir().join(format!("mux-worktree-{}", std::process::id()));
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let git = |args: &[&str]| {
-            mux_core::command("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(args)
-                .output()
-                .unwrap()
-        };
-        git(&["init", "-q"]);
+        let (root, repo) = repository();
         std::fs::write(repo.join("a.txt"), "a").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "init"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        std::fs::write(repo.join("a.txt"), "uncommitted").unwrap();
         let trees = root.join("worktrees");
         let path = add_under(&trees, &repo.to_string_lossy(), "Add a feature", 7).unwrap();
-        assert!(Path::new(&path).join("a.txt").exists());
-        let branches = String::from_utf8_lossy(&git(&["branch"]).stdout).into_owned();
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&path).join("a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "uncommitted"
+        );
+        let branches = String::from_utf8_lossy(&git(&repo, &["branch"]).stdout).into_owned();
         assert!(branches.contains("mux/add-a-feature-7"));
-        let outside = std::env::temp_dir().join(format!("mux-not-a-repo-{}", std::process::id()));
+        git(&repo, &["worktree", "remove", &path]);
+        assert!(!Path::new(&path).exists());
+        let outside = root.join("not-a-repo");
         std::fs::create_dir_all(&outside).unwrap();
         let refused = add_under(&trees, &outside.to_string_lossy(), "x", 1).unwrap_err();
         assert!(refused.contains("isn't a git repository"));
         std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_repository_without_an_initial_commit() {
+        let (root, repo) = repository();
+        std::fs::write(repo.join("a.txt"), "uncommitted").unwrap();
+        let refused = add_under(&root.join("worktrees"), &repo.to_string_lossy(), "Start", 1);
+        assert!(
+            refused.is_err(),
+            "an unborn branch must not produce an empty checkout: {refused:?}"
+        );
+        assert!(refused.unwrap_err().contains("initial commit"));
+        assert!(!root.join("worktrees/repo/start-1").exists());
+        assert!(
+            String::from_utf8_lossy(&git(&repo, &["branch"]).stdout)
+                .trim()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

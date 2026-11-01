@@ -29,6 +29,29 @@ fn wait_queue(server: &mut Server, texts: &[&str], held: bool) {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn restarting_ignores_a_listener_still_held_by_an_old_helper() {
+    let mut server = Server::start();
+    let previous = server.pid();
+    server.crash();
+    std::fs::remove_file(&server.socket).unwrap();
+    let inherited = std::os::unix::net::UnixListener::bind(&server.socket).unwrap();
+    inherited.set_nonblocking(true).unwrap();
+    server.relaunch();
+    assert_ne!(server.pid(), previous);
+    assert!(
+        server
+            .seen
+            .iter()
+            .any(|msg| matches!(msg, ServerMsg::Welcome { .. }))
+    );
+    assert_eq!(
+        inherited.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 #[test]
 fn stop_and_resend_during_thread_start_or_resume_sends_only_the_replacement() {
     for method in ["thread/start", "thread/resume"] {

@@ -308,7 +308,7 @@ struct App {
     updates: std::sync::mpsc::Receiver<update::Update>,
     // on windows, the wsl distributions installed, read once when settings first open
     #[cfg(windows)]
-    distros: Option<Vec<String>>,
+    distros: wsl::Distros,
 }
 
 struct TitleBar {
@@ -369,7 +369,7 @@ impl App {
             installer: None,
             updates: update::check(ctx),
             #[cfg(windows)]
-            distros: None,
+            distros: wsl::Distros::default(),
         };
         app.prefs.apply(ctx);
         app.themes.apply(ctx, &app.prefs);
@@ -856,7 +856,7 @@ impl App {
         let blur = None;
         let agents = self.agents(&ctx);
         let mut prefs = self.prefs.clone();
-        let distros = self.distros();
+        let distros = self.distros(&ctx);
         let previewed = self.themes.preview.take();
         let close = settings::Page {
             tab: &mut self.settings_tab,
@@ -904,12 +904,12 @@ impl App {
     }
 
     #[cfg(windows)]
-    fn distros(&mut self) -> Option<Vec<String>> {
-        Some(self.distros.get_or_insert_with(wsl::distros).clone())
+    fn distros(&mut self, ctx: &egui::Context) -> Option<Vec<String>> {
+        self.distros.poll(ctx)
     }
 
     #[cfg(not(windows))]
-    fn distros(&mut self) -> Option<Vec<String>> {
+    fn distros(&mut self, _ctx: &egui::Context) -> Option<Vec<String>> {
         None
     }
 

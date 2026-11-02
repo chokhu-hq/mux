@@ -12,16 +12,106 @@ use mux_core::protocol;
 // the first start may download the server, so it gets longer than a local one
 const START_TIMEOUT: Duration = Duration::from_secs(90);
 
-// the distributions installed, which `wsl -l -q` lists in utf-16
-pub fn distros() -> Vec<String> {
-    let Ok(output) = mux_core::command("wsl.exe").args(["-l", "-q"]).output() else {
-        return Vec::new();
-    };
-    decode(&output.stdout)
-        .lines()
-        .map(|line| line.trim().trim_matches('\0').to_owned())
-        .filter(|line| !line.is_empty())
-        .collect()
+#[derive(Default)]
+pub struct Distros {
+    pending: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    ready: Option<Vec<String>>,
+}
+
+impl Distros {
+    pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Option<Vec<String>> {
+        if self.pending.is_none() && self.ready.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.pending = Some(rx);
+            let ctx = ctx.clone();
+            thread::spawn(move || {
+                let _ = tx.send(distros());
+                ctx.request_repaint();
+            });
+        }
+        if let Some(rx) = &self.pending {
+            match rx.try_recv() {
+                Ok(distros) => self.ready = Some(distros),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.ready = Some(Vec::new());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self.ready.is_some() {
+            self.pending = None;
+        }
+        self.ready.clone()
+    }
+}
+
+// WSL can stall even when only listing distributions, so never wait on the UI thread.
+fn distros() -> Vec<String> {
+    let mut command = mux_core::command("wsl.exe");
+    command.args(["-l", "-q"]);
+    match output_with_timeout(&mut command, Duration::from_secs(5)) {
+        Ok(output) if output.status.success() => decode(&output.stdout)
+            .lines()
+            .map(|line| line.trim().trim_matches('\0').to_owned())
+            .filter(|line| !line.is_empty())
+            .collect(),
+        Ok(output) => {
+            log::warn!("couldn't list WSL distributions: {}", output.status);
+            Vec::new()
+        }
+        Err(error) => {
+            log::warn!("couldn't list WSL distributions: {error}");
+            Vec::new()
+        }
+    }
+}
+
+fn output_with_timeout(
+    command: &mut std::process::Command,
+    timeout: Duration,
+) -> io::Result<std::process::Output> {
+    use std::io::Read;
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = tx.send(result);
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "WSL output timed out")
+                    })??;
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match result {
+                    Err(error) => error,
+                    _ => io::Error::new(io::ErrorKind::TimedOut, "WSL discovery timed out"),
+                });
+            }
+        }
+    }
 }
 
 fn decode(bytes: &[u8]) -> String {
@@ -171,4 +261,86 @@ fn set_data_dir(folder: &str) {
 // the server's data folder inside wsl, as linux names it
 pub fn data_dir() -> Option<String> {
     DATA_DIR.read().ok().and_then(|dir| dir.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_poll_does_not_wait_for_worker() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut distros = Distros {
+            pending: Some(rx),
+            ready: None,
+        };
+        let ctx = eframe::egui::Context::default();
+        let started = Instant::now();
+        assert_eq!(distros.poll(&ctx), None);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        tx.send(vec!["Ubuntu".to_owned()]).unwrap();
+        assert_eq!(distros.poll(&ctx), Some(vec!["Ubuntu".to_owned()]));
+        assert!(distros.pending.is_none());
+        assert_eq!(distros.poll(&ctx), Some(vec!["Ubuntu".to_owned()]));
+    }
+
+    #[test]
+    fn disconnected_discovery_is_cached() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        let mut distros = Distros {
+            pending: Some(rx),
+            ready: None,
+        };
+        assert_eq!(
+            distros.poll(&eframe::egui::Context::default()),
+            Some(Vec::new())
+        );
+        assert!(distros.pending.is_none());
+    }
+
+    #[test]
+    fn stalled_discovery_process_times_out() {
+        let mut command = mux_core::command(std::env::current_exe().unwrap());
+        command.args(["--exact", "wsl::tests::discovery_child", "--ignored"]);
+        command.env("MUX_TEST_DISCOVERY_CHILD", "sleep");
+        let started = Instant::now();
+        let error = output_with_timeout(&mut command, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn discovery_drains_output_while_child_runs() {
+        let mut command = mux_core::command(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "wsl::tests::discovery_child",
+            "--ignored",
+            "--nocapture",
+        ]);
+        command.env("MUX_TEST_DISCOVERY_CHILD", "output");
+        let output = output_with_timeout(&mut command, Duration::from_secs(5)).unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 131072);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for WSL discovery tests"]
+    fn discovery_child() {
+        match std::env::var("MUX_TEST_DISCOVERY_CHILD").as_deref() {
+            Ok("sleep") => thread::sleep(Duration::from_secs(30)),
+            Ok("output") => std::io::stdout().write_all(&vec![b'x'; 131072]).unwrap(),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn decode_wsl_utf16_output() {
+        let bytes: Vec<u8> = "\u{feff}Ubuntu\r\nDebian\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(decode(&bytes), "Ubuntu\r\nDebian\r\n");
+    }
 }

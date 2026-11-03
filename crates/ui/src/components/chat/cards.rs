@@ -643,7 +643,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 fn counts(read: usize, searched: usize, edited: usize, ran: usize) -> Vec<String> {
-    [
+    let mut parts: Vec<String> = [
         (read, "Read", "file", "files"),
         (searched, "Searched", "time", "times"),
         (edited, "Edited", "file", "files"),
@@ -652,11 +652,27 @@ fn counts(read: usize, searched: usize, edited: usize, ran: usize) -> Vec<String
     .into_iter()
     .filter(|(n, ..)| *n > 0)
     .map(|(n, verb, one, many)| format!("{verb} {}", plural(n, one, many)))
-    .collect()
+    .collect();
+    // "searched 1 time" reads like a counter, where a person would say once
+    for part in &mut parts {
+        if part == "Searched 1 time" {
+            *part = "Searched once".to_owned();
+        }
+    }
+    parts
 }
 
 // what a turn did, in the words the tool groups use, for the line its steps fold behind
-pub fn turn_summary(work: &[&super::ChatItem], live: bool) -> String {
+pub fn turn_summary(work: &[&super::ChatItem], live: bool, took: Option<u64>) -> String {
+    let what = turn_work(work, live);
+    // a turn's length is worth leading with once it's more than a moment
+    match took.filter(|ms| !live && *ms >= 1000) {
+        Some(ms) => format!("Worked for {} · {what}", duration(ms)),
+        None => what,
+    }
+}
+
+fn turn_work(work: &[&super::ChatItem], live: bool) -> String {
     use super::ChatItem;
     let tools: Vec<&ToolCall> = work
         .iter()
@@ -1273,6 +1289,37 @@ pub fn compaction(ui: &mut Ui, status: ToolStatus) {
         .hline(rect.left()..=left - space::MD, y, stroke);
     ui.painter()
         .hline(left + width + space::MD..=rect.right(), y, stroke);
+}
+
+// a failure the agent or mux reported, as a card of its own so it can't pass for part of a reply
+pub fn error(ui: &mut Ui, message: &str) -> egui::Response {
+    let p = theme::palette(ui);
+    Frame::new()
+        .fill(p.danger.gamma_multiply(0.08))
+        .stroke(Stroke::new(1.0, p.danger.gamma_multiply(0.35)))
+        .corner_radius(radius::MD)
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = space::SM;
+                ui.label(
+                    RichText::new(icons::WARNING)
+                        .font(font::icon(icon::MD))
+                        .color(p.danger),
+                );
+                ui.add(
+                    Label::new(
+                        RichText::new(message)
+                            .font(font::regular(text::MD))
+                            .color(p.text),
+                    )
+                    .wrap()
+                    .selectable(true),
+                );
+            });
+        })
+        .response
 }
 
 // the agent trying again after its model failed to answer, which would otherwise look like it's stuck

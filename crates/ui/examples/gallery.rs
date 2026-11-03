@@ -393,6 +393,7 @@ impl eframe::App for Gallery {
                                                             text,
                                                             attachments: Vec::new(),
                                                             queued: false,
+                                                            took: None,
                                                         });
                                                         self.thinking = true;
                                                         chat::set_thinking(items, true);

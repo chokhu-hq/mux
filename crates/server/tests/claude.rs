@@ -586,3 +586,16 @@ fn retries_show_while_they_happen_and_settle_once_claude_answers() {
     });
     assert_eq!(failed, Some(ItemStatus::Failed));
 }
+
+#[test]
+fn a_finished_turn_says_how_long_it_took() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    reply(&mut server, id, "scenario:tool");
+    let took = server.items.iter().find_map(|i| match i {
+        AgentItem::User { took, .. } => Some(*took),
+        _ => None,
+    });
+    // the command runs for 400 ms in the fake
+    assert!(took.flatten().is_some_and(|ms| ms >= 350), "{took:?}");
+}

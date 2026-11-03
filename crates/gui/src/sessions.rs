@@ -1090,6 +1090,12 @@ fn pick_folder(start: Option<&str>) -> Option<String> {
 fn row_context(session: &SessionInfo) -> String {
     match (session.status, session.kind) {
         (SessionStatus::Waiting, _) => "Needs your input".to_owned(),
+        // an agent with a conversation that's simply not working right now has started, unlike a new one
+        (SessionStatus::Idle, SessionKind::Agent)
+            if session.summary.as_ref().is_some_and(|s| s.messages > 0) =>
+        {
+            "Idle".to_owned()
+        }
         (SessionStatus::Idle, _) => "Not started".to_owned(),
         (SessionStatus::Running, SessionKind::Agent) => "Working…".to_owned(),
         (SessionStatus::Done, SessionKind::Agent) => "Finished".to_owned(),
@@ -1171,8 +1177,10 @@ fn chat_items(
                 text,
                 attachments,
                 queued,
+                took,
                 ..
             } => items.push(ChatItem::User {
+                took: *took,
                 text: text.clone(),
                 attachments: attachments
                     .iter()
@@ -1321,7 +1329,7 @@ fn chat_items(
                 {
                     continue;
                 } else {
-                    items.push(ChatItem::Assistant(format!("**Error:** {message}")))
+                    items.push(ChatItem::Error(message.clone()))
                 }
             }
             AgentItem::UsageLimit { message, retry_at } => {
@@ -1541,9 +1549,7 @@ mod tests {
         assert_eq!(approvals.len(), 2);
         assert!(matches!(&items[0], ChatItem::UsageLimit { message, .. }
             if message.matches("Weekly limit reached").count() == 1 && message.contains("34 h")));
-        assert!(
-            matches!(&items[1], ChatItem::Assistant(text) if text == "**Error:** Connection failed")
-        );
+        assert!(matches!(&items[1], ChatItem::Error(text) if text == "Connection failed"));
     }
 
     #[test]
@@ -1558,6 +1564,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: false,
                 rewind: None,
+                took: None,
             },
         ];
         let (items, _) = chat_items(&transcript, false, Provider::Claude);
@@ -1620,6 +1627,7 @@ mod tests {
             attachments: Vec::new(),
             queued: false,
             rewind: None,
+            took: None,
         };
         let edit = |path: &str| AgentItem::FileChange {
             changes: vec![wire::FileChange {
@@ -1849,6 +1857,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: false,
                 rewind: None,
+                took: None,
             },
             AgentItem::FileChange {
                 changes: vec![

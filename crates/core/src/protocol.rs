@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 29;
+pub const PROTOCOL: u32 = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -86,6 +86,9 @@ pub enum AgentItem {
         // or the codex turn it started
         #[serde(default)]
         rewind: Option<String>,
+        // how long the turn this message started took, in milliseconds, once it's over
+        #[serde(default)]
+        took: Option<u64>,
     },
     Assistant {
         text: String,

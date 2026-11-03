@@ -112,6 +112,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: false,
                 rewind: None,
+                took: None,
             },
             AgentItem::Assistant {
                 text: "reply".into(),
@@ -125,6 +126,7 @@ mod tests {
                     Provider::Codex => Some("turn".into()),
                     Provider::OpenCode => None,
                 },
+                took: None,
             },
         ];
         agent

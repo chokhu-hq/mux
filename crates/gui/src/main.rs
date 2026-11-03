@@ -2589,6 +2589,7 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 let window = ui.max_rect();
                 self.titlebar = None;
+                self.sidebar.fit(window.width());
                 let sidebar_width = self.sidebar.animate(&ctx);
                 let opacity = if blurred {
                     self.prefs.transparency.opacity()

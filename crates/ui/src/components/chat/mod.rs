@@ -28,8 +28,12 @@ pub enum ChatItem {
         attachments: Vec<String>,
         // sent while the agent was busy and not picked up yet
         queued: bool,
+        // how long the turn it started took, in milliseconds, once it's over
+        took: Option<u64>,
     },
     Assistant(String),
+    // something went wrong, set apart from the conversation so it isn't read as the agent talking
+    Error(String),
     UsageLimit {
         message: String,
         retry_at: Option<u64>,
@@ -360,7 +364,11 @@ impl<'a> ChatView<'a> {
                                 let id = ui.make_persistent_id("fold");
                                 let work: Vec<&ChatItem> =
                                     turn.work.iter().map(|&w| &items[w]).collect();
-                                let label = cards::turn_summary(&work, turn.live);
+                                let took = match &items[i] {
+                                    ChatItem::User { took, .. } => *took,
+                                    _ => None,
+                                };
+                                let label = cards::turn_summary(&work, turn.live, took);
                                 let (_, open) =
                                     cards::summary_row(ui, id, turn.live, turn.live, &label);
                                 crate::components::reveal(ui, id.with("steps"), open, |ui| {
@@ -420,11 +428,10 @@ fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
         .position(|item| matches!(item, ChatItem::User { .. }))
         .map_or(items.len(), |at| start + at);
     let live = running && end == items.len();
-    let error = |text: &str| text.starts_with("**Error:**");
     // the answer to the message, which is its last reply once the turn is done
     let reply = (start..end)
         .rev()
-        .find(|&i| matches!(&items[i], ChatItem::Assistant(text) if !error(text)))
+        .find(|&i| matches!(&items[i], ChatItem::Assistant(_)))
         .filter(|_| !live);
     let (mut work, mut kept) = (Vec::new(), Vec::new());
     for (i, item) in items.iter().enumerate().take(end).skip(start) {
@@ -433,7 +440,8 @@ fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
             ChatItem::Permission(request) => request.decision.is_none(),
             ChatItem::Question { answers, .. } => answers.is_none(),
             ChatItem::Thinking | ChatItem::UsageLimit { .. } => true,
-            ChatItem::Assistant(text) => Some(i) == reply || (!live && error(text)),
+            ChatItem::Assistant(_) => Some(i) == reply,
+            ChatItem::Error(_) => !live,
             ChatItem::Changes(_) | ChatItem::Plan { .. } => !live,
             _ => false,
         };
@@ -495,6 +503,7 @@ fn show_item(
             text,
             attachments,
             queued,
+            ..
         } => {
             // a rewind waits for the agent to finish, so nothing is cut out from under it
             if cards::user_message(ui, text, attachments, *queued, !running) {
@@ -509,6 +518,13 @@ fn show_item(
             let id = ui.make_persistent_id("reply-menu");
             crate::components::area_menu(ui, shown.response.rect, id, |ui| {
                 crate::components::copy_item(ui, "Copy message", text);
+            });
+        }
+        ChatItem::Error(message) => {
+            let shown = cards::error(ui, message);
+            let id = ui.make_persistent_id("error-menu");
+            crate::components::area_menu(ui, shown.rect, id, |ui| {
+                crate::components::copy_item(ui, "Copy error", message);
             });
         }
         ChatItem::Tool(tool) => cards::tool_call(ui, tool),
@@ -660,6 +676,7 @@ pub fn sample() -> Vec<ChatItem> {
             text: "Refactor the auth middleware to use the new session store, and add tests for expired sessions.".to_owned(),
             attachments: Vec::new(),
             queued: false,
+            took: None,
         },
         ChatItem::Assistant(
             "I'll start by reading the current middleware and finding where sessions are loaded.".to_owned(),
@@ -716,6 +733,7 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
             queued: false,
+            took: None,
         }
     }
 
@@ -762,7 +780,7 @@ mod tests {
             tool(ToolKind::Read, ToolStatus::Done),
             reply("Found it, editing now."),
             tool(ToolKind::Run, ToolStatus::Done),
-            reply("**Error:** the test runner crashed"),
+            ChatItem::Error("the test runner crashed".into()),
             reply("Fixed, and the tests pass."),
             user("thanks"),
         ];
@@ -773,8 +791,17 @@ mod tests {
         assert_eq!(turn.end, 7);
         let work: Vec<&ChatItem> = turn.work.iter().map(|&i| &items[i]).collect();
         assert_eq!(
-            cards::turn_summary(&work, false),
+            cards::turn_summary(&work, false, None),
             "Read 1 file · Ran 1 command"
+        );
+        assert_eq!(
+            cards::turn_summary(&work, false, Some(192_000)),
+            "Worked for 3m 12s · Read 1 file · Ran 1 command"
+        );
+        assert_eq!(
+            cards::turn_summary(&work, false, Some(400)),
+            "Read 1 file · Ran 1 command",
+            "a turn over in a moment isn't worth timing"
         );
     }
 
@@ -845,7 +872,14 @@ mod tests {
             started: 1000,
             ended: Some(13000),
         };
-        assert_eq!(cards::turn_summary(&[&thought], false), "Thought for 12s");
-        assert_eq!(cards::turn_summary(&[&thought], true), "Working");
+        assert_eq!(
+            cards::turn_summary(&[&thought], false, None),
+            "Thought for 12s"
+        );
+        assert_eq!(
+            cards::turn_summary(&[&thought], true, Some(9000)),
+            "Working",
+            "a running turn has no length yet"
+        );
     }
 }

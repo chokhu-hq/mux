@@ -157,7 +157,7 @@ impl<'a> SessionRow<'a> {
                 ui,
                 self.context,
                 small.clone(),
-                context_color(p, self.status),
+                context_color(p, self.status, self.selected),
                 inner.width() - time_w - space::SM,
             );
             ui.painter().galley(
@@ -291,10 +291,12 @@ fn status_color(p: &Palette, status: SessionStatus) -> Color32 {
     }
 }
 
-fn context_color(p: &Palette, status: SessionStatus) -> Color32 {
+// the selected row's lighter background would wash out the faintest text, so it's a step stronger there
+fn context_color(p: &Palette, status: SessionStatus, selected: bool) -> Color32 {
     match status {
         SessionStatus::Waiting => p.warning,
         SessionStatus::Failed => p.danger,
+        _ if selected => p.text_muted,
         _ => p.text_faint,
     }
 }

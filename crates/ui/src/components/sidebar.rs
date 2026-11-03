@@ -9,8 +9,14 @@ const MIN_WIDTH: f32 = 200.0;
 const MAX_WIDTH: f32 = 420.0;
 const HANDLE: f32 = 6.0;
 
+// how much width the chat keeps beside the sidebar before the sidebar tucks itself away
+const ROOM: f32 = 600.0;
+
 pub struct Sidebar {
     open: bool,
+    // closed because the window got narrow, so it comes back once there's room again
+    tucked: bool,
+    narrow: bool,
     width: f32,
     // how far open it is this frame, between 0 and 1
     t: f32,
@@ -20,6 +26,8 @@ impl Default for Sidebar {
     fn default() -> Self {
         Self {
             open: true,
+            tucked: false,
+            narrow: false,
             width: 260.0,
             t: 1.0,
         }
@@ -33,6 +41,24 @@ impl Sidebar {
 
     pub fn toggle(&mut self) {
         self.open = !self.open;
+        self.tucked = false;
+    }
+
+    // tucks the sidebar away as the window gets too narrow for the chat beside it, and brings it back once
+    // it widens again. only crossing the line acts, so opening or closing it by hand while narrow still holds
+    pub fn fit(&mut self, window_width: f32) {
+        let narrow = window_width < self.width + ROOM;
+        if narrow == self.narrow {
+            return;
+        }
+        self.narrow = narrow;
+        if narrow && self.open {
+            self.open = false;
+            self.tucked = true;
+        } else if !narrow && self.tucked {
+            self.open = true;
+            self.tucked = false;
+        }
     }
 
     // advances the open animation and returns the visible width, so the window can paint behind it first
@@ -83,5 +109,31 @@ impl Sidebar {
         }
 
         Rect::from_min_max(pos2(edge, rect.min.y), rect.max)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tucks_away_in_a_narrow_window_and_comes_back_when_it_widens() {
+        let mut sidebar = Sidebar::default();
+        sidebar.fit(1200.0);
+        assert!(sidebar.is_open());
+        sidebar.fit(800.0);
+        assert!(!sidebar.is_open(), "too narrow for the chat beside it");
+        sidebar.fit(1200.0);
+        assert!(sidebar.is_open(), "back once there's room");
+
+        // opened by hand while narrow, it stays open
+        sidebar.fit(800.0);
+        sidebar.toggle();
+        sidebar.fit(790.0);
+        assert!(sidebar.is_open());
+        // and closed by hand, it stays closed when the window widens
+        sidebar.toggle();
+        sidebar.fit(1200.0);
+        assert!(!sidebar.is_open());
     }
 }

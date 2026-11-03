@@ -175,6 +175,8 @@ pub struct Agent {
     claude_lost: bool,
     // the retry row of the turn in progress, while the agent is still trying again
     live_retry: Option<usize>,
+    // the message that started the turn in progress, and when, for timing the turn once it ends
+    turn_started: Option<(usize, u64)>,
     // claude is mid turn, whether answering a message or one it started itself, like a background subagent waking
     claude_turn: bool,
     // a stop was sent this turn, so the error result claude ends it with is expected
@@ -287,6 +289,7 @@ impl Agent {
             claude_sent: Vec::new(),
             claude_lost: false,
             live_retry: None,
+            turn_started: None,
             claude_turn: false,
             claude_stopping: false,
             sub_steps: HashMap::new(),
@@ -575,12 +578,18 @@ impl Agent {
         } else {
             None
         };
-        self.push(AgentItem::User {
+        // a message that joins a turn already running doesn't start a new one to time
+        let starts = !self.busy;
+        let index = self.push(AgentItem::User {
             text: text.to_owned(),
             attachments: attachments.to_vec(),
             queued,
             rewind,
+            took: None,
         });
+        if starts {
+            self.turn_started = Some((index, now_ms()));
+        }
         self.set_busy(true);
     }
 
@@ -2067,6 +2076,14 @@ impl Agent {
             self.stop_requested = false;
             self.end_reasoning();
         }
+        if self.busy
+            && !busy
+            && let Some((index, at)) = self.turn_started.take()
+            && let Some(AgentItem::User { took, .. }) = self.items.get_mut(index)
+        {
+            *took = Some(now_ms().saturating_sub(at));
+            self.changed.insert(index);
+        }
         if self.busy != busy {
             self.busy = busy;
             self.busy_changed = true;
@@ -2737,6 +2754,7 @@ mod tests {
             attachments: Vec::new(),
             queued: false,
             rewind: None,
+            took: None,
         };
         agent.items = vec![user("count")];
         agent.claude_waiting = VecDeque::from(["count".to_owned()]);
@@ -2751,6 +2769,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 rewind: None,
+                took: None,
             });
             agent.claude_waiting.push_back(text.into());
         }
@@ -2939,6 +2958,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: false,
                 rewind: None,
+                took: None,
             },
             AgentItem::FileChange {
                 changes: vec![FileChange {
@@ -3137,6 +3157,7 @@ mod tests {
             attachments: Vec::new(),
             queued: false,
             rewind: rewind.map(str::to_owned),
+            took: None,
         };
         let reply = AgentItem::Assistant {
             text: "done".into(),
@@ -3185,6 +3206,7 @@ mod tests {
             attachments: Vec::new(),
             queued,
             rewind: None,
+            took: None,
         };
         agent.items = vec![user(false), user(true), user(true)];
         agent.claude_waiting = VecDeque::from(["a".to_owned(), "b".to_owned()]);

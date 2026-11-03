@@ -85,11 +85,11 @@ mod tests {
         );
         release.await.unwrap();
 
-        std::fs::create_dir(&lock).unwrap();
-        let old = SystemTime::now() - Duration::from_secs(60);
-        std::fs::File::open(&lock)
+        // a file stands in for the lock folder here, since windows can't backdate a folder through std,
+        // and only the lock's age is checked either way
+        std::fs::File::create(&lock)
             .unwrap()
-            .set_modified(old)
+            .set_modified(SystemTime::now() - Duration::from_secs(60))
             .unwrap();
         let started = Instant::now();
         settled(&config).await;

@@ -1145,10 +1145,12 @@ mod tests {
 
     #[test]
     fn shortens_shell_titles_to_their_folder() {
-        let home = std::env::var("HOME").unwrap();
+        // the home folder and separators of whichever system runs the test
+        let project = mux_core::home_dir().join("code").join("mux");
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
-            short_title(&format!("me@box:{home}/code/mux")),
-            "~/code/mux"
+            short_title(&format!("me@box:{}", project.display())),
+            format!("~{sep}code{sep}mux")
         );
         assert_eq!(short_title("me@box:~"), "~");
         assert_eq!(short_title("vim notes.md"), "vim notes.md");
@@ -1157,11 +1159,14 @@ mod tests {
 
     #[test]
     fn reads_the_branch_of_this_repo() {
-        let repo = env!("CARGO_MANIFEST_DIR")
-            .rsplit_once("/crates/")
+        // this crate sits at crates/server inside the repo
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
             .unwrap()
-            .0;
-        assert!(git_branch(repo).is_some_and(|b| !b.is_empty()));
+            .to_string_lossy()
+            .into_owned();
+        assert!(git_branch(&repo).is_some_and(|b| !b.is_empty()));
         assert_eq!(git_branch("/nonexistent"), None);
     }
 }

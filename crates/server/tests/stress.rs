@@ -1,4 +1,5 @@
 // the server under load: many agents at once, clients that vanish mid-turn or stop reading, and big replies
+#![cfg_attr(not(target_os = "linux"), allow(unused))]
 mod common;
 
 use common::Server;

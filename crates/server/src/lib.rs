@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use mux_core::protocol::{
-    self, AgentItem, ClientMsg, ModelOption, PROTOCOL, ServerMsg, UsageWindow,
+    self, AgentItem, ClientMsg, LimitReset, ModelOption, PROTOCOL, ResetResult, ServerMsg,
+    UsageWindow,
 };
 use mux_core::{Provider, SessionStatus};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -59,6 +60,8 @@ pub enum Event {
     Skills(u64, Provider, Vec<mux_core::protocol::Skill>),
     // an agent's usage limit has reset, given with the reset it was waiting for
     Wake(u64, u64),
+    // how spending one of an account's limit resets went
+    ResetUsed(Provider, ResetResult),
     // more output from a command an agent left running in the background
     BackgroundOutput {
         session: u64,
@@ -107,6 +110,7 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         models: HashMap::new(),
         fetching_models: HashSet::new(),
         usage: HashMap::new(),
+        resets: HashMap::new(),
         history: Some(Box::default()),
         attached: HashMap::new(),
         generation: 0,
@@ -247,6 +251,8 @@ struct Server {
     fetching_models: HashSet<Provider>,
     // the latest plan limits each agent cli reported
     usage: HashMap<Provider, Vec<UsageWindow>>,
+    // the limit resets each agent's account has banked
+    resets: HashMap<Provider, Vec<LimitReset>>,
     // token use read from the clis' transcripts, away on a blocking thread while it scans
     history: Option<Box<history::History>>,
     // which clients are watching each session's terminal
@@ -319,6 +325,12 @@ impl Server {
                         windows: windows.clone(),
                     });
                 }
+                for (provider, resets) in &self.resets {
+                    let _ = tx.send(ServerMsg::AgentResets {
+                        provider: *provider,
+                        resets: resets.clone(),
+                    });
+                }
                 self.clients.insert(client, tx);
             }
             Event::Disconnected(client) => {
@@ -330,6 +342,7 @@ impl Server {
             }
             Event::Client(client, msg) => self.message(client, msg),
             Event::Wake(id, reset) => self.wake(id, reset),
+            Event::ResetUsed(provider, result) => self.reset_used(provider, result),
             Event::Output {
                 session,
                 generation,
@@ -417,6 +430,9 @@ impl Server {
                         self.models.insert(provider, catalog.models);
                         if let Some(windows) = catalog.usage {
                             self.set_usage(provider, windows);
+                        }
+                        if let Some(resets) = catalog.resets {
+                            self.set_resets(provider, resets);
                         }
                     }
                     Err(err) => log::error!("could not list {} models: {err}", provider.label()),
@@ -567,6 +583,16 @@ impl Server {
                     if !self.models.contains_key(&provider) {
                         self.fetch_models(provider);
                     }
+                }
+            }
+            ClientMsg::UseReset { provider } => {
+                // only codex has resets to spend
+                if provider == Provider::Codex {
+                    let events = self.events.clone();
+                    tokio::spawn(async move {
+                        let result = models::use_codex_reset().await;
+                        let _ = events.send(Event::ResetUsed(provider, result));
+                    });
                 }
             }
             ClientMsg::RefreshUsage => {
@@ -1035,6 +1061,48 @@ impl Server {
             info.summary = Some(summary);
             self.changed();
         }
+    }
+
+    fn set_resets(&mut self, provider: Provider, resets: Vec<LimitReset>) {
+        if self.resets.get(&provider) == Some(&resets) {
+            return;
+        }
+        for tx in self.clients.values() {
+            let _ = tx.send(ServerMsg::AgentResets {
+                provider,
+                resets: resets.clone(),
+            });
+        }
+        self.resets.insert(provider, resets);
+    }
+
+    // a used reset lifts the limits now, so the agents waiting on them carry on rather than wait for the clock
+    fn reset_used(&mut self, provider: Provider, result: ResetResult) {
+        log::info!("used a {} limit reset: {result:?}", provider.label());
+        for tx in self.clients.values() {
+            let _ = tx.send(ServerMsg::ResetResult {
+                provider,
+                result: result.clone(),
+            });
+        }
+        if result == ResetResult::Reset {
+            let waiting: Vec<(u64, u64)> = self
+                .store
+                .wake
+                .iter()
+                .filter(|(id, _)| {
+                    self.store
+                        .session(**id)
+                        .is_some_and(|s| s.provider == provider)
+                })
+                .map(|(&id, &reset)| (id, reset))
+                .collect();
+            for (id, reset) in waiting {
+                self.wake(id, reset);
+            }
+        }
+        // the limits and the resets left both changed
+        self.fetch_models(provider);
     }
 
     fn set_usage(&mut self, provider: Provider, windows: Vec<UsageWindow>) {

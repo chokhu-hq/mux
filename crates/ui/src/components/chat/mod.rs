@@ -150,6 +150,8 @@ pub enum Decision {
 
 pub enum ChatAction {
     Send(String),
+    // spend one of the account's banked limit resets, confirmed on the limit card
+    UseReset,
     // the attach button was clicked, so the app should offer a file picker
     Attach,
     // a link to a file was clicked, with its target as the agent wrote it
@@ -175,7 +177,16 @@ pub enum ChatAction {
     StopBackground(String),
 }
 
+// a banked limit reset the limit card can offer, with what became of the last one tried
+#[derive(Clone, Debug, Default)]
+pub struct ResetOffer {
+    pub left: usize,
+    pub pending: bool,
+    pub note: Option<String>,
+}
+
 pub struct ChatView<'a> {
+    reset: Option<ResetOffer>,
     items: &'a [ChatItem],
     draft: &'a mut String,
     running: bool,
@@ -192,6 +203,7 @@ pub struct ChatView<'a> {
 impl<'a> ChatView<'a> {
     pub fn new(items: &'a [ChatItem], draft: &'a mut String) -> Self {
         Self {
+            reset: None,
             items,
             draft,
             running: false,
@@ -242,6 +254,11 @@ impl<'a> ChatView<'a> {
 
     pub fn controls(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
         self.controls = Some(Box::new(add));
+        self
+    }
+
+    pub fn reset(mut self, reset: Option<ResetOffer>) -> Self {
+        self.reset = reset;
         self
     }
 
@@ -347,6 +364,7 @@ impl<'a> ChatView<'a> {
                             .count();
                         let items = self.items;
                         let running = self.running;
+                        let reset = self.reset.as_ref();
                         let mut plain = Vec::new();
                         let mut i = 0;
                         while i < items.len() {
@@ -357,7 +375,10 @@ impl<'a> ChatView<'a> {
                                 i += 1;
                                 continue;
                             };
-                            take(&mut action, show_items(ui, items, &plain, running, turns));
+                            take(
+                                &mut action,
+                                show_items(ui, items, &plain, running, turns, reset),
+                            );
                             plain.clear();
                             // a turn's steps fold behind one line once it's done, open while it runs
                             ui.push_id(("turn", i), |ui| {
@@ -372,17 +393,21 @@ impl<'a> ChatView<'a> {
                                 let (_, open) =
                                     cards::summary_row(ui, id, turn.live, turn.live, &label);
                                 crate::components::reveal(ui, id.with("steps"), open, |ui| {
-                                    let shown = show_items(ui, items, &turn.work, running, turns);
+                                    let shown =
+                                        show_items(ui, items, &turn.work, running, turns, reset);
                                     take(&mut action, shown);
                                 });
                             });
                             take(
                                 &mut action,
-                                show_items(ui, items, &turn.kept, running, turns),
+                                show_items(ui, items, &turn.kept, running, turns, reset),
                             );
                             i = turn.end;
                         }
-                        take(&mut action, show_items(ui, items, &plain, running, turns));
+                        take(
+                            &mut action,
+                            show_items(ui, items, &plain, running, turns, reset),
+                        );
                         ui.add_space(space::SM);
                     });
                 });
@@ -466,6 +491,7 @@ fn show_items(
     indices: &[usize],
     running: bool,
     turns: usize,
+    reset: Option<&ResetOffer>,
 ) -> Option<ChatAction> {
     let picked: Vec<&ChatItem> = indices.iter().map(|&i| &items[i]).collect();
     let mut action = None;
@@ -483,7 +509,9 @@ fn show_items(
             continue;
         }
         let index = indices[k];
-        let shown = ui.push_id(index, |ui| show_item(ui, picked[k], index, running, turns));
+        let shown = ui.push_id(index, |ui| {
+            show_item(ui, picked[k], index, running, turns, reset)
+        });
         take(&mut action, shown.inner);
         k += 1;
     }
@@ -496,6 +524,7 @@ fn show_item(
     index: usize,
     running: bool,
     turns: usize,
+    reset: Option<&ResetOffer>,
 ) -> Option<ChatAction> {
     let mut action = None;
     match item {
@@ -528,7 +557,11 @@ fn show_item(
             });
         }
         ChatItem::Tool(tool) => cards::tool_call(ui, tool),
-        ChatItem::UsageLimit { message, retry_at } => cards::usage_limit(ui, message, *retry_at),
+        ChatItem::UsageLimit { message, retry_at } => {
+            if cards::usage_limit(ui, message, *retry_at, reset) {
+                action = Some(ChatAction::UseReset);
+            }
+        }
         ChatItem::Diff(diff) => {
             if cards::diff(ui, diff) {
                 action = Some(ChatAction::OpenDiff(index));

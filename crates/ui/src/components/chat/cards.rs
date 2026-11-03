@@ -19,7 +19,15 @@ use crate::theme::{self, control, font, icon, radius, space, text};
 pub(super) const ROW: f32 = 32.0;
 const DIFF_PREVIEW: usize = 12;
 
-pub fn usage_limit(ui: &mut Ui, message: &str, retry_at: Option<u64>) {
+// a limit the agent hit, with when mux carries on by itself, and a banked reset to use instead when there is one.
+// returns true once using a reset is confirmed
+pub fn usage_limit(
+    ui: &mut Ui,
+    message: &str,
+    retry_at: Option<u64>,
+    reset: Option<&super::ResetOffer>,
+) -> bool {
+    let mut use_reset = false;
     let p = theme::palette(ui);
     theme::card(ui)
         .inner_margin(Margin::same(space::MD as i8))
@@ -70,7 +78,82 @@ pub fn usage_limit(ui: &mut Ui, message: &str, retry_at: Option<u64>) {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_secs(60));
             }
+            if let Some(reset) = reset {
+                use_reset = reset_row(ui, reset);
+            }
         });
+    use_reset
+}
+
+// a banked reset, used only after a second click, since it can't be taken back
+fn reset_row(ui: &mut Ui, reset: &super::ResetOffer) -> bool {
+    let p = theme::palette(ui);
+    let id = ui.make_persistent_id("reset-confirm");
+    let mut asking = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let mut confirmed = false;
+    if let Some(note) = &reset.note {
+        ui.add_space(space::SM);
+        ui.add(
+            Label::new(
+                RichText::new(note)
+                    .font(font::regular(text::SM))
+                    .color(p.text_muted),
+            )
+            .wrap(),
+        );
+    }
+    if reset.left == 0 && !reset.pending {
+        return false;
+    }
+    ui.add_space(space::MD);
+    if reset.pending {
+        ui.horizontal(|ui| {
+            spinner(
+                ui,
+                ui.cursor().left_center() + vec2(icon::SM / 2.0, 0.0),
+                icon::SM,
+                p.text_muted,
+            );
+            ui.add_space(icon::SM + space::SM);
+            ui.label(
+                RichText::new("Using a reset…")
+                    .font(font::regular(text::SM))
+                    .color(p.text_muted),
+            );
+        });
+        return false;
+    }
+    let left = reset.left;
+    if asking {
+        ui.add(
+            Label::new(
+                RichText::new(format!(
+                    "This uses 1 of your {left} {} and lifts the limit now. It can't be undone.",
+                    if left == 1 { "reset" } else { "resets" }
+                ))
+                .font(font::regular(text::SM))
+                .color(p.text),
+            )
+            .wrap(),
+        );
+        ui.add_space(space::SM);
+        ui.horizontal(|ui| {
+            if Button::new("Use reset").primary().show(ui).clicked() {
+                confirmed = true;
+                asking = false;
+            }
+            if Button::new("Cancel").ghost().show(ui).clicked() {
+                asking = false;
+            }
+        });
+    } else if Button::new(format!("Use a reset ({left} left)"))
+        .show(ui)
+        .clicked()
+    {
+        asking = true;
+    }
+    ui.data_mut(|d| d.insert_temp(id, asking));
+    confirmed
 }
 
 // one of the person's messages, returning true when they asked to rewind the chat to it
@@ -1654,5 +1737,60 @@ mod tool_row_tests {
             vec![egui::Event::PointerMoved(allow), button(allow, true)],
         );
         assert_eq!(frame(&ctx, 1.0, vec![button(allow, false)]), None);
+    }
+
+    fn limit(ctx: &egui::Context, time: f64, events: Vec<egui::Event>) -> bool {
+        let input = egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(480.0, 260.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let offer = super::super::ResetOffer {
+            left: 2,
+            pending: false,
+            note: None,
+        };
+        let mut used = false;
+        ctx.run_ui(input, |ui| {
+            used = super::usage_limit(ui, "You've hit your usage limit.", None, Some(&offer))
+        })
+        .drop_without_applying_deltas();
+        used
+    }
+
+    #[test]
+    fn a_reset_is_only_spent_after_it_is_confirmed() {
+        // clicking everywhere on one card finds where the confirm button ends up
+        let ctx = egui::Context::default();
+        limit(&ctx, 0.0, Vec::new());
+        let mut confirm = None;
+        'sweep: for y in (0..260).step_by(4) {
+            for x in (0..480).step_by(4) {
+                let at = egui::pos2(x as f32, y as f32);
+                limit(
+                    &ctx,
+                    1.0,
+                    vec![egui::Event::PointerMoved(at), button(at, true)],
+                );
+                if limit(&ctx, 1.0, vec![button(at, false)]) {
+                    confirm = Some(at);
+                    break 'sweep;
+                }
+            }
+        }
+        let confirm = confirm.expect("a reset can be used");
+        // on a fresh card the same single click spends nothing, since the confirm button isn't there yet
+        let ctx = egui::Context::default();
+        limit(&ctx, 0.0, Vec::new());
+        limit(
+            &ctx,
+            1.0,
+            vec![egui::Event::PointerMoved(confirm), button(confirm, true)],
+        );
+        assert!(!limit(&ctx, 1.0, vec![button(confirm, false)]));
     }
 }

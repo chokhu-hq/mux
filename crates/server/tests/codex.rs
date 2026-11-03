@@ -302,3 +302,74 @@ fn reconnects_show_while_they_happen_and_settle_once_codex_answers() {
     });
     assert_eq!(failed, Some(ItemStatus::Failed));
 }
+
+fn resets_shown(server: &Server) -> Option<usize> {
+    server.seen.iter().rev().find_map(|m| match m {
+        ServerMsg::AgentResets { resets, .. } => Some(resets.len()),
+        _ => None,
+    })
+}
+
+fn reset_result(server: &mut Server) -> mux_core::protocol::ResetResult {
+    server.wait_for("the reset's result", |msg| match msg {
+        ServerMsg::ResetResult { result, .. } => Some(result.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_banked_reset_lifts_the_limit_and_the_waiting_chat_carries_on_at_once() {
+    // the limit wouldn't lift by itself for an hour, so carrying on now is the reset's doing
+    let mut server = Server::start_with(&[
+        ("FAKE_CODEX_RESETS", "2"),
+        ("FAKE_CODEX_LIMIT_SECS", "3600"),
+    ]);
+    let id = server.codex_agent(AgentSettings::default());
+    server.wait("the banked resets", |s| resets_shown(s) == Some(2));
+    server.say(id, "scenario:limit");
+    server.wait("the limit", |s| {
+        s.items
+            .iter()
+            .any(|i| matches!(i, AgentItem::UsageLimit { .. }))
+            && !s.busy
+    });
+    server.send(ClientMsg::UseReset {
+        provider: mux_core::Provider::Codex,
+    });
+    assert_eq!(
+        reset_result(&mut server),
+        mux_core::protocol::ResetResult::Reset
+    );
+    server.wait("the chat to carry on", |s| {
+        !s.busy
+            && s.assistant_text()
+                .iter()
+                .any(|t| t.contains("limit has reset"))
+    });
+    let consumed: Vec<serde_json::Value> = server
+        .codex_log()
+        .iter()
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(e["stdin"].as_str()?).ok())
+        .filter(|m| m["method"] == "account/rateLimitResetCredit/consume")
+        .collect();
+    assert_eq!(consumed.len(), 1, "exactly one reset spent");
+    assert!(
+        consumed[0]["params"]["idempotencyKey"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty())
+    );
+}
+
+#[test]
+fn using_a_reset_with_none_left_says_so() {
+    let mut server = Server::start();
+    let _id = server.codex_agent(AgentSettings::default());
+    server.wait("the resets, none of them", |s| resets_shown(s) == Some(0));
+    server.send(ClientMsg::UseReset {
+        provider: mux_core::Provider::Codex,
+    });
+    assert_eq!(
+        reset_result(&mut server),
+        mux_core::protocol::ResetResult::NoneLeft
+    );
+}

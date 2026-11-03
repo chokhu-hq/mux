@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 30;
+pub const PROTOCOL: u32 = 31;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -360,6 +360,24 @@ pub struct ModelOption {
     pub fast: Option<String>,
 }
 
+// a reset an account has banked, which lifts its plan's limits early when used. codex grants these now and then
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LimitReset {
+    pub title: String,
+    // unix seconds, none when it doesn't expire
+    pub expires_at: Option<u64>,
+}
+
+// how using a limit reset went
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ResetResult {
+    Reset,
+    // no limit is in force right now, so the reset was kept
+    NothingToReset,
+    NoneLeft,
+    Failed(String),
+}
+
 // one rate limit window of an agent's plan, like its five hour or weekly allowance
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UsageWindow {
@@ -494,6 +512,10 @@ pub enum ClientMsg {
         id: u64,
         title: String,
     },
+    // spends one of the account's banked limit resets
+    UseReset {
+        provider: Provider,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -585,6 +607,15 @@ pub enum ServerMsg {
         index: usize,
         at: usize,
         text: String,
+    },
+    // the limit resets an agent's account has banked
+    AgentResets {
+        provider: Provider,
+        resets: Vec<LimitReset>,
+    },
+    ResetResult {
+        provider: Provider,
+        result: ResetResult,
     },
 }
 

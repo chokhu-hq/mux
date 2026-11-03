@@ -129,6 +129,10 @@ pub struct Sessions {
     // the models each agent cli offers, sent by the server once it has asked
     models: Models,
     usage: HashMap<Provider, Vec<UsageWindow>>,
+    // each agent account's banked limit resets, and how using one is going
+    resets: HashMap<Provider, Vec<wire::LimitReset>>,
+    reset_pending: Option<Provider>,
+    reset_note: Option<(Provider, String)>,
     // the last month of token use and which day is today, once the server has read the clis' history
     tokens: Option<(i64, Vec<UsageDay>)>,
     // sessions where an agent finished or stopped to ask something, since they were last looked at
@@ -433,6 +437,25 @@ impl Sessions {
             ServerMsg::AgentUsage { provider, windows } => {
                 self.usage.insert(provider, windows);
             }
+            ServerMsg::AgentResets { provider, resets } => {
+                self.resets.insert(provider, resets);
+            }
+            ServerMsg::ResetResult { provider, result } => {
+                if self.reset_pending == Some(provider) {
+                    self.reset_pending = None;
+                }
+                let note = match result {
+                    wire::ResetResult::Reset => None,
+                    wire::ResetResult::NothingToReset => Some(
+                        "There was no limit to lift right now, so your reset was kept.".to_owned(),
+                    ),
+                    wire::ResetResult::NoneLeft => {
+                        Some("There are no resets left on this account.".to_owned())
+                    }
+                    wire::ResetResult::Failed(why) => Some(format!("Couldn't use a reset: {why}")),
+                };
+                self.reset_note = note.map(|n| (provider, n));
+            }
             ServerMsg::TokenHistory { today, days } => self.tokens = Some((today, days)),
             ServerMsg::AgentModels {
                 provider,
@@ -491,6 +514,29 @@ impl Sessions {
 
     pub fn models(&self) -> &Models {
         &self.models
+    }
+
+    // what the limit card of an agent on `provider` can offer, for codex only since only it banks resets
+    pub fn reset_offer(&self, provider: Provider) -> Option<mux_ui::chat::ResetOffer> {
+        (provider == Provider::Codex).then(|| mux_ui::chat::ResetOffer {
+            left: self.resets.get(&provider).map_or(0, Vec::len),
+            pending: self.reset_pending == Some(provider),
+            note: self
+                .reset_note
+                .as_ref()
+                .filter(|(p, _)| *p == provider)
+                .map(|(_, note)| note.clone()),
+        })
+    }
+
+    pub fn use_reset(&mut self, provider: Provider) {
+        self.reset_pending = Some(provider);
+        self.reset_note = None;
+        self.outbox.push(ClientMsg::UseReset { provider });
+    }
+
+    pub fn resets_left(&self, provider: Provider) -> usize {
+        self.resets.get(&provider).map_or(0, Vec::len)
     }
 
     pub fn usage(&self, provider: Provider) -> &[UsageWindow] {
@@ -1825,6 +1871,41 @@ mod tests {
             most_pressing(&[shell, done, failed, working, waiting], &unread),
             Some(SessionStatus::Waiting)
         );
+    }
+
+    #[test]
+    fn a_reset_is_offered_for_codex_and_says_what_happened() {
+        let mut sessions = Sessions::default();
+        sessions.apply(ServerMsg::AgentResets {
+            provider: Provider::Codex,
+            resets: vec![
+                wire::LimitReset {
+                    title: "Full reset".into(),
+                    expires_at: None,
+                };
+                2
+            ],
+        });
+        assert!(
+            sessions.reset_offer(Provider::Claude).is_none(),
+            "claude has no resets"
+        );
+        assert_eq!(sessions.reset_offer(Provider::Codex).unwrap().left, 2);
+        sessions.use_reset(Provider::Codex);
+        assert!(sessions.reset_offer(Provider::Codex).unwrap().pending);
+        assert!(matches!(
+            sessions.outbox.last(),
+            Some(ClientMsg::UseReset {
+                provider: Provider::Codex
+            })
+        ));
+        sessions.apply(ServerMsg::ResetResult {
+            provider: Provider::Codex,
+            result: wire::ResetResult::NothingToReset,
+        });
+        let offer = sessions.reset_offer(Provider::Codex).unwrap();
+        assert!(!offer.pending);
+        assert!(offer.note.unwrap().contains("kept"));
     }
 
     #[test]

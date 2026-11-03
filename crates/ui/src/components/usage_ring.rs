@@ -20,6 +20,8 @@ pub(super) const BAR: f32 = 6.0;
 pub struct UsageRing<'a> {
     windows: &'a [UsageWindow],
     provider: Option<Provider>,
+    // banked resets that lift the limits early
+    resets: usize,
 }
 
 impl<'a> UsageRing<'a> {
@@ -27,7 +29,13 @@ impl<'a> UsageRing<'a> {
         Self {
             windows,
             provider: None,
+            resets: 0,
         }
+    }
+
+    pub fn resets(mut self, resets: usize) -> Self {
+        self.resets = resets;
+        self
     }
 
     pub fn provider(mut self, provider: Provider) -> Self {
@@ -66,7 +74,22 @@ impl<'a> UsageRing<'a> {
 
         let windows = self.windows;
         let provider = self.provider;
-        response.tip_ui(|ui| details(ui, provider, windows))
+        let resets = self.resets;
+        response.tip_ui(|ui| {
+            details(ui, provider, windows);
+            if resets > 0 {
+                let p = theme::palette(ui);
+                ui.add_space(space::LG);
+                ui.label(
+                    RichText::new(format!(
+                        "{resets} limit {} banked, to use when you hit a limit",
+                        if resets == 1 { "reset" } else { "resets" }
+                    ))
+                    .font(font::regular(text::SM))
+                    .color(p.text_muted),
+                );
+            }
+        })
     }
 }
 

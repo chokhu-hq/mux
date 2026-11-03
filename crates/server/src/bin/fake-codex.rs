@@ -11,7 +11,8 @@
 //   scenario:retry    reconnects a few times before answering, or giving up with retry-fail
 //   scenario:crash    dies mid-turn
 //   scenario:flood    streams a 300 KB reply as fast as it can
-// anything else gets a short reply. FAKE_CODEX_FORGET makes thread/resume fail, like a thread codex lost,
+// anything else gets a short reply. FAKE_CODEX_RESETS banks that many limit resets, FAKE_CODEX_LIMIT_SECS sets
+// when scenario:limit's limit lifts, and FAKE_CODEX_FORGET makes thread/resume fail, like a thread codex lost,
 // and FAKE_CODEX_STALL makes a turn mux carries on after a crash stall too
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -137,7 +138,29 @@ impl Fake {
                     json!({ "data": [{ "id": "fake-codex-1", "displayName": "Fake Codex", "description": "For tests",
                         "isDefault": true, "supportedReasoningEfforts": [], "defaultReasoningEffort": "low" }] }),
                 ),
-                "account/rateLimits/read" => reply(&id, json!({ "rateLimits": {} })),
+                "account/rateLimits/read" => {
+                    let count = banked_resets();
+                    let credits: Vec<Value> = (0..count)
+                        .map(|n| {
+                            json!({ "id": format!("reset-{n}"), "resetType": "codexRateLimits",
+                            "status": "available", "grantedAt": 0, "expiresAt": 1_900_000_000,
+                            "title": "Full reset (Weekly + 5 hr)" })
+                        })
+                        .collect();
+                    reply(
+                        &id,
+                        json!({ "rateLimits": {},
+                        "rateLimitResetCredits": { "availableCount": count, "credits": credits } }),
+                    );
+                }
+                "account/rateLimitResetCredit/consume" => {
+                    let outcome = if banked_resets() > 0 {
+                        "reset"
+                    } else {
+                        "noCredit"
+                    };
+                    reply(&id, json!({ "outcome": outcome }));
+                }
                 "skills/list" => reply(&id, json!({ "data": [] })),
                 _ if !id.is_null() => reply(&id, json!({})),
                 _ => {}
@@ -200,7 +223,10 @@ impl Fake {
             let resets = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs())
-                + 1;
+                + std::env::var("FAKE_CODEX_LIMIT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1);
             note(
                 "account/rateLimits/updated",
                 json!({ "rateLimits": {
@@ -352,6 +378,14 @@ fn hold(method: &str) {
         assert!(Instant::now() < deadline, "test never released {method}");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+// how many limit resets the account has banked, set by the test
+fn banked_resets() -> u64 {
+    std::env::var("FAKE_CODEX_RESETS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 fn input_text(input: &Value) -> String {

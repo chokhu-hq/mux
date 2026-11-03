@@ -466,7 +466,8 @@ impl App {
                 let most = |w: &[UsageWindow]| w.iter().map(|w| w.used).fold(0.0, f32::max);
                 most(a.1).total_cmp(&most(b.1))
             });
-        if settings_row(&mut ui_footer, self.settings_open, status, usage).clicked() {
+        let resets = usage.map_or(0, |(provider, _)| self.sessions.resets_left(provider));
+        if settings_row(&mut ui_footer, self.settings_open, status, usage, resets).clicked() {
             self.settings_open = !self.settings_open;
         }
     }
@@ -503,6 +504,7 @@ impl App {
         let branch = self.sessions.selected_branch();
         // asked for from the title bar last frame, answered here where the chat is at hand
         let review = std::mem::take(&mut self.review);
+        let codex_reset = self.sessions.reset_offer(Provider::Codex);
         let Some((session, local, outbox, models)) = self.sessions.selected() else {
             if EmptyState::new(icons::TERMINAL_WINDOW, "No session selected")
                 .detail("Pick a session from the sidebar, or start a new one.")
@@ -574,10 +576,12 @@ impl App {
             let folder = group.as_ref().and_then(|g| g.1.clone());
             let mut body_ui = ui.new_child(UiBuilder::new().max_rect(rect));
             let dropped = std::mem::take(&mut self.dropped);
+            let reset = codex_reset.filter(|_| local.settings.provider == Provider::Codex);
             let action = agent_chat(
                 &mut body_ui,
                 AgentPane {
                     id,
+                    reset,
                     local,
                     outbox,
                     models,
@@ -591,6 +595,7 @@ impl App {
                 Some(ChatAction::OpenLink(target)) => {
                     self.open_link(ui.ctx(), &target, folder.as_deref())
                 }
+                Some(ChatAction::UseReset) => self.sessions.use_reset(Provider::Codex),
                 Some(ChatAction::OpenDiff(index)) => {
                     self.diffs = changed_files(&local.chat, folder.as_deref());
                     let clicked = match local.chat.get(index) {
@@ -753,7 +758,10 @@ impl App {
         }
         if let (Some(provider), false) = (info.provider, usage.is_empty()) {
             actions.add_space(space::SM);
-            UsageRing::new(&usage).provider(provider).show(&mut actions);
+            UsageRing::new(&usage)
+                .provider(provider)
+                .resets(self.sessions.resets_left(provider))
+                .show(&mut actions);
         }
         if let Some((files, added, removed)) = info.changes {
             actions.add_space(space::SM);
@@ -1925,6 +1933,7 @@ fn settings_row(
     open: bool,
     status: Option<(egui::Color32, &str)>,
     usage: Option<(Provider, &[UsageWindow])>,
+    resets: usize,
 ) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) =
@@ -1976,7 +1985,10 @@ fn settings_row(
                 .max_rect(slot)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        UsageRing::new(windows).provider(provider).show(&mut ring);
+        UsageRing::new(windows)
+            .provider(provider)
+            .resets(resets)
+            .show(&mut ring);
     }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -2207,6 +2219,7 @@ impl App {
 
         let header = Rect::from_min_size(panel.min, vec2(full, FOOTER_ROW + space::SM));
         let mut close = false;
+        let codex_reset = self.sessions.reset_offer(Provider::Codex);
         let Some((info, local, outbox, models, folder)) = self.sessions.split_session(id) else {
             self.split_shown = None;
             return main;
@@ -2271,10 +2284,12 @@ impl App {
         if agent {
             let body = Rect::from_min_max(pos2(panel.left(), header.bottom()), panel.max);
             let mut body_ui = pane.new_child(UiBuilder::new().id_salt("split-body").max_rect(body));
+            let reset = codex_reset.filter(|_| local.settings.provider == Provider::Codex);
             let action = agent_chat(
                 &mut body_ui,
                 AgentPane {
                     id,
+                    reset,
                     local,
                     outbox,
                     models,
@@ -2288,6 +2303,7 @@ impl App {
                 Some(ChatAction::OpenLink(target)) => {
                     self.open_link(&ctx, &target, folder.as_deref())
                 }
+                Some(ChatAction::UseReset) => self.sessions.use_reset(Provider::Codex),
                 Some(ChatAction::OpenDiff(index)) => {
                     let chat = self.sessions.split_session(id).map(|s| &s.1.chat);
                     if let Some(chat) = chat {
@@ -2637,6 +2653,8 @@ impl eframe::App for App {
 // an agent session's chat on screen, wherever it's shown
 struct AgentPane<'a> {
     id: u64,
+    // a banked limit reset the chat's limit card can offer
+    reset: Option<mux_ui::chat::ResetOffer>,
     local: &'a mut sessions::Local,
     outbox: &'a mut Vec<ClientMsg>,
     models: &'a sessions::Models,
@@ -2653,6 +2671,7 @@ fn agent_chat(
 ) -> Option<ChatAction> {
     let AgentPane {
         id,
+        reset,
         local,
         outbox,
         models,
@@ -2687,6 +2706,7 @@ fn agent_chat(
         .attachments(&mut local.attachments)
         .dropping(dropping)
         .running(local.busy)
+        .reset(reset)
         .context(local.context)
         .controls(|ui| configure = agent_controls(ui, models, &settings, started))
         .show(ui);
@@ -2738,7 +2758,9 @@ fn agent_chat(
             }
         }
         // these reach beyond this one chat, so the caller carries them out
-        action @ Some(ChatAction::OpenLink(_) | ChatAction::OpenDiff(_)) => return action,
+        action @ Some(ChatAction::OpenLink(_) | ChatAction::OpenDiff(_) | ChatAction::UseReset) => {
+            return action;
+        }
         Some(ChatAction::Stop) => outbox.push(ClientMsg::AgentStop { id }),
         // only a new agent is left, which the caller starts
         action @ Some(ChatAction::Command(_)) => return action,

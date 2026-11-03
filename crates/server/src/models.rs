@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use mux_core::Provider;
-use mux_core::protocol::{ModelOption, UsageWindow};
+use mux_core::protocol::{LimitReset, ModelOption, ResetResult, UsageWindow};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -17,6 +17,8 @@ pub struct Catalog {
     pub models: Vec<ModelOption>,
     // codex can report its limits up front, claude only reports them during a turn
     pub usage: Option<Vec<UsageWindow>>,
+    // the limit resets the account has banked, which only codex has
+    pub resets: Option<Vec<LimitReset>>,
 }
 
 // asks a short lived copy of the agent cli for the models this account can use
@@ -59,6 +61,7 @@ async fn list() -> io::Result<Catalog> {
 
     let mut models: Option<Vec<ModelOption>> = None;
     let mut usage: Option<Vec<UsageWindow>> = None;
+    let mut resets = None;
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines.next_line().await? {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -84,17 +87,104 @@ async fn list() -> io::Result<Catalog> {
                 models = Some(data.iter().filter_map(parse).collect());
             }
             // limits are a bonus, so a failure here just leaves them unknown
-            Some(2) => usage = Some(usage::codex(&msg["result"]["rateLimits"])),
+            Some(2) => {
+                usage = Some(usage::codex(&msg["result"]["rateLimits"]));
+                resets = Some(parse_resets(&msg["result"]["rateLimitResetCredits"]));
+            }
             _ => {}
         }
         if let (Some(models), Some(usage)) = (&models, &usage) {
             return Ok(Catalog {
                 models: models.clone(),
                 usage: Some(usage.clone()).filter(|u| !u.is_empty()),
+                resets: resets.clone(),
             });
         }
     }
     Err(io::Error::other("codex exited before listing models"))
+}
+
+// the resets codex says are still there to use, from its rate limit read
+fn parse_resets(summary: &Value) -> Vec<LimitReset> {
+    let listed: Vec<LimitReset> = summary["credits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["status"] == "available")
+        .map(|c| LimitReset {
+            title: c["title"].as_str().unwrap_or("Limit reset").to_owned(),
+            expires_at: c["expiresAt"].as_u64(),
+        })
+        .collect();
+    // codex may cap the details it sends, so the count can be more than the rows
+    let count = summary["availableCount"].as_u64().unwrap_or(0) as usize;
+    let mut resets = listed;
+    while resets.len() < count {
+        resets.push(LimitReset {
+            title: "Limit reset".to_owned(),
+            expires_at: None,
+        });
+    }
+    resets
+}
+
+// spends one of the account's banked resets through a short lived app-server
+pub async fn use_codex_reset() -> ResetResult {
+    let attempt = async {
+        let mut child = Command::from(mux_core::command("codex"))
+            .arg("app-server")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("no stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("no stdout"))?;
+        // the key makes this one attempt, so a retry can never spend a second reset
+        let key = format!(
+            "mux-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        );
+        let init = json!({ "id": 0, "method": "initialize", "params": { "clientInfo": { "name": "mux", "version": mux_core::VERSION }, "capabilities": { "experimentalApi": true } } });
+        let consume = json!({ "id": 1, "method": "account/rateLimitResetCredit/consume", "params": { "idempotencyKey": key } });
+        for msg in [init, json!({ "method": "initialized" }), consume] {
+            stdin.write_all(format!("{msg}\n").as_bytes()).await?;
+        }
+        let mut lines = BufReader::new(stdout).lines();
+        while let Some(line) = lines.next_line().await? {
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if msg["id"].as_u64() != Some(1) || msg.get("method").is_some() {
+                continue;
+            }
+            if let Some(error) = msg.get("error") {
+                let message = error["message"].as_str().unwrap_or("codex refused");
+                return Ok(ResetResult::Failed(message.to_owned()));
+            }
+            return Ok(match msg["result"]["outcome"].as_str() {
+                Some("reset") | Some("alreadyRedeemed") => ResetResult::Reset,
+                Some("nothingToReset") => ResetResult::NothingToReset,
+                Some("noCredit") => ResetResult::NoneLeft,
+                other => ResetResult::Failed(format!("codex answered {other:?}")),
+            });
+        }
+        Err(io::Error::other("codex exited before answering"))
+    };
+    match tokio::time::timeout(Duration::from_secs(30), attempt).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => ResetResult::Failed(err.to_string()),
+        Err(_) => ResetResult::Failed("codex took too long to answer".to_owned()),
+    }
 }
 
 // opencode's background service lists every model it can reach, with the efforts each one takes
@@ -113,6 +203,7 @@ async fn list_opencode() -> io::Result<Catalog> {
     Ok(Catalog {
         models: parse_opencode(&list),
         usage: None,
+        resets: None,
     })
 }
 
@@ -215,6 +306,7 @@ async fn claude_models(child: &mut tokio::process::Child) -> io::Result<Catalog>
         return Ok(Catalog {
             models: models.iter().filter_map(parse_claude).collect(),
             usage: None,
+            resets: None,
         });
     }
     Err(io::Error::other("claude exited before listing models"))

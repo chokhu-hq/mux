@@ -423,6 +423,7 @@ impl eframe::App for Gallery {
                                                             r.decision = Some(decision);
                                                         }
                                                     }
+                                                    Some(ChatAction::UseReset) => {}
                                                     None => {}
                                                 }
                                             });

@@ -154,7 +154,8 @@ const CLIENT_BACKLOG: usize = 32 * 1024 * 1024;
 
 // a connected client's outbox, which counts what's queued so a client that stops reading can't grow the server
 pub struct Client {
-    tx: UnboundedSender<Vec<u8>>,
+    // each frame with how much of it counts toward the backlog
+    tx: UnboundedSender<(Vec<u8>, usize)>,
     queued: Arc<AtomicUsize>,
     cut: Arc<Notify>,
     over: AtomicBool,
@@ -165,6 +166,11 @@ impl Client {
         let Ok(frame) = protocol::encode(&msg) else {
             return Err(());
         };
+        // the client hangs up on a frame this big, so sending it would only lose the connection
+        if frame.len() > protocol::MAX_FRAME + 4 {
+            log::error!("dropped a message of {} bytes", frame.len());
+            return Err(());
+        }
         if self.queued.load(Ordering::Relaxed) + frame.len() > CLIENT_BACKLOG {
             if !self.over.swap(true, Ordering::Relaxed) {
                 self.cut.notify_one();
@@ -172,8 +178,60 @@ impl Client {
             return Err(());
         }
         self.queued.fetch_add(frame.len(), Ordering::Relaxed);
-        self.tx.send(frame).map_err(drop)
+        let counted = frame.len();
+        self.tx.send((frame, counted)).map_err(drop)
     }
+
+    // a transcript the client asked for can outgrow the backlog by itself, and it has to arrive for the chat to open
+    fn send_transcript(&self, pieces: &[ServerMsg]) {
+        for piece in pieces {
+            if let Ok(frame) = protocol::encode(piece) {
+                let _ = self.tx.send((frame, 0));
+            }
+        }
+    }
+}
+
+// a long chat can pass the frame limit, so it goes out in pieces of about this size
+const TRANSCRIPT_PIECE: usize = protocol::MAX_FRAME / 2;
+
+// a note stands in for one item too big to send whole, so the rest of the chat can still open
+fn fit_to_send(item: AgentItem) -> AgentItem {
+    let size = protocol::encode(&item).map_or(0, |frame| frame.len());
+    if size <= TRANSCRIPT_PIECE {
+        return item;
+    }
+    AgentItem::Error {
+        message: format!(
+            "This step is too big to show ({} MB).",
+            size / (1024 * 1024)
+        ),
+    }
+}
+
+fn transcript_pieces(id: u64, agent: &Agent) -> Vec<ServerMsg> {
+    let mut pieces: Vec<Vec<AgentItem>> = vec![Vec::new()];
+    let mut used = 0;
+    for item in &agent.items {
+        let item = fit_to_send(item.clone());
+        let size = protocol::encode(&item).map_or(0, |frame| frame.len());
+        if used + size > TRANSCRIPT_PIECE {
+            pieces.push(Vec::new());
+            used = 0;
+        }
+        used += size;
+        pieces.last_mut().unwrap().push(item);
+    }
+    let mut pieces = pieces.into_iter();
+    let mut msgs = vec![ServerMsg::AgentTranscript {
+        id,
+        items: pieces.next().unwrap_or_default(),
+        busy: agent.busy,
+        settings: agent.settings.clone(),
+        context: agent.context,
+    }];
+    msgs.extend(pieces.map(|items| ServerMsg::AgentTranscriptMore { id, items }));
+    msgs
 }
 
 pub(crate) async fn connection<S>(stream: S, id: u64, events: UnboundedSender<Event>)
@@ -181,7 +239,7 @@ where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (tx, mut outbox) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, mut outbox) = mpsc::unbounded_channel::<(Vec<u8>, usize)>();
     let queued = Arc::new(AtomicUsize::new(0));
     let cut = Arc::new(Notify::new());
     let client = Client {
@@ -194,11 +252,11 @@ where
         return;
     }
     let send = tokio::spawn(async move {
-        while let Some(frame) = outbox.recv().await {
+        while let Some((frame, counted)) = outbox.recv().await {
             if writer.write_all(&frame).await.is_err() {
                 break;
             }
-            queued.fetch_sub(frame.len(), Ordering::Relaxed);
+            queued.fetch_sub(counted, Ordering::Relaxed);
         }
     });
 
@@ -564,17 +622,13 @@ impl Server {
             ClientMsg::AgentOpen { id } => {
                 self.attached.entry(id).or_default().insert(client);
                 let agent = self.agent(id);
-                let msg = ServerMsg::AgentTranscript {
-                    id,
-                    items: agent.items.clone(),
-                    busy: agent.busy,
-                    settings: agent.settings.clone(),
-                    context: agent.context,
-                };
+                let pieces = transcript_pieces(id, agent);
                 let (skills, provider) = (agent.skills(), agent.settings.provider);
                 let (queue, held) = (agent.queue.clone(), agent.held);
                 let tasks = agent.background();
-                self.send(client, msg);
+                if let Some(tx) = self.clients.get(&client) {
+                    tx.send_transcript(&pieces);
+                }
                 self.send(client, ServerMsg::AgentSkills { id, skills });
                 self.send(client, ServerMsg::AgentQueue { id, queue, held });
                 self.send(client, ServerMsg::AgentBackground { id, tasks });
@@ -694,15 +748,13 @@ impl Server {
                         log::error!("could not save {}: {err}", path.display());
                     }
                     // the transcript got shorter, which item by item updates can't say, so it's sent whole
-                    let msg = ServerMsg::AgentTranscript {
-                        id,
-                        items: agent.items.clone(),
-                        busy: agent.busy,
-                        settings: agent.settings.clone(),
-                        context: agent.context,
-                    };
+                    let pieces = transcript_pieces(id, agent);
                     let summary = agent.summary();
-                    self.send_watchers(id, msg);
+                    for watcher in self.attached.get(&id).into_iter().flatten() {
+                        if let Some(tx) = self.clients.get(watcher) {
+                            tx.send_transcript(&pieces);
+                        }
+                    }
                     if let Some(info) = self.store.session_mut(id) {
                         info.summary = Some(summary);
                     }
@@ -1011,6 +1063,7 @@ impl Server {
             if let AgentItem::Error { message } = &item {
                 log::warn!("session {id}: {label} error: {message}");
             }
+            let item = fit_to_send(item);
             self.send_watchers(id, ServerMsg::AgentItem { id, index, item });
         }
         for (index, at, text) in appends {

@@ -7,6 +7,31 @@ pub mod transport;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// text that doesn't wrap is drawn whole even when most of it is off screen, and a line of millions of characters
+// needs more vertices than the gpu's largest buffer can hold, so nothing longer than this gets drawn
+const MAX_LINE: usize = 8 * 1024;
+
+// shortens only the lines too long to draw, so line numbers and everything else stay as they were
+pub fn clip_lines(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.split('\n').all(|line| line.len() <= MAX_LINE) {
+        return text.into();
+    }
+    let mut clipped = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            clipped.push('\n');
+        }
+        if line.len() <= MAX_LINE {
+            clipped.push_str(line);
+        } else {
+            let cut = line.floor_char_boundary(MAX_LINE);
+            clipped.push_str(&line[..cut]);
+            clipped.push_str(" … line cut short");
+        }
+    }
+    clipped.into()
+}
+
 pub fn home_dir() -> std::path::PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(Into::into)
@@ -271,5 +296,21 @@ impl SessionStatus {
             Self::Done => "Done",
             Self::Failed => "Failed",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_lines_too_long_to_draw_are_shortened() {
+        let fine = "short\n\nlines";
+        assert!(matches!(clip_lines(fine), std::borrow::Cow::Borrowed(_)));
+        let long = "é".repeat(MAX_LINE);
+        let clipped = clip_lines(&format!("first\n{long}\nlast")).into_owned();
+        let lines: Vec<&str> = clipped.split('\n').collect();
+        assert_eq!((lines[0], lines[2], lines.len()), ("first", "last", 3));
+        assert!(lines[1].len() < MAX_LINE + 32 && lines[1].ends_with("line cut short"));
     }
 }

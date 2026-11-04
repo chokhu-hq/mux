@@ -825,11 +825,12 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str) {
                 .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     let dark = ui.visuals().dark_mode;
-                    let colored = (code.len() <= MAX_COLORED).then(|| {
+                    let shown = mux_core::clip_lines(code);
+                    let colored = (shown.len() <= MAX_COLORED).then(|| {
                         ui.memory_mut(|m| {
                             m.caches
                                 .cache::<ColoredCode>()
-                                .get((code, lang, p, dark))
+                                .get((&*shown, lang, p, dark))
                                 .clone()
                         })
                     });
@@ -840,7 +841,7 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str) {
                         None => {
                             ui.add(
                                 Label::new(
-                                    RichText::new(code)
+                                    RichText::new(&*shown)
                                         .font(font::mono(text::MONO))
                                         .color(p.text),
                                 )

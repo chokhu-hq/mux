@@ -314,6 +314,14 @@ impl Server {
                 self.agents.insert(*id, (items.clone(), *busy));
                 Some(*id)
             }
+            ServerMsg::AgentTranscriptMore { id, items } => {
+                self.agents
+                    .entry(*id)
+                    .or_default()
+                    .0
+                    .extend(items.iter().cloned());
+                Some(*id)
+            }
             ServerMsg::AgentItem { id, index, item } => {
                 let (items, _) = self.agents.entry(*id).or_default();
                 if *index < items.len() {

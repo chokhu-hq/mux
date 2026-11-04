@@ -392,6 +392,12 @@ impl Sessions {
                     local.rebuild();
                 }
             }
+            ServerMsg::AgentTranscriptMore { id, items } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.transcript.extend(items);
+                    local.rebuild();
+                }
+            }
             ServerMsg::AgentItem { id, index, item } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     match local.transcript.get_mut(index) {

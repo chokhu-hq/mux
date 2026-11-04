@@ -10,6 +10,7 @@ use crate::theme::{self, font, icon, radius, space, text};
 
 const TILE: f32 = 56.0;
 const FILE_WIDTH: f32 = 200.0;
+const SENT_FILE: f32 = 44.0;
 const PREVIEW: Vec2 = vec2(280.0, 200.0);
 
 // the files waiting in the composer, returning the one whose remove button was clicked
@@ -18,17 +19,15 @@ pub fn pending(ui: &mut Ui, paths: &[String]) -> Option<usize> {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(space::SM);
         for (i, path) in paths.iter().enumerate() {
-            let response = ui.push_id(i, |ui| {
-                if is_image(path) {
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::splat(TILE), Sense::hover());
-                    picture(ui, path, rect, true);
-                    response
-                } else {
-                    file(ui, path, TILE)
-                }
-            });
-            if remove_button(ui, &response.inner) {
+            // allocated straight in the row, because a nested ui would never wrap
+            let response = if is_image(path) {
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(TILE), Sense::hover());
+                picture(ui, path, rect, true);
+                response
+            } else {
+                file(ui, path, TILE)
+            };
+            if remove_button(ui, &response) {
                 removed = Some(i);
             }
         }
@@ -38,31 +37,59 @@ pub fn pending(ui: &mut Ui, paths: &[String]) -> Option<usize> {
 
 // what was sent with a message, images as previews and other files as tiles
 pub fn sent(ui: &mut Ui, paths: &[String]) {
-    // wraps onto more rows in a narrow chat instead of spilling past the column's left edge
-    let layout = egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true);
-    ui.with_layout(layout, |ui| {
-        ui.set_max_width(ui.available_width());
+    let images: Vec<String> = paths.iter().filter(|p| is_image(p)).cloned().collect();
+    let width = ui.available_width();
+    let sizes: Vec<Vec2> = paths
+        .iter()
+        .map(|path| {
+            if is_image(path) {
+                fitted(ui, path, PREVIEW.min(vec2(width, PREVIEW.y)))
+            } else {
+                vec2(FILE_WIDTH, SENT_FILE)
+            }
+        })
+        .collect();
+    let widths: Vec<f32> = sizes.iter().map(|size| size.x).collect();
+    ui.scope(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(space::SM);
-        let images: Vec<String> = paths.iter().filter(|p| is_image(p)).cloned().collect();
-        for (i, path) in paths.iter().enumerate().rev() {
-            ui.push_id(i, |ui| {
-                if is_image(path) {
-                    let size = fitted(ui, path, PREVIEW.min(vec2(ui.available_width(), PREVIEW.y)));
-                    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                    picture(ui, path, rect, false);
-                    let response = response
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .tip(mux_core::display_path(path));
-                    if response.clicked() {
-                        let index = images.iter().position(|p| p == path).unwrap_or(0);
-                        ImageViewer::open(ui.ctx(), images.clone(), index);
+        for row in rows(&widths, width, space::SM) {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                for i in row.rev() {
+                    let path = &paths[i];
+                    if is_image(path) {
+                        let (rect, response) = ui.allocate_exact_size(sizes[i], Sense::click());
+                        picture(ui, path, rect, false);
+                        let response = response
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .tip(mux_core::display_path(path));
+                        if response.clicked() {
+                            let index = images.iter().position(|p| p == path).unwrap_or(0);
+                            ImageViewer::open(ui.ctx(), images.clone(), index);
+                        }
+                    } else if file(ui, path, sizes[i].y).clicked() {
+                        open_externally(path);
                     }
-                } else if file(ui, path, 44.0).clicked() {
-                    open_externally(path);
                 }
             });
         }
     });
+}
+
+// splits tiles into rows that fit, so they read in the order they were attached
+fn rows(widths: &[f32], max: f32, gap: f32) -> Vec<std::ops::Range<usize>> {
+    let mut rows = Vec::new();
+    let (mut start, mut used) = (0, 0.0);
+    for (i, width) in widths.iter().enumerate() {
+        if i > start && used + gap + width > max {
+            rows.push(start..i);
+            (start, used) = (i, 0.0);
+        }
+        used += if i > start { gap + width } else { *width };
+    }
+    if start < widths.len() {
+        rows.push(start..widths.len());
+    }
+    rows
 }
 
 // a picture from disk drawn into `rect`, cropped to fill it or fitted inside it
@@ -317,6 +344,7 @@ pub fn open_externally(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::pasted_paths;
+    use super::rows;
 
     #[test]
     fn copied_files_become_paths_and_text_stays_text() {
@@ -331,5 +359,13 @@ mod tests {
         assert_eq!(pasted_paths("fix the bug in /etc/hosts"), None);
         assert_eq!(pasted_paths("/no/such/file"), None);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tiles_fill_each_row_in_order_and_an_oversized_one_gets_its_own() {
+        assert_eq!(rows(&[100.0; 7], 320.0, 10.0), [0..3, 3..6, 6..7]);
+        assert_eq!(rows(&[100.0; 3], 320.0, 10.0), [0..3]);
+        assert_eq!(rows(&[500.0, 100.0], 320.0, 10.0), [0..1, 1..2]);
+        assert!(rows(&[], 320.0, 10.0).is_empty());
     }
 }

@@ -92,7 +92,7 @@ impl FileView {
 
     // a file's changes from a unified diff, scrolled to the first one
     pub fn diff(path: String, unified: &str) -> Self {
-        let (text, diff) = parse_diff(unified);
+        let (text, diff) = parse_diff(&mux_core::clip_lines(unified));
         let first = diff
             .rows
             .iter()
@@ -664,7 +664,8 @@ fn read(path: &str) -> Result<String, String> {
     if bytes.iter().take(8192).any(|&b| b == 0) {
         return Err("This looks like a binary file.".to_owned());
     }
-    String::from_utf8(bytes).map_err(|_| "This file isn't text.".to_owned())
+    let text = String::from_utf8(bytes).map_err(|_| "This file isn't text.".to_owned())?;
+    Ok(mux_core::clip_lines(&text).into_owned())
 }
 
 // where a chat link points: a file and the lines it names, with relative paths taken from the project folder

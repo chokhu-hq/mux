@@ -194,3 +194,41 @@ fn a_crashed_server_takes_its_agents_and_their_helpers_with_it() {
     assert!(!alive(agent), "the agent outlived the server");
     assert!(!alive(helper), "the agent's helper outlived the server");
 }
+
+// bigger than a frame and bigger than the backlog, which used to hang up on the client each time it opened the chat
+#[test]
+fn a_chat_too_big_for_one_frame_still_opens_whole() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    server.say(id, "hello");
+    server.wait_idle();
+    server.crash();
+    let path = server.dir.join(format!("data/agents/{id}.json"));
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let items = saved["items"].as_array_mut().unwrap();
+    let before = items.len();
+    let step = serde_json::json!({ "Tool": {
+        "name": "Read", "detail": "a.txt", "output": "x".repeat(40_000), "status": "Done",
+    }});
+    items.extend(std::iter::repeat_n(step, 1000));
+    items.push(serde_json::json!({ "FileChange": {
+        "changes": [{ "path": "/tmp/a", "diff": "x".repeat(20 * 1024 * 1024) }], "status": "Done",
+    }}));
+    items.push(serde_json::json!({ "Assistant": { "text": "the end" } }));
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+    server.relaunch();
+    server.wait("the whole chat to arrive", |s| {
+        s.assistant_text().iter().any(|text| text == "the end")
+    });
+    assert_eq!(server.items.len(), before + 1002);
+    assert!(
+        matches!(&server.items[before + 1000], AgentItem::Error { message } if message.contains("too big")),
+        "an item too big to send gets a note in its place"
+    );
+    // still connected, and still following what the agent does
+    server.say(id, "hello again");
+    server.wait_idle();
+    assert_eq!(server.errors().len(), 1);
+}

@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 31;
+pub const PROTOCOL: u32 = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -545,6 +545,11 @@ pub enum ServerMsg {
         busy: bool,
         settings: AgentSettings,
         context: Option<ContextUsage>,
+    },
+    // the rest of a transcript too big for one frame, in order
+    AgentTranscriptMore {
+        id: u64,
+        items: Vec<AgentItem>,
     },
     // sets the item at `index`, appending when it is one past the end
     AgentItem {

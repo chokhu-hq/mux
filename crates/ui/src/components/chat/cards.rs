@@ -505,7 +505,11 @@ fn one_line(text: &str) -> (String, usize) {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    (lines.join(" "), lines.len().saturating_sub(1))
+    let joined = lines.join(" ");
+    (
+        mux_core::clip_lines(&joined).into_owned(),
+        lines.len().saturating_sub(1),
+    )
 }
 
 // what the model thought, folded to how long it took, with the thoughts a click away when the cli shares them
@@ -952,7 +956,7 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) -> bool {
                 .text(
                     pos2(rect.left() + space::MD + 16.0, rect.center().y),
                     Align2::LEFT_CENTER,
-                    &line.text,
+                    mux_core::clip_lines(&line.text),
                     mono.clone(),
                     text_color,
                 );

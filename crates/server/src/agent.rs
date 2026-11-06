@@ -3621,4 +3621,42 @@ mod tests {
         ));
         assert_ne!(agent.status(), SessionStatus::Waiting);
     }
+
+    // run with: cargo test -p mux-server --lib --release bench_ -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_saving_a_long_chat() {
+        let mut agent = agent();
+        for turn in 0..200 {
+            agent.items.push(AgentItem::User {
+                text: format!("message {turn}"),
+                attachments: Vec::new(),
+                queued: false,
+                rewind: None,
+                took: None,
+            });
+            for _ in 0..10 {
+                agent.items.push(AgentItem::Command {
+                    command: "cargo test --workspace".into(),
+                    output: "test result: ok\n".repeat(1600),
+                    exit_code: Some(0),
+                    status: ItemStatus::Done,
+                    background: false,
+                });
+            }
+        }
+        let path = std::env::temp_dir().join(format!("mux-bench-{}.json", std::process::id()));
+        let start = std::time::Instant::now();
+        agent.save(&path).unwrap();
+        let saved = start.elapsed();
+        let size = std::fs::metadata(&path).unwrap().len() / (1024 * 1024);
+        let start = std::time::Instant::now();
+        let loaded = Agent::load(&path);
+        println!(
+            "{size} MB: saving {saved:?}, loading {:?}, {} items",
+            start.elapsed(),
+            loaded.items.len()
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
 }

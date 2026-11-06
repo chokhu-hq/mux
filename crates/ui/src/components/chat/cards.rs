@@ -871,6 +871,7 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) -> bool {
         let name = file
             .file_name()
             .map_or_else(|| diff.path.clone(), |n| n.to_string_lossy().into_owned());
+        let name = mux_core::clip_lines(&name);
         let folder = file
             .parent()
             .map(|d| mux_core::display_path(&d.to_string_lossy()))
@@ -1411,6 +1412,7 @@ pub fn error(ui: &mut Ui, message: &str) -> egui::Response {
 
 // the agent trying again after its model failed to answer, which would otherwise look like it's stuck
 pub fn retry(ui: &mut Ui, reason: &str, attempt: u32, of: Option<u32>, status: ToolStatus) {
+    let reason = mux_core::clip_lines(reason);
     let p = theme::palette(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
     let y = rect.center().y;
@@ -1487,7 +1489,7 @@ pub fn subagent(ui: &mut Ui, agent: &Subagent) -> Option<String> {
             if agent.task.is_empty() {
                 "Subagent".to_owned()
             } else {
-                agent.task.clone()
+                mux_core::clip_lines(&agent.task).into_owned()
             },
             font::medium(text::MD),
             p.text,
@@ -1499,7 +1501,7 @@ pub fn subagent(ui: &mut Ui, agent: &Subagent) -> Option<String> {
         );
         let mut meta = Vec::new();
         if !agent.kind.is_empty() {
-            meta.push(agent.kind.clone());
+            meta.push(mux_core::clip_lines(&agent.kind).into_owned());
         }
         if !agent.steps.is_empty() {
             let n = agent.steps.len();

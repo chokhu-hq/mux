@@ -242,6 +242,7 @@ pub fn question(
 
 // one option row, a round mark for a single pick and a square one for several
 fn choice(ui: &mut Ui, index: usize, label: &str, detail: &str, on: bool, multiple: bool) -> bool {
+    let label = mux_core::clip_lines(label);
     let p = theme::palette(ui);
     let height = if detail.is_empty() { 34.0 } else { 46.0 };
     let (rect, response) =

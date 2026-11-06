@@ -660,11 +660,17 @@ fn layout(p: &Palette, run: &Run, size: f32, bold: bool) -> (LayoutJob, Vec<Link
 
 // one label, where the character under the pointer decides which link is hovered or clicked
 fn text_with_links(ui: &mut Ui, mut job: LayoutJob, links: &[Link], wrap: bool) -> Option<String> {
-    job.wrap.max_width = if wrap {
-        ui.available_width()
+    if wrap {
+        job.wrap.max_width = ui.available_width();
     } else {
-        f32::INFINITY
-    };
+        // wide enough for any real cell, and stops there, since a row without an end is drawn whole
+        job.wrap = egui::text::TextWrapping {
+            max_width: 8000.0,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+    }
     // egui's own text backgrounds are square, so code gets its background painted here with rounded corners
     let code_fill = job
         .sections

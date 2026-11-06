@@ -22,6 +22,7 @@ use crate::theme::{self, space};
 
 const MAX_WIDTH: f32 = 720.0;
 
+#[derive(Debug)]
 pub enum ChatItem {
     User {
         text: String,
@@ -71,6 +72,7 @@ pub enum ChatItem {
     Thinking,
 }
 
+#[derive(Debug)]
 pub struct Changes {
     pub files: usize,
     pub added: usize,
@@ -80,6 +82,7 @@ pub struct Changes {
 }
 
 // a helper agent the main one started, with its own tool calls and final report
+#[derive(Debug)]
 pub struct Subagent {
     // the agent cli it runs in, whose mark it wears
     pub provider: mux_core::Provider,
@@ -94,6 +97,7 @@ pub struct Subagent {
     pub tokens: u64,
 }
 
+#[derive(Debug)]
 pub struct ToolCall {
     pub kind: ToolKind,
     pub target: String,
@@ -118,11 +122,13 @@ pub enum ToolStatus {
     Failed,
 }
 
+#[derive(Debug)]
 pub struct FileDiff {
     pub path: String,
     pub lines: Vec<DiffLine>,
 }
 
+#[derive(Debug)]
 pub struct DiffLine {
     pub kind: DiffKind,
     pub text: String,
@@ -135,6 +141,7 @@ pub enum DiffKind {
     Context,
 }
 
+#[derive(Debug)]
 pub struct PermissionRequest {
     pub title: String,
     pub detail: Option<String>,
@@ -914,5 +921,294 @@ mod tests {
             "Working",
             "a running turn has no length yet"
         );
+    }
+
+    // how many vertices a chat needs drawn, which has to fit the gpu's 256 MB buffer at 20 bytes each
+    fn vertices(
+        items: &[ChatItem],
+        queue: &[mux_core::protocol::Queued],
+        background: &[mux_core::protocol::Background],
+    ) -> usize {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1400.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut most = 0;
+        // the first frames only measure, and animations and images settle over the ones after
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(input(), |ui| {
+                let mut draft = String::new();
+                ChatView::new(items, &mut draft)
+                    .queue(queue, false)
+                    .background(background)
+                    .show(ui);
+            });
+            output.textures_delta.clear();
+            let count = ctx
+                .tessellate(output.shapes, output.pixels_per_point)
+                .iter()
+                .map(|primitive| match &primitive.primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum();
+            most = usize::max(most, count);
+        }
+        most
+    }
+
+    // one huge unbroken line in every piece of text an agent controls, which once crashed the app
+    #[test]
+    fn no_text_from_an_agent_can_overflow_the_gpu() {
+        use mux_core::protocol::{
+            Background, BackgroundState, Question, QuestionOption, Queued, TodoStatus, TodoStep,
+        };
+        const LIMIT: usize = 1024 * 1024;
+        let long = "x".repeat(1024 * 1024);
+        let call = |target: &str, output: Option<&str>| ToolCall {
+            kind: ToolKind::Run,
+            target: target.to_owned(),
+            status: ToolStatus::Done,
+            output: output.map(str::to_owned),
+            background: false,
+        };
+        let helper = |task: &str, kind: &str, activity: &str, result: &str, status| {
+            ChatItem::Subagent(Subagent {
+                provider: mux_core::Provider::Claude,
+                task: task.to_owned(),
+                kind: kind.to_owned(),
+                status,
+                background: false,
+                activity: activity.to_owned(),
+                steps: Vec::new(),
+                result: result.to_owned(),
+                tokens: 0,
+            })
+        };
+        let question =
+            |header: &str, question: &str, label: &str, description: &str| ChatItem::Question {
+                questions: vec![Question {
+                    id: "q".into(),
+                    header: header.to_owned(),
+                    question: question.to_owned(),
+                    options: vec![QuestionOption {
+                        label: label.to_owned(),
+                        description: description.to_owned(),
+                    }],
+                    multiple: false,
+                    other: false,
+                }],
+                answers: None,
+            };
+        let permission = |title: &str, detail: &str, decision| {
+            ChatItem::Permission(PermissionRequest {
+                title: title.to_owned(),
+                detail: Some(detail.to_owned()),
+                decision,
+            })
+        };
+        let cases: Vec<(&str, ChatItem)> = vec![
+            ("user", user(&long)),
+            (
+                "attachment",
+                ChatItem::User {
+                    text: "go".into(),
+                    attachments: vec![long.clone()],
+                    queued: false,
+                    took: None,
+                },
+            ),
+            ("reply", reply(&long)),
+            ("code", reply(&format!("```\n{long}\n```"))),
+            ("inline code", reply(&format!("`{long}`"))),
+            ("heading", reply(&format!("# {long}"))),
+            ("list", reply(&format!("- {long}"))),
+            ("quote", reply(&format!("> {long}"))),
+            ("link", reply(&format!("[{long}](https://example.com)"))),
+            ("table head", reply(&format!("| {long} |\n|---|\n| b |"))),
+            ("table cell", reply(&format!("| a |\n|---|\n| {long} |"))),
+            ("error", ChatItem::Error(long.clone())),
+            (
+                "limit",
+                ChatItem::UsageLimit {
+                    message: long.clone(),
+                    retry_at: None,
+                },
+            ),
+            ("tool", ChatItem::Tool(call(&long, None))),
+            ("tool output", ChatItem::Tool(call("x", Some(&long)))),
+            (
+                "diff",
+                ChatItem::Diff(FileDiff {
+                    path: "a".into(),
+                    lines: vec![DiffLine {
+                        kind: DiffKind::Add,
+                        text: long.clone(),
+                    }],
+                }),
+            ),
+            (
+                "diff path",
+                ChatItem::Diff(FileDiff {
+                    path: long.clone(),
+                    lines: Vec::new(),
+                }),
+            ),
+            ("asking title", permission(&long, "x", None)),
+            ("asking detail", permission("x", &long, None)),
+            (
+                "decided title",
+                permission(&long, "x", Some(Decision::Allow)),
+            ),
+            (
+                "decided detail",
+                permission("x", &long, Some(Decision::Allow)),
+            ),
+            ("helper task", helper(&long, "x", "", "", ToolStatus::Done)),
+            ("helper kind", helper("x", &long, "", "", ToolStatus::Done)),
+            (
+                "helper activity",
+                helper("x", "x", &long, "", ToolStatus::Running),
+            ),
+            (
+                "helper result",
+                helper("x", "x", "", &long, ToolStatus::Done),
+            ),
+            ("question header", question(&long, "x", "x", "x")),
+            ("question", question("x", &long, "x", "x")),
+            ("option", question("x", "x", &long, "x")),
+            ("option text", question("x", "x", "x", &long)),
+            (
+                "plan",
+                ChatItem::Plan {
+                    text: long.clone(),
+                    actionable: true,
+                },
+            ),
+            (
+                "todo",
+                ChatItem::Todos(vec![TodoStep {
+                    text: long.clone(),
+                    status: TodoStatus::Pending,
+                }]),
+            ),
+            (
+                "reasoning",
+                ChatItem::Reasoning {
+                    text: long.clone(),
+                    started: 0,
+                    ended: Some(1),
+                },
+            ),
+            (
+                "retry",
+                ChatItem::Retry {
+                    reason: long.clone(),
+                    attempt: 1,
+                    of: None,
+                    status: ToolStatus::Running,
+                },
+            ),
+        ];
+        let mut over = Vec::new();
+        for (name, item) in cases {
+            let items = vec![user("go"), item];
+            let count = vertices(&items, &[], &[]);
+            if count > LIMIT {
+                over.push(format!("{name}: {count}"));
+            }
+        }
+        let queued = [Queued {
+            text: long.clone(),
+            attachments: Vec::new(),
+        }];
+        let count = vertices(&[user("go")], &queued, &[]);
+        if count > LIMIT {
+            over.push(format!("queued message: {count}"));
+        }
+        let task = |label: &str, command: &str| Background {
+            id: "b".into(),
+            label: label.to_owned(),
+            command: command.to_owned(),
+            started: 0,
+            state: BackgroundState::Running,
+            output: String::new(),
+            stoppable: false,
+        };
+        for (name, task) in [
+            ("task label", task(&long, "x")),
+            ("task command", task("x", &long)),
+        ] {
+            let count = vertices(&[user("go")], &[], &[task]);
+            if count > LIMIT {
+                over.push(format!("{name}: {count}"));
+            }
+        }
+        assert!(over.is_empty(), "too many vertices to draw: {over:#?}");
+    }
+
+    // run with: cargo test -p mux-ui --release bench_ -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_drawing_a_long_chat() {
+        let mut items = Vec::new();
+        for turn in 0..200 {
+            items.push(user(&format!("message {turn}")));
+            for _ in 0..10 {
+                items.push(ChatItem::Tool(ToolCall {
+                    kind: ToolKind::Run,
+                    target: "cargo test --workspace".into(),
+                    status: ToolStatus::Done,
+                    output: Some("test result: ok\n".repeat(1600)),
+                    background: false,
+                }));
+            }
+            items.push(ChatItem::Diff(FileDiff {
+                path: "/tmp/src/lib.rs".into(),
+                lines: (0..200)
+                    .map(|_| DiffLine {
+                        kind: DiffKind::Add,
+                        text: "let a = 1;".into(),
+                    })
+                    .collect(),
+            }));
+            items.push(reply(
+                &"Fixed it. Here's **what** changed:\n\n- one\n- two\n\n".repeat(20),
+            ));
+        }
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1400.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut draft = String::new();
+        let mut frame = |label: &str| {
+            let start = std::time::Instant::now();
+            let mut output = ctx.run_ui(input(), |ui| {
+                ChatView::new(&items, &mut draft).show(ui);
+            });
+            let laid_out = start.elapsed();
+            output.textures_delta.clear();
+            let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
+            println!(
+                "{label}: {laid_out:?} to lay out, {:?} in all, {} meshes",
+                start.elapsed(),
+                meshes.len()
+            );
+        };
+        frame("first frame");
+        frame("second frame");
+        for _ in 0..3 {
+            frame("settled frame");
+        }
     }
 }

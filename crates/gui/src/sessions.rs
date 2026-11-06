@@ -45,6 +45,7 @@ pub struct Local {
     // files picked or dropped for the next message
     pub attachments: Vec<String>,
     transcript: Vec<AgentItem>,
+    settled: Settled,
     pub chat: Vec<ChatItem>,
     // which approval each chat item answers, so a click can be sent back to the right one
     pub approvals: Vec<Option<u64>>,
@@ -58,9 +59,86 @@ impl Local {
 
     // rebuilt only when the transcript changes, not every frame
     fn rebuild(&mut self) {
-        (self.chat, self.approvals) =
-            chat_items(&self.transcript, self.busy, self.settings.provider);
+        self.settled = Settled::default();
+        self.rebuild_latest();
     }
+
+    // a change at this place in the transcript, which often leaves everything before the latest message alone
+    fn changed(&mut self, index: usize) {
+        if index < self.settled.transcript {
+            self.rebuild();
+        } else {
+            self.rebuild_latest();
+        }
+    }
+
+    fn rebuild_latest(&mut self) {
+        let Settled {
+            transcript: from,
+            chat: at,
+            waiting,
+        } = self.settled;
+        self.chat.truncate(at);
+        self.approvals.truncate(at);
+        let (items, approvals) = chat_items_from(
+            &self.transcript,
+            &self.settled,
+            self.busy,
+            self.settings.provider,
+        );
+        self.chat.extend(items);
+        self.approvals.extend(approvals);
+        let is_message = |item: &AgentItem| matches!(item, AgentItem::User { .. });
+        if let Some(message) = self.transcript[from..].iter().rposition(is_message)
+            && let Some(shown) = self.chat[at..]
+                .iter()
+                .rposition(|item| matches!(item, ChatItem::User { .. }))
+        {
+            self.settled = Settled {
+                transcript: from + message,
+                chat: at + shown,
+                waiting: waiting || self.chat[at..at + shown].iter().any(asks_for_a_decision),
+            };
+        }
+    }
+
+    // adds streamed text to the reply at the end of the chat, if that's what the chat shows last
+    fn append_in_place(&mut self, index: usize, piece: &str) -> bool {
+        if index + 1 != self.transcript.len() {
+            return false;
+        }
+        let Some(current) = self.transcript[index].streamed_text() else {
+            return false;
+        };
+        let last = self
+            .chat
+            .iter_mut()
+            .rev()
+            .find(|item| !matches!(item, ChatItem::Thinking));
+        let (Some(ChatItem::Assistant(shown)) | Some(ChatItem::Reasoning { text: shown, .. })) =
+            last
+        else {
+            return false;
+        };
+        if shown.as_str() != &current[..current.len() - piece.len()] {
+            return false;
+        }
+        shown.push_str(piece);
+        true
+    }
+}
+
+// how much of the chat was built for good: everything before the latest message, which is done with
+#[derive(Default)]
+struct Settled {
+    transcript: usize,
+    chat: usize,
+    // whether any of it still waits on a decision, which keeps the agent from showing as thinking
+    waiting: bool,
+}
+
+fn asks_for_a_decision(item: &ChatItem) -> bool {
+    matches!(item, ChatItem::Permission(request) if request.decision.is_none())
 }
 
 struct Drag {
@@ -395,7 +473,7 @@ impl Sessions {
             ServerMsg::AgentTranscriptMore { id, items } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.transcript.extend(items);
-                    local.rebuild();
+                    local.rebuild_latest();
                 }
             }
             ServerMsg::AgentItem { id, index, item } => {
@@ -404,7 +482,7 @@ impl Sessions {
                         Some(slot) => *slot = item,
                         None => local.transcript.push(item),
                     }
-                    local.rebuild();
+                    local.changed(index);
                 }
             }
             ServerMsg::AgentAppend {
@@ -422,7 +500,9 @@ impl Sessions {
                     // text already there came with a full copy of the item sent after this was queued
                     if current.len() == at {
                         current.push_str(&text);
-                        local.rebuild();
+                        if !local.append_in_place(index, &text) {
+                            local.changed(index);
+                        }
                     } else if current.len() < at {
                         log::warn!(
                             "missed streamed text in session {id}, it'll catch up when the item finishes"
@@ -475,7 +555,7 @@ impl Sessions {
             ServerMsg::AgentBusy { id, busy } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.busy = busy;
-                    local.rebuild();
+                    local.rebuild_latest();
                 }
             }
         }
@@ -1202,8 +1282,19 @@ fn ago(updated: u64) -> String {
     }
 }
 
+#[cfg(test)]
 fn chat_items(
     transcript: &[AgentItem],
+    busy: bool,
+    provider: Provider,
+) -> (Vec<ChatItem>, Vec<Option<u64>>) {
+    chat_items_from(transcript, &Settled::default(), busy, provider)
+}
+
+// the chat items for what comes after the settled part of the transcript
+fn chat_items_from(
+    transcript: &[AgentItem],
+    settled: &Settled,
     busy: bool,
     provider: Provider,
 ) -> (Vec<ChatItem>, Vec<Option<u64>>) {
@@ -1214,7 +1305,7 @@ fn chat_items(
             AgentItem::Error { message } if message.starts_with("Mux will carry on by itself ")
         )
     };
-    for (position, entry) in transcript.iter().enumerate() {
+    for (position, entry) in transcript.iter().enumerate().skip(settled.transcript) {
         let mut approval = None;
         // older servers saved one limit event as a reply followed by two errors
         if let AgentItem::Assistant { text } = entry
@@ -1412,8 +1503,8 @@ fn chat_items(
         approvals.push(approval);
     }
     approvals.resize(items.len(), None);
-    let (mut items, approvals) = summarise_changes(items, approvals, busy);
-    chat::set_thinking(&mut items, busy);
+    let (mut items, approvals) = summarise_changes(items, approvals, busy, settled.chat);
+    chat::set_thinking(&mut items, busy && !settled.waiting);
     (items, approvals)
 }
 
@@ -1422,6 +1513,8 @@ fn summarise_changes(
     items: Vec<ChatItem>,
     approvals: Vec<Option<u64>>,
     busy: bool,
+    // where these items start in the chat, since a summary points at its first edit card
+    offset: usize,
 ) -> (Vec<ChatItem>, Vec<Option<u64>>) {
     let mut out = Vec::with_capacity(items.len());
     let mut out_approvals = Vec::with_capacity(items.len());
@@ -1449,7 +1542,7 @@ fn summarise_changes(
         if let ChatItem::Diff(diff) = &item {
             let count = |kind| diff.lines.iter().filter(|l| l.kind == kind).count();
             let (add, remove) = (count(chat::DiffKind::Add), count(chat::DiffKind::Remove));
-            let entry = turn.get_or_insert_with(|| (out.len(), Vec::new(), 0, 0));
+            let entry = turn.get_or_insert_with(|| (offset + out.len(), Vec::new(), 0, 0));
             if !entry.1.contains(&diff.path) {
                 entry.1.push(diff.path.clone());
             }
@@ -1979,5 +2072,245 @@ mod tests {
             panic!()
         };
         assert_eq!(second.lines[0].kind, DiffKind::Add);
+    }
+
+    // a long chat: 200 turns of ten capped tool outputs, an edit and a reply, about 50 MB
+    fn big_chat(turns: usize) -> Vec<AgentItem> {
+        let mut items = Vec::new();
+        for turn in 0..turns {
+            items.push(AgentItem::User {
+                text: format!("message {turn}"),
+                attachments: Vec::new(),
+                queued: false,
+                rewind: None,
+                took: None,
+            });
+            for _ in 0..10 {
+                items.push(AgentItem::Command {
+                    command: "cargo test --workspace".into(),
+                    output: "test result: ok\n".repeat(1600),
+                    exit_code: Some(0),
+                    status: ItemStatus::Done,
+                    background: false,
+                });
+            }
+            items.push(AgentItem::FileChange {
+                changes: vec![wire::FileChange {
+                    path: "/tmp/src/lib.rs".into(),
+                    diff: "@@ -1 +1 @@\n".to_owned() + &"+let a = 1;\n".repeat(200),
+                }],
+                status: ItemStatus::Done,
+            });
+            items.push(AgentItem::Assistant {
+                text: "Fixed it. Here's **what** changed:\n\n- one\n- two\n\n".repeat(20),
+            });
+        }
+        items
+    }
+
+    // run with: cargo test -p mux-gui --release bench_ -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_updates_in_a_long_chat() {
+        let id = 5;
+        let mut sessions = Sessions::default();
+        sessions.locals.insert(id, Local::default());
+        let items = big_chat(200);
+        let size: usize = items
+            .iter()
+            .map(|item| mux_core::protocol::encode(item).unwrap().len())
+            .sum();
+        let start = std::time::Instant::now();
+        sessions.apply(ServerMsg::AgentTranscript {
+            id,
+            items,
+            busy: true,
+            settings: AgentSettings::default(),
+            context: None,
+        });
+        println!("opening {} MB: {:?}", size / (1024 * 1024), start.elapsed());
+        let start = std::time::Instant::now();
+        let last = sessions.locals[&id].transcript.len() - 1;
+        let mut at = match &sessions.locals[&id].transcript[last] {
+            AgentItem::Assistant { text } => text.len(),
+            _ => unreachable!(),
+        };
+        for _ in 0..100 {
+            sessions.apply(ServerMsg::AgentAppend {
+                id,
+                index: last,
+                at,
+                text: "word ".into(),
+            });
+            at += 5;
+        }
+        println!("a piece of streamed text: {:?}", start.elapsed() / 100);
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            sessions.apply(ServerMsg::AgentItem {
+                id,
+                index: last + 1,
+                item: AgentItem::Command {
+                    command: "ls".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::Running,
+                    background: false,
+                },
+            });
+        }
+        println!("a new tool call: {:?}", start.elapsed() / 20);
+
+        // one long turn, where there's no earlier message to stop at
+        let mut items = big_chat(200);
+        items.retain(|item| !matches!(item, AgentItem::User { .. }));
+        items.insert(0, big_chat(1).remove(0));
+        items.push(AgentItem::Assistant { text: "Hi".into() });
+        let last = items.len() - 1;
+        sessions.apply(ServerMsg::AgentTranscript {
+            id,
+            items,
+            busy: true,
+            settings: AgentSettings::default(),
+            context: None,
+        });
+        let start = std::time::Instant::now();
+        for i in 0..100 {
+            sessions.apply(ServerMsg::AgentAppend {
+                id,
+                index: last,
+                at: 2 + i * 5,
+                text: "word ".into(),
+            });
+        }
+        println!(
+            "streamed text in one long turn: {:?}",
+            start.elapsed() / 100
+        );
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            sessions.apply(ServerMsg::AgentItem {
+                id,
+                index: last + 1,
+                item: AgentItem::Command {
+                    command: "ls".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::Running,
+                    background: false,
+                },
+            });
+        }
+        println!(
+            "a new tool call in one long turn: {:?}",
+            start.elapsed() / 20
+        );
+    }
+
+    // redoing only the latest turn has to end up exactly where building the whole chat does
+    #[test]
+    fn updating_the_latest_turn_matches_building_the_whole_chat() {
+        let user = |queued| AgentItem::User {
+            text: "go".into(),
+            attachments: Vec::new(),
+            queued,
+            rewind: None,
+            took: None,
+        };
+        let edit = |path: &str| AgentItem::FileChange {
+            changes: vec![wire::FileChange {
+                path: path.into(),
+                diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+            }],
+            status: ItemStatus::Done,
+        };
+        let kinds = |pick: u64| match pick % 11 {
+            0 | 1 => user(pick % 22 == 1),
+            2 => AgentItem::Assistant {
+                text: String::new(),
+            },
+            3 => AgentItem::Assistant {
+                text: "done".into(),
+            },
+            4 => AgentItem::Reasoning {
+                text: "hm".into(),
+                started: 1,
+                ended: None,
+            },
+            5 => edit("a"),
+            6 => edit("b"),
+            7 => AgentItem::Plan {
+                text: "plan".into(),
+            },
+            8 => AgentItem::UsageLimit {
+                message: "limit".into(),
+                retry_at: Some(9),
+            },
+            9 => AgentItem::Approval {
+                id: pick,
+                title: "ok?".into(),
+                detail: String::new(),
+                decision: pick.is_multiple_of(2).then_some(wire::Decision::Allow),
+            },
+            _ => AgentItem::Error {
+                message: "oops".into(),
+            },
+        };
+        let mut sessions = Sessions::default();
+        sessions.locals.insert(1, Local::default());
+        let mut seed = 7u64;
+        let mut roll = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        for _ in 0..3000 {
+            let (pick, len) = (roll(), sessions.locals[&1].transcript.len());
+            let msg = match roll() % 10 {
+                // a change to something already there, sometimes well before the latest message
+                0 | 1 if len > 0 => ServerMsg::AgentItem {
+                    id: 1,
+                    index: roll() as usize % len,
+                    item: kinds(pick),
+                },
+                2 => ServerMsg::AgentBusy {
+                    id: 1,
+                    busy: pick.is_multiple_of(2),
+                },
+                3 | 4 if len > 0 => {
+                    let index = if pick.is_multiple_of(4) {
+                        roll() as usize % len
+                    } else {
+                        len - 1
+                    };
+                    let mut item = sessions.locals[&1].transcript[index].clone();
+                    match item.streamed_text() {
+                        Some(text) => ServerMsg::AgentAppend {
+                            id: 1,
+                            index,
+                            at: text.len(),
+                            text: if pick.is_multiple_of(3) {
+                                " ".into()
+                            } else {
+                                "word".into()
+                            },
+                        },
+                        None => ServerMsg::AgentBusy { id: 1, busy: true },
+                    }
+                }
+                _ => ServerMsg::AgentItem {
+                    id: 1,
+                    index: len,
+                    item: kinds(pick),
+                },
+            };
+            sessions.apply(msg);
+            let local = &sessions.locals[&1];
+            let (whole, approvals) =
+                chat_items(&local.transcript, local.busy, local.settings.provider);
+            assert_eq!(format!("{:?}", local.chat), format!("{whole:?}"));
+            assert_eq!(local.approvals, approvals);
+        }
     }
 }

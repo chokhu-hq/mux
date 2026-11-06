@@ -2556,6 +2556,7 @@ impl eframe::App for App {
                 backdrop::set_dark(frame, dark);
                 self.told_dark = Some(dark);
             }
+            backdrop::keep_caption_buttons_away(frame, blurred);
         }
         #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         let blurred = {
@@ -2700,6 +2701,7 @@ fn agent_chat(
         first_diff.is_some(),
     );
     let action = ChatView::new(&local.chat, &mut local.draft)
+        .session(id)
         .commands(&commands)
         .queue(&local.queue, local.held)
         .background(&local.background)

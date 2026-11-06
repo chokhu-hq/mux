@@ -12,7 +12,7 @@ const LINE_HEIGHT: f32 = 22.0;
 
 // renders an agent's markdown, returning the target of a file link that was clicked
 pub fn markdown(ui: &mut Ui, source: &str) -> Option<String> {
-    let blocks = parse(source);
+    let blocks = ui.memory_mut(|m| m.caches.cache::<ParsedMarkdown>().get(source).clone());
     let mut clicked = None;
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = space::SM;
@@ -786,6 +786,18 @@ impl egui::cache::ComputerMut<(&str, &str, &Palette, bool), Option<egui::text::L
         crate::highlight::colorize(code, lang, p, dark, font::mono(text::MONO))
     }
 }
+
+#[derive(Default)]
+struct MarkdownParser;
+
+impl egui::cache::ComputerMut<&str, std::sync::Arc<Vec<Block>>> for MarkdownParser {
+    fn compute(&mut self, source: &str) -> std::sync::Arc<Vec<Block>> {
+        std::sync::Arc::new(parse(source))
+    }
+}
+
+// parsed once while on screen, since a long reply is slow to read again every frame
+type ParsedMarkdown = egui::cache::FrameCache<std::sync::Arc<Vec<Block>>, MarkdownParser>;
 
 // coloured blocks are kept while they're on screen, so each is coloured once rather than every frame
 type ColoredCode = egui::cache::FrameCache<Option<egui::text::LayoutJob>, Colorizer>;

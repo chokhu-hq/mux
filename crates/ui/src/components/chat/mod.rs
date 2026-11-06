@@ -193,6 +193,7 @@ pub struct ResetOffer {
 }
 
 pub struct ChatView<'a> {
+    session: u64,
     reset: Option<ResetOffer>,
     items: &'a [ChatItem],
     draft: &'a mut String,
@@ -213,6 +214,7 @@ impl<'a> ChatView<'a> {
             reset: None,
             items,
             draft,
+            session: 0,
             running: false,
             controls: None,
             context: None,
@@ -223,6 +225,12 @@ impl<'a> ChatView<'a> {
             held: false,
             background: &[],
         }
+    }
+
+    // keeps each session's scroll position, open steps and measured heights its own
+    pub fn session(mut self, session: u64) -> Self {
+        self.session = session;
+        self
     }
 
     // commands the agent left running, shown above the composer
@@ -344,7 +352,11 @@ impl<'a> ChatView<'a> {
         }
         let list = Rect::from_min_max(rect.min, pos2(rect.max.x, composer.top() - space::SM));
 
-        let mut list_ui = ui.new_child(UiBuilder::new().max_rect(list));
+        let mut list_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("chat-list", self.session))
+                .max_rect(list),
+        );
         list_ui.set_clip_rect(list.intersect(ui.clip_rect()));
         drop_overlay(ui, rect, self.dropping);
         if self.items.is_empty() {
@@ -372,6 +384,9 @@ impl<'a> ChatView<'a> {
                         let items = self.items;
                         let running = self.running;
                         let reset = self.reset.as_ref();
+                        let show_items = |ui: &mut Ui, indices: &[usize]| {
+                            show_items(ui, items, indices, running, turns, reset)
+                        };
                         let mut plain = Vec::new();
                         let mut i = 0;
                         while i < items.len() {
@@ -382,39 +397,30 @@ impl<'a> ChatView<'a> {
                                 i += 1;
                                 continue;
                             };
-                            take(
-                                &mut action,
-                                show_items(ui, items, &plain, running, turns, reset),
-                            );
+                            take(&mut action, show_items(ui, &plain));
                             plain.clear();
                             // a turn's steps fold behind one line once it's done, open while it runs
-                            ui.push_id(("turn", i), |ui| {
-                                let id = ui.make_persistent_id("fold");
-                                let work: Vec<&ChatItem> =
-                                    turn.work.iter().map(|&w| &items[w]).collect();
-                                let took = match &items[i] {
-                                    ChatItem::User { took, .. } => *took,
-                                    _ => None,
-                                };
-                                let label = cards::turn_summary(&work, turn.live, took);
-                                let (_, open) =
-                                    cards::summary_row(ui, id, turn.live, turn.live, &label);
-                                crate::components::reveal(ui, id.with("steps"), open, |ui| {
-                                    let shown =
-                                        show_items(ui, items, &turn.work, running, turns, reset);
-                                    take(&mut action, shown);
+                            lazy(ui, ("turn", i), |ui| {
+                                ui.push_id(("turn", i), |ui| {
+                                    let id = ui.make_persistent_id("fold");
+                                    let work: Vec<&ChatItem> =
+                                        turn.work.iter().map(|&w| &items[w]).collect();
+                                    let took = match &items[i] {
+                                        ChatItem::User { took, .. } => *took,
+                                        _ => None,
+                                    };
+                                    let label = cards::turn_summary(&work, turn.live, took);
+                                    let (_, open) =
+                                        cards::summary_row(ui, id, turn.live, turn.live, &label);
+                                    crate::components::reveal(ui, id.with("steps"), open, |ui| {
+                                        take(&mut action, show_items(ui, &turn.work));
+                                    });
                                 });
                             });
-                            take(
-                                &mut action,
-                                show_items(ui, items, &turn.kept, running, turns, reset),
-                            );
+                            take(&mut action, show_items(ui, &turn.kept));
                             i = turn.end;
                         }
-                        take(
-                            &mut action,
-                            show_items(ui, items, &plain, running, turns, reset),
-                        );
+                        take(&mut action, show_items(ui, &plain));
                         ui.add_space(space::SM);
                     });
                 });
@@ -491,6 +497,33 @@ fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Measured {
+    width: f32,
+    height: f32,
+}
+
+// draws a part of the chat only when it's near the screen and otherwise just keeps its room,
+// because a long chat would spend every frame on what nobody can see
+fn lazy(ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut Ui)) {
+    let id = ui.scope_id().with(("lazy", key));
+    let width = ui.available_width();
+    let top = ui.cursor().top();
+    let clip = ui.clip_rect();
+    let near = clip.expand2(egui::vec2(0.0, clip.height()));
+    let known = ui
+        .data(|d| d.get_temp::<Measured>(id))
+        .filter(|m| m.width == width);
+    if let Some(known) = known.filter(|m| top + m.height < near.top() || top > near.bottom()) {
+        ui.add_space(known.height);
+        return;
+    }
+    // egui numbers widgets by what came before them, and what came before may be skipped next frame
+    ui.scope_builder(UiBuilder::new().scope_id(id), add);
+    let height = ui.cursor().top() - top;
+    ui.data_mut(|d| d.insert_temp(id, Measured { width, height }));
+}
+
 // the items at `indices` in order, with runs of tool calls among them grouped
 fn show_items(
     ui: &mut Ui,
@@ -510,16 +543,20 @@ fn show_items(
             .iter()
             .filter(|s| matches!(s, ChatItem::Tool(_)))
             .count();
+        let index = indices[k];
         if tools > 1 {
-            ui.push_id(indices[k], |ui| cards::activity(ui, &steps));
+            lazy(ui, index, |ui| {
+                ui.push_id(index, |ui| cards::activity(ui, &steps));
+            });
             k += steps.len();
             continue;
         }
-        let index = indices[k];
-        let shown = ui.push_id(index, |ui| {
-            show_item(ui, picked[k], index, running, turns, reset)
+        lazy(ui, index, |ui| {
+            let shown = ui.push_id(index, |ui| {
+                show_item(ui, picked[k], index, running, turns, reset)
+            });
+            take(&mut action, shown.inner);
         });
-        take(&mut action, shown.inner);
         k += 1;
     }
     action
@@ -1153,6 +1190,267 @@ mod tests {
     }
 
     // run with: cargo test -p mux-ui --release bench_ -- --ignored --nocapture
+    // a chat with folded turns, loose steps and replies of very different heights
+    fn mixed_chat(turns: usize, salt: usize) -> Vec<ChatItem> {
+        let mut items = Vec::new();
+        for turn in 0..turns {
+            items.push(user(&format!("message {salt} {turn}")));
+            if turn % 3 != 2 {
+                for step in 0..3 {
+                    items.push(ChatItem::Tool(ToolCall {
+                        kind: ToolKind::Run,
+                        target: format!("step {salt} {turn} {step}"),
+                        status: ToolStatus::Done,
+                        output: Some("line\n".repeat(20)),
+                        background: false,
+                    }));
+                }
+            }
+            items.push(reply(
+                &format!("Reply {salt} {turn}. **Done** with `code`, and enough words after that to wrap differently once the window gets narrower than it was before.\n\n")
+                    .repeat(1 + (turn + salt) % 9),
+            ));
+        }
+        items
+    }
+
+    struct Window {
+        ctx: egui::Context,
+        size: egui::Vec2,
+        time: f64,
+        session: u64,
+    }
+
+    impl Window {
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            Self {
+                ctx,
+                size: egui::vec2(1400.0, 900.0),
+                time: 0.0,
+                session: 0,
+            }
+        }
+
+        // the words on screen and where they are, and how many were drawn anywhere
+        fn frame(
+            &mut self,
+            items: &[ChatItem],
+            events: Vec<egui::Event>,
+        ) -> (Vec<(i32, i32, String)>, usize) {
+            self.time += 1.0 / 60.0;
+            let screen = Rect::from_min_size(pos2(0.0, 0.0), self.size);
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(self.time),
+                predicted_dt: 1.0 / 60.0,
+                events,
+                ..Default::default()
+            };
+            let mut draft = String::new();
+            let session = self.session;
+            let mut output = self.ctx.run_ui(input, |ui| {
+                ChatView::new(items, &mut draft).session(session).show(ui);
+            });
+            output.textures_delta.clear();
+            let mut seen = Vec::new();
+            let mut drawn = 0;
+            for clipped in &output.shapes {
+                let egui::Shape::Text(text) = &clipped.shape else {
+                    continue;
+                };
+                drawn += 1;
+                let rect = text.visual_bounding_rect().intersect(clipped.clip_rect);
+                if rect.is_positive() && rect.intersects(screen) {
+                    seen.push((
+                        (text.pos.x * 4.0) as i32,
+                        (text.pos.y * 4.0) as i32,
+                        text.galley.job.text.clone(),
+                    ));
+                }
+            }
+            seen.sort();
+            (seen, drawn)
+        }
+
+        fn settle(&mut self, items: &[ChatItem]) -> (Vec<(i32, i32, String)>, usize) {
+            for _ in 0..90 {
+                self.frame(items, Vec::new());
+            }
+            self.frame(items, Vec::new())
+        }
+
+        fn scroll(&mut self, items: &[ChatItem], by: f32) -> (Vec<(i32, i32, String)>, usize) {
+            let events = vec![
+                egui::Event::PointerMoved(pos2(self.size.x / 2.0, 300.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, by),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers: Default::default(),
+                },
+            ];
+            self.frame(items, events);
+            self.settle(items)
+        }
+
+        // what the same frame looks like with every part of the chat drawn
+        fn drawn_in_full(&mut self, items: &[ChatItem]) -> (Vec<(i32, i32, String)>, usize) {
+            self.ctx.data_mut(|d| d.remove_by_type::<Measured>());
+            self.frame(items, Vec::new())
+        }
+
+        fn click(&mut self, items: &[ChatItem], at: egui::Pos2) {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            self.frame(items, vec![egui::Event::PointerMoved(at)]);
+            self.frame(items, vec![button(true)]);
+            self.frame(items, vec![button(false)]);
+        }
+    }
+
+    #[test]
+    fn skipping_what_is_off_screen_changes_nothing_on_screen() {
+        let items = mixed_chat(120, 0);
+        let mut window = Window::new();
+        let (bottom, _) = window.settle(&items);
+        let mut skipped = 0;
+        let mut views = vec![bottom];
+        // far enough to pass through the whole chat in both directions
+        for by in [
+            700.0, 2500.0, 6000.0, 400.0, 90000.0, -3000.0, -500.0, -90000.0, 2000.0,
+        ] {
+            let (lazily, drawn) = window.scroll(&items, by);
+            let (fully, all) = window.drawn_in_full(&items);
+            assert_eq!(lazily, fully, "after scrolling by {by}");
+            assert!(!lazily.is_empty());
+            if drawn * 2 < all {
+                skipped += 1;
+            }
+            views.push(lazily);
+        }
+        assert!(skipped >= 5, "off-screen parts were drawn anyway");
+        views.dedup();
+        assert!(views.len() >= 6, "the scrolling never moved the chat");
+    }
+
+    #[test]
+    fn opening_a_step_or_resizing_keeps_the_chat_in_place() {
+        let items = mixed_chat(120, 0);
+        let mut window = Window::new();
+        window.settle(&items);
+        let (before, _) = window.scroll(&items, 6000.0);
+        // a turn's fold row, the way a person would open one
+        let label = cards::turn_summary(&[&items[1], &items[2], &items[3]], false, None);
+        let (x, y, _) = before
+            .iter()
+            .find(|(_, _, text)| *text == label)
+            .expect("a folded turn on screen")
+            .clone();
+        window.click(&items, pos2(x as f32 / 4.0 + 4.0, y as f32 / 4.0 + 8.0));
+        let (opened, _) = window.settle(&items);
+        assert_ne!(opened, before, "the click opened nothing");
+        assert_eq!(opened, window.drawn_in_full(&items).0, "after opening");
+        window.settle(&items);
+        window.size = egui::vec2(420.0, 800.0);
+        let (narrow, _) = window.settle(&items);
+        assert_eq!(narrow, window.drawn_in_full(&items).0, "after narrowing");
+        let (scrolled, _) = window.scroll(&items, 3000.0);
+        assert_eq!(
+            scrolled,
+            window.drawn_in_full(&items).0,
+            "scrolled when narrow"
+        );
+    }
+
+    #[test]
+    fn a_reply_growing_off_screen_can_be_scrolled_to_in_one_go() {
+        let mut items = mixed_chat(120, 0);
+        let mut window = Window::new();
+        window.settle(&items);
+        window.scroll(&items, 9000.0);
+        let last = items.len() - 1;
+        for _ in 0..200 {
+            if let ChatItem::Assistant(text) = &mut items[last] {
+                text.push_str("\n\nmore text arriving");
+            }
+            window.frame(&items, Vec::new());
+        }
+        if let ChatItem::Assistant(text) = &mut items[last] {
+            text.push_str("\n\nthe very end");
+        }
+        window.frame(&items, Vec::new());
+        let (bottom, _) = window.scroll(&items, -900000.0);
+        assert!(bottom.iter().any(|(_, _, text)| text == "the very end"));
+        assert_eq!(bottom, window.drawn_in_full(&items).0);
+    }
+
+    #[test]
+    fn each_session_measures_its_own_chat() {
+        let (first, second) = (mixed_chat(120, 0), mixed_chat(120, 4));
+        let mut window = Window::new();
+        window.settle(&first);
+        window.session = 1;
+        window.settle(&second);
+        let (lazily, _) = window.scroll(&second, 6000.0);
+        assert_eq!(lazily, window.drawn_in_full(&second).0);
+        window.session = 0;
+        let (back, _) = window.settle(&first);
+        assert!(back.iter().any(|(_, _, text)| text.contains("Reply 0 ")));
+        assert_eq!(back, window.drawn_in_full(&first).0);
+    }
+
+    #[test]
+    fn a_selection_survives_scrolling_while_it_stays_on_screen() {
+        use egui::text_selection::LabelSelectionState;
+        let items = mixed_chat(120, 0);
+        let mut window = Window::new();
+        window.settle(&items);
+        let (view, _) = window.scroll(&items, 9000.0);
+        // near the top, so scrolling up moves it down the screen and keeps it in view
+        let (x, y, _) = view
+            .iter()
+            .filter(|(_, y, text)| text.starts_with("Reply") && *y > 100 * 4)
+            .min_by_key(|(_, y, _)| *y)
+            .expect("a reply on screen")
+            .clone();
+        let (from, to) = (
+            pos2(x as f32 / 4.0 + 2.0, y as f32 / 4.0 + 8.0),
+            pos2(x as f32 / 4.0 + 90.0, y as f32 / 4.0 + 8.0),
+        );
+        let button = |pressed, pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        window.frame(&items, vec![egui::Event::PointerMoved(from)]);
+        window.frame(&items, vec![button(true, from)]);
+        window.frame(&items, vec![egui::Event::PointerMoved(to)]);
+        window.frame(&items, vec![button(false, to)]);
+        let selected = |window: &Window| {
+            window
+                .ctx
+                .plugin::<LabelSelectionState>()
+                .lock()
+                .has_selection()
+        };
+        assert!(selected(&window), "the drag selected nothing");
+        let mut last = view;
+        for _ in 0..4 {
+            let (moved, _) = window.scroll(&items, 100.0);
+            assert_ne!(moved, last, "the chat didn't scroll");
+            assert!(selected(&window), "scrolling lost the selection");
+            last = moved;
+        }
+    }
+
     #[test]
     #[ignore]
     fn bench_drawing_a_long_chat() {
@@ -1210,5 +1508,25 @@ mod tests {
         for _ in 0..3 {
             frame("settled frame");
         }
+        let mut window = Window::new();
+        window.settle(&items);
+        window.frame(&items, Vec::new());
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..600 {
+            let wheel = vec![
+                egui::Event::PointerMoved(pos2(700.0, 300.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 400.0),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers: Default::default(),
+                },
+            ];
+            let start = std::time::Instant::now();
+            window.frame(&items, wheel);
+            worst = worst.max(start.elapsed());
+        }
+        println!("scrolling: worst frame {worst:?}");
     }
 }

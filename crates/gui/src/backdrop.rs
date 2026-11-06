@@ -78,6 +78,48 @@ pub fn set_dark(window: &impl HasWindowHandle, dark: bool) {
     }
 }
 
+// windows paints its own caption buttons on a stretched frame, showing through wherever mux is see-through.
+// it only does that for windows with a system menu, and winit puts the style back whenever the window's state changes
+#[cfg(windows)]
+pub fn keep_caption_buttons_away(window: &impl HasWindowHandle, frosted: bool) {
+    use raw_window_handle::RawWindowHandle;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_SYSMENU,
+    };
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as _;
+    let stretched =
+        frosted && !std::env::var("MUX_BACKDROP").is_ok_and(|way| way == "blur" || way == "plain");
+    // the handle is the live window winit owns, on the thread that owns it
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        if (style & WS_SYSMENU != 0) != stretched {
+            return;
+        }
+        let style = if stretched {
+            style & !WS_SYSMENU
+        } else {
+            style | WS_SYSMENU
+        };
+        SetWindowLongW(hwnd, GWL_STYLE, style as i32);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        );
+    }
+}
+
 #[cfg(windows)]
 fn extend_frame(window: &impl HasWindowHandle, margin: i32) {
     use raw_window_handle::RawWindowHandle;

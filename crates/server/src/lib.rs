@@ -1285,7 +1285,8 @@ fn git_branch(folder: &str) -> Option<String> {
     let git_dir = if dot_git.is_file() {
         // worktrees and submodules point at their real git directory
         let pointer = std::fs::read_to_string(&dot_git).ok()?;
-        PathBuf::from(pointer.strip_prefix("gitdir:")?.trim())
+        // submodules point there relative to their own folder
+        Path::new(folder).join(pointer.strip_prefix("gitdir:")?.trim())
     } else {
         dot_git
     };

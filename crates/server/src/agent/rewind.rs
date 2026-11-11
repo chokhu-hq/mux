@@ -30,6 +30,7 @@ impl Agent {
         self.sub_steps.retain(|_, (i, _)| *i < index);
         self.tasks.retain(|_, i| *i < index);
         self.child_threads.retain(|_, i| *i < index);
+        self.unlink_background_from(index);
         self.live_text = None;
         self.compacting = None;
         self.todos = None;
@@ -46,10 +47,12 @@ impl Agent {
                     self.resume_at = None;
                 }
             }
+            self.stop_all_background();
             self.process = None;
         } else if self.settings.provider == Provider::OpenCode {
             self.session_id = None;
             self.thread_live = false;
+            self.stop_all_background();
             self.process = None;
         } else {
             match point {

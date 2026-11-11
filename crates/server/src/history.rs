@@ -71,16 +71,18 @@ impl History {
         let mut model = std::mem::take(&mut state.model);
         let mut offset = state.offset;
         let mut reader = BufReader::new(file);
-        let mut line = String::new();
+        let mut bytes = Vec::new();
         let mut found = Vec::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
                 Ok(0) | Err(_) => break,
                 // a line still being written is left for the next scan
-                Ok(_) if !line.ends_with('\n') => break,
+                Ok(_) if !bytes.ends_with(b"\n") => break,
                 Ok(n) => offset += n as u64,
             }
+            // a line that isn't valid utf-8 is read as best it can be, so the scan never stops at it
+            let line = String::from_utf8_lossy(&bytes);
             let record = match provider {
                 Provider::Claude => claude_line(&line),
                 Provider::Codex => codex_line(&line, &mut model),

@@ -232,10 +232,21 @@ pub struct Agent {
 
 impl Agent {
     pub fn load(path: &Path) -> Self {
-        let saved: Saved = fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let saved: Saved = match fs::read(path).map(|bytes| serde_json::from_slice(&bytes)) {
+            Ok(Ok(saved)) => saved,
+            Ok(Err(err)) => {
+                // set aside rather than saved over, since a newer build may have written something this one can't read
+                let backup = path.with_extension(format!("json.bad-{}", crate::store::now()));
+                log::error!(
+                    "{} is unreadable ({err}), moved it to {}",
+                    path.display(),
+                    backup.display()
+                );
+                let _ = fs::rename(path, backup);
+                Saved::default()
+            }
+            Err(_) => Saved::default(),
+        };
         let ids = (saved.thread_id.clone(), saved.session_id.clone());
         let mut items = saved.items;
         // nothing from a previous process is still running or waiting on an answer
@@ -605,15 +616,23 @@ impl Agent {
 
     fn transmit(&mut self, text: String, attachments: Vec<String>, steer: bool) {
         if self.settings.provider == Provider::Claude {
+            let content = claude_content(&text, &attachments, &self.skills());
+            // claude echoes the text as sent, with skills and attachments rewritten, so that's what is matched later
+            let sent = content
+                .as_array()
+                .and_then(|blocks| blocks.last())
+                .and_then(|block| block["text"].as_str())
+                .unwrap_or_default()
+                .to_owned();
             let mut line = json!({
                 "type": "user",
-                "message": { "role": "user", "content": claude_content(&text, &attachments, &self.skills()) }
+                "message": { "role": "user", "content": content }
             });
             // "now" breaks into the reply straight away but aborts a running tool, so it waits for "next" then
             if steer {
                 line["priority"] = json!(if self.tool_running() { "next" } else { "now" });
             }
-            self.claude_waiting.push_back(text);
+            self.claude_waiting.push_back(sent);
             self.claude_sent.push(line.clone());
             self.write(line);
         } else if self.settings.provider == Provider::OpenCode {
@@ -1092,6 +1111,18 @@ impl Agent {
         self.finish_compaction(ItemStatus::Failed);
         self.fail_subagents();
         self.stop_all_background();
+        // nothing the old process was running can finish now, and its ids mean nothing to the next one
+        for (index, item) in self.items.iter_mut().enumerate() {
+            if let AgentItem::Command { status, .. }
+            | AgentItem::Tool { status, .. }
+            | AgentItem::FileChange { status, .. } = item
+                && *status == ItemStatus::Running
+            {
+                *status = ItemStatus::Failed;
+                self.changed.insert(index);
+            }
+        }
+        self.by_codex_id.clear();
         self.set_busy(false);
     }
 
@@ -1874,8 +1905,9 @@ impl Agent {
         }
         // it's reading the conversation, so it was there and nothing needs sending again
         self.claude_sent.clear();
+        // a message of only pictures has no text to find, so it counts as echoed along with the rest
         while let Some(next) = self.claude_waiting.front() {
-            if next.trim().is_empty() || !text.contains(next.trim()) {
+            if !next.trim().is_empty() && !text.contains(next.trim()) {
                 break;
             }
             self.claude_waiting.pop_front();
@@ -2858,6 +2890,12 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i, AgentItem::User { queued: true, .. }))
         );
+        agent.handle(result.clone());
+        assert!(!agent.busy);
+        // a message of only pictures merged after another still counts as picked up
+        agent.claude_waiting = VecDeque::from(["Look at these".to_owned(), String::new()]);
+        agent.handle(echo("Look at these"));
+        assert!(agent.claude_waiting.is_empty());
         agent.handle(result.clone());
         assert!(!agent.busy);
         // a background subagent waking claude up later runs a turn nobody sent, and still ends cleanly

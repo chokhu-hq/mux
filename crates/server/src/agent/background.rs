@@ -26,6 +26,15 @@ pub(super) struct Tracked {
     done: Arc<AtomicBool>,
 }
 
+// a deleted chat's output followers would otherwise read their files for as long as the server runs
+impl Drop for Agent {
+    fn drop(&mut self) {
+        for tracked in &self.background {
+            tracked.done.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 impl Agent {
     fn tracked(&mut self, id: &str) -> &mut Tracked {
         if let Some(at) = self.background.iter().position(|t| t.id == id) {
@@ -281,6 +290,16 @@ impl Agent {
     }
 
     // the agent going away takes whatever it left running with it
+    // a rewind cut the rows these commands showed in, so they stop pointing there before new rows take the spot
+    pub(super) fn unlink_background_from(&mut self, cut: usize) {
+        for tracked in &mut self.background {
+            if tracked.index.is_some_and(|i| i >= cut) {
+                tracked.index = None;
+                self.background_changed = true;
+            }
+        }
+    }
+
     pub(super) fn stop_all_background(&mut self) {
         for tracked in &mut self.background {
             if tracked.state == BackgroundState::Running {

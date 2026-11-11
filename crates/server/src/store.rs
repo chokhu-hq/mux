@@ -27,7 +27,8 @@ impl Store {
                 Ok(store) => store,
                 Err(err) => {
                     // keep the unreadable file around instead of overwriting someone's sessions
-                    let backup = path.with_extension("json.bad");
+                    // stamped, so a second bad file doesn't replace the first
+                    let backup = path.with_extension(format!("json.bad-{}", now()));
                     log::error!(
                         "{} is unreadable ({err}), moved it to {}",
                         path.display(),
@@ -54,6 +55,23 @@ impl Store {
             }
         }
         store.cut_off = cut_off;
+        // ids are never reused, even when the state was lost, since an old chat saved under one would come back
+        let saved = fs::read_dir(path.with_file_name("agents"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                name.strip_suffix(".json")?.parse::<u64>().ok()
+            });
+        let used = store
+            .groups
+            .iter()
+            .flat_map(|g| std::iter::once(g.id).chain(g.sessions.iter().map(|s| s.id)))
+            .chain(saved)
+            .max()
+            .unwrap_or(0);
+        store.next_id = store.next_id.max(used);
         store
     }
 
@@ -285,6 +303,22 @@ mod tests {
         store.delete_group(empty);
         let names: Vec<&str> = store.groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, ["full"]);
+    }
+
+    #[test]
+    fn a_lost_state_never_hands_out_an_id_an_old_chat_was_saved_under() {
+        let dir = std::env::temp_dir().join(format!("mux-store-ids-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(dir.join("agents").join("7.json"), "{}").unwrap();
+        std::fs::write(dir.join("state.json"), "not json").unwrap();
+        let mut store = Store::load(&dir.join("state.json"));
+        assert!(store.create_session(None, "x", SessionKind::Agent) > 7);
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("state.json.bad-")
+        }));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

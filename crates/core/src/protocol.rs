@@ -218,6 +218,16 @@ pub struct McpServer {
     pub transport: McpTransport,
 }
 
+impl McpServer {
+    // codex only takes these characters, and claude puts the name inside its tools' names
+    pub fn valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum McpTransport {
     Stdio {

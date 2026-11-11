@@ -1115,8 +1115,8 @@ impl Agent {
                 self.session_id.as_deref(),
                 self.resume_at.take().as_deref(),
             ));
-            if let Some(config) = crate::mcp::claude(&self.mcp) {
-                command.args(["--mcp-config".to_owned(), config]);
+            if let Some(path) = crate::mcp::claude_file(&self.mcp, session)? {
+                command.arg("--mcp-config").arg(path);
             }
             command
         } else {

@@ -63,9 +63,10 @@ impl Store {
         }
         // write then rename so a crash mid-write never leaves a half written file
         let tmp: PathBuf = path.with_extension("json.tmp");
-        fs::write(
+        // private, because it holds the mcp servers' keys and tokens
+        crate::mcp::write_private(
             &tmp,
-            serde_json::to_vec_pretty(self).map_err(io::Error::other)?,
+            &serde_json::to_vec_pretty(self).map_err(io::Error::other)?,
         )?;
         fs::rename(tmp, path)
     }

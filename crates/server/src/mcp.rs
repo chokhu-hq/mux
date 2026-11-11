@@ -1,5 +1,33 @@
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
 use mux_core::protocol::{McpServer, McpTransport, Question, QuestionOption};
 use serde_json::{Map, Value, json};
+
+// writes a file only its owner can read, since mcp configs carry api keys and tokens
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    // a file made before this only gets its permissions narrowed here
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(bytes)
+}
+
+// claude's servers go in a file rather than on its command line, where any process could read the secrets
+pub fn claude_file(servers: &[McpServer], session: u64) -> io::Result<Option<PathBuf>> {
+    let Some(config) = claude(servers) else {
+        return Ok(None);
+    };
+    let dir = mux_core::protocol::data_dir().join("mcp");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("claude-{session}.json"));
+    write_private(&path, config.as_bytes())?;
+    Ok(Some(path))
+}
 
 fn pairs(list: &[(String, String)]) -> Value {
     Value::Object(
@@ -10,7 +38,9 @@ fn pairs(list: &[(String, String)]) -> Value {
 }
 
 fn enabled(servers: &[McpServer]) -> impl Iterator<Item = &McpServer> {
-    servers.iter().filter(|s| s.enabled && !s.name.is_empty())
+    servers
+        .iter()
+        .filter(|s| s.enabled && McpServer::valid_name(&s.name))
 }
 
 // claude's --mcp-config, or none when there's nothing to add
@@ -220,7 +250,7 @@ mod tests {
         };
         let mut off = stdio("off");
         off.enabled = false;
-        let servers = [stdio("probe"), web, off];
+        let servers = [stdio("probe"), web, off, stdio("bad name")];
         let claude: Value = serde_json::from_str(&super::claude(&servers).unwrap()).unwrap();
         assert_eq!(claude["mcpServers"]["probe"]["env"]["KEY"], "1");
         assert_eq!(claude["mcpServers"]["web"]["type"], "http");
@@ -232,6 +262,22 @@ mod tests {
         assert_eq!(acp[1]["headers"][0]["value"], "Bearer t");
         assert_eq!(acp.as_array().unwrap().len(), 2);
         assert!(super::claude(&[]).is_none() && super::codex(&[]).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_readable_only_by_their_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("mux-private-{}", std::process::id()));
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"secret").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            (mode, std::fs::read_to_string(&path).unwrap().as_str()),
+            (0o600, "secret")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

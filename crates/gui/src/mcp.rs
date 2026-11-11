@@ -26,6 +26,8 @@ struct Draft {
     headers: String,
     paste: String,
     error: String,
+    // a saved server's env and header values stay hidden until the box is clicked
+    hidden: bool,
 }
 
 impl Draft {
@@ -33,6 +35,7 @@ impl Draft {
         let mut draft = Draft {
             editing: Some(index),
             name: server.name.clone(),
+            hidden: true,
             ..Default::default()
         };
         match &server.transport {
@@ -57,6 +60,12 @@ impl Draft {
         let name = self.name.trim();
         if name.is_empty() {
             return Err("Give the server a name.".to_owned());
+        }
+        if !McpServer::valid_name(name) {
+            return Err(
+                "Use only letters, numbers, - and _ in the name, since the agents can't take anything else."
+                    .to_owned(),
+            );
         }
         let transport = match self.kind {
             Kind::Command => {
@@ -177,10 +186,7 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
                         .show(ui);
                 });
                 field(ui, "Environment, one KEY=value per line", |ui| {
-                    TextInput::new(&mut draft.env)
-                        .placeholder("API_KEY=…")
-                        .multiline(2)
-                        .show(ui);
+                    secret(ui, &mut draft.env, '=', "API_KEY=…", &mut draft.hidden);
                 });
             }
             Kind::Url => {
@@ -190,10 +196,13 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
                         .show(ui);
                 });
                 field(ui, "Headers, one Name: value per line", |ui| {
-                    TextInput::new(&mut draft.headers)
-                        .placeholder("Authorization: Bearer …")
-                        .multiline(2)
-                        .show(ui);
+                    secret(
+                        ui,
+                        &mut draft.headers,
+                        ':',
+                        "Authorization: Bearer …",
+                        &mut draft.hidden,
+                    );
                 });
             }
         }
@@ -284,6 +293,43 @@ fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(space::MD);
 }
 
+// name and value lines with the values masked while `hidden`, shown once the box is clicked
+fn secret(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    between: char,
+    placeholder: &str,
+    hidden: &mut bool,
+) {
+    if !*hidden || text.trim().is_empty() {
+        TextInput::new(text)
+            .placeholder(placeholder)
+            .multiline(2)
+            .show(ui);
+        return;
+    }
+    let mut masked = masked(text, between);
+    let response = TextInput::new(&mut masked)
+        .multiline(2)
+        .show(ui)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .tip("Click to show the values");
+    if response.clicked() || response.has_focus() {
+        *hidden = false;
+    }
+}
+
+fn masked(text: &str, between: char) -> String {
+    text.lines()
+        .map(|line| match line.split_once(between) {
+            Some((name, _)) if between == ':' => format!("{name}: ••••••••"),
+            Some((name, _)) => format!("{name}{between}••••••••"),
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn error(ui: &mut egui::Ui, message: &str) {
     if !message.is_empty() {
         let p = theme::palette(ui);
@@ -307,9 +353,21 @@ fn summary(server: &McpServer) -> String {
     }
 }
 
+// windows paths are full of backslashes, so there a backslash only escapes a quote
+const WINDOWS: bool = cfg!(windows);
+
 fn quote(word: &str) -> String {
+    quote_for(word, WINDOWS)
+}
+
+fn quote_for(word: &str, windows: bool) -> String {
     if word.is_empty() || word.contains(char::is_whitespace) || word.contains('"') {
-        format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\""))
+        let word = if windows {
+            word.to_owned()
+        } else {
+            word.replace('\\', "\\\\")
+        };
+        format!("\"{}\"", word.replace('"', "\\\""))
     } else {
         word.to_owned()
     }
@@ -324,6 +382,10 @@ fn lines(list: &[(String, String)], between: &str) -> String {
 
 // a command line split into words the way a shell would, honouring quotes
 fn split(line: &str) -> Vec<String> {
+    split_for(line, WINDOWS)
+}
+
+fn split_for(line: &str, windows: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut started = false;
@@ -343,6 +405,10 @@ fn split(line: &str) -> Vec<String> {
             }
             (Some(q), c) if c == q => quote = None,
             (Some('\''), c) => word.push(c),
+            (_, '\\') if windows && !chars.as_str().starts_with('"') => {
+                word.push('\\');
+                started = true;
+            }
             (_, '\\') => {
                 if let Some(next) = chars.next() {
                     word.push(next);
@@ -432,6 +498,17 @@ fn imported(text: &str) -> Result<Vec<McpServer>, String> {
     if servers.is_empty() {
         return Err("Didn't find any servers with a command or url in that.".to_owned());
     }
+    let bad: Vec<&str> = servers
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| !McpServer::valid_name(n))
+        .collect();
+    if !bad.is_empty() {
+        return Err(format!(
+            "Rename {} first, using only letters, numbers, - and _.",
+            bad.join(", ")
+        ));
+    }
     Ok(servers)
 }
 
@@ -442,12 +519,30 @@ mod tests {
     #[test]
     fn command_lines_split_like_a_shell() {
         assert_eq!(
-            split(r#"npx -y "@scope/pkg" --dir 'My Notes' a\ b """#),
+            split_for(r#"npx -y "@scope/pkg" --dir 'My Notes' a\ b """#, false),
             ["npx", "-y", "@scope/pkg", "--dir", "My Notes", "a b", ""]
         );
-        let words = ["uvx", "with space", "plain"].map(str::to_owned);
-        let line = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
-        assert_eq!(split(&line), words);
+        assert_eq!(
+            split_for(
+                r#"C:\tools\server.exe "C:\My Files\x" \\host\share say\"hi"#,
+                true
+            ),
+            [
+                r"C:\tools\server.exe",
+                r"C:\My Files\x",
+                r"\\host\share",
+                r#"say"hi"#
+            ]
+        );
+        for windows in [false, true] {
+            let words = ["uvx", "with space", r"C:\a b\c", r#"q"uote"#, ""].map(str::to_owned);
+            let line = words
+                .iter()
+                .map(|w| quote_for(w, windows))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(split_for(&line, windows), words, "windows: {windows}");
+        }
     }
 
     #[test]
@@ -468,6 +563,8 @@ mod tests {
         let bare = r#""fs": { "command": "uvx", "args": ["mcp-fs"] },"#;
         assert_eq!(imported(bare).unwrap()[0].name, "fs");
         assert!(imported("{}").is_err() && imported("nope").is_err());
+        let spaced = r#"{ "my server": { "command": "x" } }"#;
+        assert!(imported(spaced).unwrap_err().contains("my server"));
     }
 
     #[test]
@@ -485,6 +582,11 @@ mod tests {
         assert_eq!((command.as_str(), args.len()), ("npx", 2));
         assert_eq!(env[1], ("B".into(), "two".into()));
         let again = Draft::from(0, &server).server(true).unwrap();
+        assert_eq!(
+            masked("A=1\nAuthorization: Bearer t", ':'),
+            "A=1\nAuthorization: ••••••••"
+        );
+        assert_eq!(masked("API_KEY=secret", '='), "API_KEY=••••••••");
         assert_eq!(again, server);
         let bad = Draft {
             name: "x".into(),
@@ -493,5 +595,11 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.server(true).is_err());
+        let dotted = Draft {
+            name: "a.b".into(),
+            command: "a".into(),
+            ..Default::default()
+        };
+        assert!(dotted.server(true).is_err());
     }
 }

@@ -25,6 +25,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # runs beside the builds and holds back publishing, so a failing test never ships
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libxcb1-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
   linux:
     strategy:
       fail-fast: false
@@ -180,7 +199,7 @@ jobs:
             mux-windows-x86_64-setup.exe
 
   publish:
-    needs: [linux, macos, windows]
+    needs: [check, linux, macos, windows]
     runs-on: ubuntu-26.04
     env:
       GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,18 @@
+{
+  "name": "OLED",
+  "appearance": "dark",
+  "extends": "mux-dark",
+  "colors": {
+    "background": "#000000",
+    "surface": "#000000",
+    "sidebar": "#000000",
+    "elevated": "#0C0C0E",
+    "hover": "#151517",
+    "active": "#1E1E21",
+    "border": "#1C1C1F",
+    "border_strong": "#2E2E33"
+  },
+  "terminal": {
+    "black": "#000000"
+  }
+}

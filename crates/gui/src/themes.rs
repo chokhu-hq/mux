@@ -88,7 +88,8 @@ pub const MUX_DARK: &str = "mux-dark";
 pub const MUX_LIGHT: &str = "mux-light";
 
 // themes that ship with the app, written in the same format as anyone's own
-const BUNDLED: [(&str, &str); 10] = [
+const BUNDLED: [(&str, &str); 11] = [
+    ("oled", include_str!("../themes/oled.json")),
     ("ayu-dark", include_str!("../themes/ayu-dark.json")),
     ("ayu-mirage", include_str!("../themes/ayu-mirage.json")),
     ("ayu-light", include_str!("../themes/ayu-light.json")),

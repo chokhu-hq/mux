@@ -41,8 +41,10 @@ Mux is a desktop app for working with coding agents. It drives the Codex, Claude
 - Plan mode, questions from the agent, task lists and approvals
 - Rewind to any earlier message and carry on from there
 - A queue for messages sent while the agent works, which you can edit, remove or send right away
-- Skills and slash commands with autocomplete in the composer
-- Model, effort and permission pickers, plus context usage and compaction
+- `@` file mentions, skills and slash commands with autocomplete in the composer
+- One model picker for every agent, with effort, speed and permissions, plus context usage and compaction
+- Switch a chat to another agent mid-conversation, and the new one is handed what came before
+- MCP servers for every agent: add your own or a popular one, turn them on and off, answer their approvals and forms, and open their sign-in pages
 
 **Workspace**
 

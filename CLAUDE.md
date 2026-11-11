@@ -50,6 +50,5 @@ Copy `state.json` in if you need real sessions. Stop the sandbox server by its e
 
 ## What's next
 
-- A server stress test: many clients and sessions at once, clients dropping mid-stream, and big outputs.
 - Things still to check on real Windows and macOS: dark Acrylic, the tray, the installer, the updater swap, the renderer fallback, the PATH merge, sign-in detection, and a light strip at the top left of the window on Windows.
 - Ideas offered but not taken up yet: Segoe UI on Windows, speech to text.

@@ -378,6 +378,7 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
         ToolKind::Edit => ("Edit", icons::PENCIL_SIMPLE),
         ToolKind::Run => ("Run", icons::TERMINAL),
         ToolKind::Search => ("Search", icons::MAGNIFYING_GLASS),
+        ToolKind::Mcp => ("Used", icons::PLUGS_CONNECTED),
     };
     // finished calls just show what they were, only running and failed ones need a signal
     let center = pos2(x + icon::MD / 2.0, y);
@@ -495,6 +496,11 @@ pub fn tool_call(ui: &mut Ui, tool: &ToolCall) {
                     });
                 });
         });
+    }
+    // pictures a tool gave back are the point of calling it, so they show without opening the row
+    if !tool.images.is_empty() {
+        ui.add_space(space::XS);
+        super::attachments::previews(ui, &tool.images);
     }
 }
 
@@ -721,6 +727,7 @@ fn summary(tools: &[&ToolCall]) -> String {
         count(ToolKind::Search),
         count(ToolKind::Edit),
         count(ToolKind::Run),
+        count(ToolKind::Mcp),
     )
     .join(" · ")
 }
@@ -729,12 +736,13 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn counts(read: usize, searched: usize, edited: usize, ran: usize) -> Vec<String> {
+fn counts(read: usize, searched: usize, edited: usize, ran: usize, used: usize) -> Vec<String> {
     let mut parts: Vec<String> = [
         (read, "Read", "file", "files"),
         (searched, "Searched", "time", "times"),
         (edited, "Edited", "file", "files"),
         (ran, "Ran", "command", "commands"),
+        (used, "Used", "tool", "tools"),
     ]
     .into_iter()
     .filter(|(n, ..)| *n > 0)
@@ -784,6 +792,7 @@ fn turn_work(work: &[&super::ChatItem], live: bool) -> String {
         count(ToolKind::Search),
         count(ToolKind::Edit) + edited.len(),
         count(ToolKind::Run),
+        count(ToolKind::Mcp),
     );
     let helpers = work
         .iter()

@@ -125,6 +125,9 @@ pub enum AgentItem {
         detail: String,
         output: String,
         status: ItemStatus,
+        // pictures the tool gave back, saved where the server keeps its data
+        #[serde(default)]
+        images: Vec<String>,
     },
     // older messages were summarised to free up the context window
     Compaction {

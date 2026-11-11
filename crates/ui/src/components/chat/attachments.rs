@@ -75,6 +75,28 @@ pub fn sent(ui: &mut Ui, paths: &[String]) {
     });
 }
 
+// pictures laid out from the left, wrapping to fit, each opening in the viewer
+pub fn previews(ui: &mut Ui, paths: &[String]) {
+    let width = ui.available_width();
+    let max = vec2(width.min(PREVIEW.x), PREVIEW.y);
+    let sizes: Vec<Vec2> = paths.iter().map(|path| fitted(ui, path, max)).collect();
+    let widths: Vec<f32> = sizes.iter().map(|size| size.x).collect();
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(space::SM);
+        for row in rows(&widths, width, space::SM) {
+            ui.horizontal(|ui| {
+                for i in row {
+                    let (rect, response) = ui.allocate_exact_size(sizes[i], Sense::click());
+                    picture(ui, &paths[i], rect, false);
+                    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        ImageViewer::open(ui.ctx(), paths.to_vec(), i);
+                    }
+                }
+            });
+        }
+    });
+}
+
 // splits tiles into rows that fit, so they read in the order they were attached
 fn rows(widths: &[f32], max: f32, gap: f32) -> Vec<std::ops::Range<usize>> {
     let mut rows = Vec::new();

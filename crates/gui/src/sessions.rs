@@ -1352,6 +1352,7 @@ fn chat_items_from(
                 status: tool_status(*status),
                 output: (!output.is_empty()).then(|| output.clone()),
                 background: *background,
+                images: Vec::new(),
             })),
             AgentItem::FileChange { changes, .. } => {
                 for change in changes {
@@ -1409,6 +1410,7 @@ fn chat_items_from(
                         status: tool_status(step.status),
                         output: None,
                         background: false,
+                        images: Vec::new(),
                     })
                     .collect(),
                 result: result.clone(),
@@ -1419,16 +1421,19 @@ fn chat_items_from(
                 detail,
                 output,
                 status,
+                images,
             } => items.push(ChatItem::Tool(ToolCall {
                 kind: tool_kind(name),
-                target: if detail.is_empty() {
-                    name.clone()
-                } else {
-                    detail.clone()
+                target: match (mcp_tool(name), detail.is_empty()) {
+                    (Some(tool), true) => tool,
+                    (Some(tool), false) => format!("{tool}  {detail}"),
+                    (None, true) => name.clone(),
+                    (None, false) => detail.clone(),
                 },
                 status: tool_status(*status),
                 output: (!output.is_empty()).then(|| output.clone()),
                 background: false,
+                images: images.clone(),
             })),
             AgentItem::Compaction { status } => {
                 items.push(ChatItem::Compaction(tool_status(*status)))
@@ -1567,10 +1572,19 @@ fn summarise_changes(
     (out, out_approvals)
 }
 
+// an mcp tool, named `mcp__server__tool` by both clis, read as `server › tool`
+fn mcp_tool(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    Some(format!("{server} › {tool}"))
+}
+
 fn tool_kind(name: &str) -> ToolKind {
+    if name.starts_with("mcp__") {
+        return ToolKind::Mcp;
+    }
     match name {
         "Read" | "NotebookRead" => ToolKind::Read,
-        "Grep" | "Glob" | "WebSearch" | "WebFetch" | "LS" => ToolKind::Search,
+        "Grep" | "Glob" | "WebSearch" | "WebFetch" | "LS" | "ToolSearch" => ToolKind::Search,
         "Edit" | "MultiEdit" | "Write" => ToolKind::Edit,
         _ => ToolKind::Run,
     }
@@ -1680,6 +1694,16 @@ fn most_pressing(sessions: &[SessionInfo], unread: &HashSet<u64>) -> Option<Sess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_tools_read_as_server_and_tool() {
+        assert_eq!(
+            mcp_tool("mcp__blender__get_scene").as_deref(),
+            Some("blender › get_scene")
+        );
+        assert_eq!(mcp_tool("Bash"), None);
+        assert_eq!(tool_kind("mcp__blender__get_scene"), ToolKind::Mcp);
+    }
 
     #[test]
     fn old_limit_messages_become_one_notice_and_real_errors_stay_errors() {

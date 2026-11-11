@@ -606,6 +606,7 @@ impl Server {
                 self.agents.remove(&id);
                 let _ = std::fs::remove_file(self.agent_path(id));
                 mcp::forget_claude(id);
+                mcp::forget_images(id);
                 self.attached.remove(&id);
                 self.store.delete_session(id);
                 self.changed();

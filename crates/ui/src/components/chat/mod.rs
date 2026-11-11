@@ -106,6 +106,8 @@ pub struct ToolCall {
     pub output: Option<String>,
     // left running in the background while the agent carried on
     pub background: bool,
+    // pictures the tool gave back, as paths on disk
+    pub images: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +116,8 @@ pub enum ToolKind {
     Edit,
     Run,
     Search,
+    // a tool from an mcp server
+    Mcp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -484,6 +488,8 @@ fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
             ChatItem::Assistant(_) => Some(i) == reply,
             ChatItem::Error(_) => !live,
             ChatItem::Changes(_) | ChatItem::Plan { .. } => !live,
+            // pictures a tool gave back are usually what the turn was for
+            ChatItem::Tool(tool) => !tool.images.is_empty(),
             _ => false,
         };
         if stays {
@@ -749,6 +755,7 @@ pub fn sample() -> Vec<ChatItem> {
             status,
             output: output.map(str::to_owned),
             background: false,
+            images: Vec::new(),
         })
     };
     let line = |kind, text: &str| DiffLine {
@@ -828,6 +835,7 @@ mod tests {
             status,
             output: None,
             background: false,
+            images: Vec::new(),
         })
     }
 
@@ -1020,6 +1028,7 @@ mod tests {
             status: ToolStatus::Done,
             output: output.map(str::to_owned),
             background: false,
+            images: Vec::new(),
         };
         let helper = |task: &str, kind: &str, activity: &str, result: &str, status| {
             ChatItem::Subagent(Subagent {
@@ -1212,6 +1221,7 @@ mod tests {
                         status: ToolStatus::Done,
                         output: Some("line\n".repeat(20)),
                         background: false,
+                        images: Vec::new(),
                     }));
                 }
             }
@@ -1473,6 +1483,7 @@ mod tests {
                     status: ToolStatus::Done,
                     output: Some("test result: ok\n".repeat(1600)),
                     background: false,
+                    images: Vec::new(),
                 }));
             }
             items.push(ChatItem::Diff(FileDiff {

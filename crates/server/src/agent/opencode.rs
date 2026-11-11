@@ -326,6 +326,7 @@ impl Agent {
                 detail: detail_of(update),
                 output: String::new(),
                 status: ItemStatus::Running,
+                images: Vec::new(),
             },
         };
         let index = self.push(entry);

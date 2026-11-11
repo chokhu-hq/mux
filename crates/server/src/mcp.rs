@@ -20,6 +20,82 @@ pub fn forget_idle_claude(running: &[u64]) {
     forget_idle_in(&folder(), running);
 }
 
+// pictures in a tool's result, saved privately so the chat can show them, in either shape the clis report:
+// claude's `source` block or mcp's own `data` and `mimeType`
+pub fn save_images(content: &Value, session: u64) -> Vec<String> {
+    save_images_in(&folder().join("images"), content, session)
+}
+
+fn save_images_in(dir: &Path, content: &Value, session: u64) -> Vec<String> {
+    use base64::Engine;
+    let mut saved = Vec::new();
+    for part in content.as_array().into_iter().flatten() {
+        if part["type"] != "image" {
+            continue;
+        }
+        let (data, mime) = match part["source"]["data"].as_str() {
+            Some(data) => (data, part["source"]["media_type"].as_str()),
+            None => match part["data"].as_str() {
+                Some(data) => (data, part["mimeType"].as_str()),
+                None => continue,
+            },
+        };
+        let extension = match mime.unwrap_or_default() {
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            continue;
+        };
+        if mux_core::private_dir(dir).is_err() {
+            break;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = dir.join(format!("{session}-{stamp}-{}.{extension}", saved.len()));
+        if mux_core::write_private(&path, &bytes).is_ok() {
+            saved.push(path.to_string_lossy().into_owned());
+        }
+    }
+    saved
+}
+
+// claude saves a tool's pictures itself and leaves `[Image: source: <path>]` in the text, so those lines become
+// pictures and drop out of the text
+pub fn image_refs(text: &str) -> (String, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let path = line
+            .trim()
+            .strip_prefix("[Image: source: ")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .filter(|p| Path::new(p).is_absolute() && mux_core::protocol::is_image(p));
+        match path {
+            Some(path) => paths.push(path.to_owned()),
+            None => kept.push(line),
+        }
+    }
+    (kept.join("\n"), paths)
+}
+
+// a deleted session's pictures go with it
+pub fn forget_images(session: u64) {
+    let prefix = format!("{session}-");
+    for entry in std::fs::read_dir(folder().join("images"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn folder() -> PathBuf {
     mux_core::protocol::data_dir().join("mcp")
 }
@@ -305,6 +381,33 @@ mod tests {
             !two.exists() && three.exists(),
             "a running claude keeps its file"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn claudes_saved_pictures_are_picked_out_of_the_text() {
+        let (text, paths) = image_refs(
+            "Rendered\n[Image: source: /home/me/blob.png]\n[Image: source: relative.png]",
+        );
+        assert_eq!(text, "Rendered\n[Image: source: relative.png]");
+        assert_eq!(paths, ["/home/me/blob.png"]);
+    }
+
+    #[test]
+    fn pictures_in_either_shape_are_saved() {
+        let dir = std::env::temp_dir().join(format!("mux-images-{}", std::process::id()));
+        // a 1x1 png, small enough to inline
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let content = json!([
+            { "type": "text", "text": "here" },
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": png } },
+            { "type": "image", "data": png, "mimeType": "image/jpeg" },
+            { "type": "image", "data": "not base64!" },
+        ]);
+        let saved = save_images_in(&dir, &content, 4);
+        assert_eq!(saved.len(), 2);
+        assert!(saved[1].ends_with(".jpg"));
+        assert!(std::fs::read(&saved[0]).unwrap().starts_with(b"\x89PNG"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -1634,6 +1634,18 @@ impl Agent {
                 self.codex_collab(item);
                 return;
             }
+            // named the way claude names them, so both show the same
+            Some("mcpToolCall") => AgentItem::Tool {
+                name: format!(
+                    "mcp__{}__{}",
+                    item["server"].as_str().unwrap_or_default(),
+                    item["tool"].as_str().unwrap_or_default()
+                ),
+                detail: tool_detail(&item["arguments"]),
+                output: String::new(),
+                status: ItemStatus::Running,
+                images: Vec::new(),
+            },
             Some("plan") => AgentItem::Plan {
                 text: item["text"].as_str().unwrap_or_default().to_owned(),
             },
@@ -1700,6 +1712,21 @@ impl Agent {
             Some(AgentItem::FileChange { changes, status: s }) => {
                 *changes = file_changes(item);
                 *s = status;
+            }
+            Some(AgentItem::Tool {
+                output,
+                status: s,
+                images,
+                ..
+            }) => {
+                let content = &item["result"]["content"];
+                *output = match item["error"]["message"].as_str().or(item["error"].as_str()) {
+                    Some(error) => error.to_owned(),
+                    None => result_text(content),
+                };
+                trim_front(output);
+                *s = status;
+                *images = crate::mcp::save_images(content, self.session);
             }
             Some(AgentItem::Plan { text }) => {
                 *text = item["text"].as_str().unwrap_or_default().to_owned();
@@ -2037,6 +2064,7 @@ impl Agent {
                 detail: tool_detail(input),
                 output: String::new(),
                 status: ItemStatus::Running,
+                images: Vec::new(),
             },
         };
         let index = self.push(entry);
@@ -2061,6 +2089,16 @@ impl Agent {
             ItemStatus::Done
         };
         let text = result_text(&block["content"]);
+        let (text, pictures) = if matches!(self.items.get(index), Some(AgentItem::Tool { .. })) {
+            // claude can name its saved copy and also send the same picture inline, which would show twice
+            let (text, mut pictures) = crate::mcp::image_refs(&text);
+            if pictures.is_empty() {
+                pictures = crate::mcp::save_images(&block["content"], self.session);
+            }
+            (text, pictures)
+        } else {
+            (text, Vec::new())
+        };
         // a command moved to the background answers at once, but keeps running and its row with it
         if !failed
             && matches!(
@@ -2077,13 +2115,21 @@ impl Agent {
         match self.items.get_mut(index) {
             Some(AgentItem::Command {
                 output, status: s, ..
-            })
-            | Some(AgentItem::Tool {
-                output, status: s, ..
             }) => {
                 *output = text;
                 trim_front(output);
                 *s = status;
+            }
+            Some(AgentItem::Tool {
+                output,
+                status: s,
+                images,
+                ..
+            }) => {
+                *output = text;
+                trim_front(output);
+                *s = status;
+                *images = pictures;
             }
             Some(AgentItem::FileChange { status: s, .. }) => *s = status,
             _ => return,

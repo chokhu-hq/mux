@@ -198,33 +198,63 @@ fn reach(distro: &str) -> io::Result<TcpStream> {
     Ok(stream)
 }
 
-// installs this build's server into ~/.mux/bin when it isn't there, then runs it through the login shell
-// so the agent clis are on its PATH the way they are in a terminal
+// puts this build's server in ~/.mux/bin when it isn't there. it's downloaded and checked here rather than
+// inside wsl, so it runs only once its signature and build match this app
+fn install_server(distro: &str, name: &str, base: &str) -> io::Result<()> {
+    let wsl = |script: &str| {
+        let mut command = mux_core::command("wsl.exe");
+        command.args(["-d", distro, "--exec", "sh", "-c", script, "sh", name]);
+        command
+    };
+    let there = wsl(r#"test -x "$HOME/.mux/bin/$1""#)
+        .stdin(Stdio::null())
+        .status()?;
+    if there.success() {
+        return Ok(());
+    }
+    let arch = wsl("uname -m").stdin(Stdio::null()).output()?.stdout;
+    let arch = String::from_utf8_lossy(&arch).trim().to_owned();
+    let url = format!("{base}/mux-server-linux-{arch}");
+    log::info!("downloading the wsl server from {url}");
+    let bytes = crate::install::server_for_wsl(&url, crate::update::commit())?;
+    let mut child = wsl(
+        r#"set -e; d="$HOME/.mux/bin"; mkdir -p "$d"; cat > "$d/$1.part"; chmod +x "$d/$1.part"; mv "$d/$1.part" "$d/$1""#,
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&bytes)?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Couldn't copy the server into WSL: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+// runs this build's server through the login shell so the agent clis are on its PATH the way they are in a terminal
 fn start(distro: &str) -> io::Result<std::process::Child> {
-    let (name, download) = match crate::update::server_release() {
-        Some((tag, base)) => (format!("mux-server-{tag}"), base),
+    let name = match crate::update::server_release() {
+        Some((tag, base)) => {
+            // copies the old in-wsl download left may be the wrong build, so checked ones get a name of their own
+            let name = format!("mux-server-{tag}-checked");
+            install_server(distro, &name, &base)?;
+            name
+        }
         // a build from source has no release to fetch, so it uses a server put there by hand
-        None => ("mux-server".to_owned(), String::new()),
+        None => "mux-server".to_owned(),
     };
     let script = format!(
         r#"set -e
-dir="$HOME/.mux/bin"
-bin="$dir/{name}"
+bin="$HOME/.mux/bin/{name}"
 if [ ! -x "$bin" ]; then
-  if [ -z "{download}" ]; then
-    echo "Build mux-server in WSL and copy it to $bin"
-    exit 1
-  fi
-  mkdir -p "$dir"
-  url="{download}/mux-server-linux-$(uname -m)"
-  echo "Downloading $url"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$bin.part"
-  else
-    wget -qO "$bin.part" "$url"
-  fi
-  chmod +x "$bin.part"
-  mv "$bin.part" "$bin"
+  echo "Build mux-server in WSL and copy it to $bin"
+  exit 1
 fi
 export MUX_LISTEN=1
 case "${{SHELL##*/}}" in

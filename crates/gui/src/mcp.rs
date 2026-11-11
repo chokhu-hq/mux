@@ -353,24 +353,44 @@ fn summary(server: &McpServer) -> String {
     }
 }
 
-// windows paths are full of backslashes, so there a backslash only escapes a quote
+// windows splits commands the way its c runtime does, where a backslash only matters before a quote
 const WINDOWS: bool = cfg!(windows);
 
 fn quote(word: &str) -> String {
     quote_for(word, WINDOWS)
 }
 
+// a word written so `split_for` reads it back exactly
 fn quote_for(word: &str, windows: bool) -> String {
-    if word.is_empty() || word.contains(char::is_whitespace) || word.contains('"') {
-        let word = if windows {
-            word.to_owned()
-        } else {
-            word.replace('\\', "\\\\")
-        };
-        format!("\"{}\"", word.replace('"', "\\\""))
-    } else {
-        word.to_owned()
+    let special: &[char] = if windows { &['"'] } else { &['"', '\'', '\\'] };
+    if !word.is_empty() && !word.contains(char::is_whitespace) && !word.contains(special) {
+        return word.to_owned();
     }
+    let mut quoted = String::from("\"");
+    if windows {
+        // backslashes are only doubled where a quote follows them, including the closing one
+        let mut slashes = 0;
+        for c in word.chars() {
+            match c {
+                '\\' => slashes += 1,
+                '"' => {
+                    quoted.push_str(&"\\".repeat(slashes * 2 + 1));
+                    quoted.push('"');
+                    slashes = 0;
+                }
+                c => {
+                    quoted.push_str(&"\\".repeat(slashes));
+                    quoted.push(c);
+                    slashes = 0;
+                }
+            }
+        }
+        quoted.push_str(&"\\".repeat(slashes * 2));
+    } else {
+        quoted.push_str(&word.replace('\\', "\\\\").replace('"', "\\\""));
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn lines(list: &[(String, String)], between: &str) -> String {
@@ -380,7 +400,7 @@ fn lines(list: &[(String, String)], between: &str) -> String {
         .join("\n")
 }
 
-// a command line split into words the way a shell would, honouring quotes
+// a command line split into words the way the system's own shell would
 fn split(line: &str) -> Vec<String> {
     split_for(line, WINDOWS)
 }
@@ -389,37 +409,48 @@ fn split_for(line: &str, windows: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut started = false;
-    let mut quote = None;
-    let mut chars = line.trim().chars();
+    let mut quote: Option<char> = None;
+    let mut chars = line.trim().chars().peekable();
     while let Some(c) = chars.next() {
-        match (quote, c) {
-            (None, c) if c.is_whitespace() => {
+        match c {
+            c if c.is_whitespace() && quote.is_none() => {
                 if started {
                     words.push(std::mem::take(&mut word));
                     started = false;
                 }
+                continue;
             }
-            (None, '"' | '\'') => {
-                quote = Some(c);
-                started = true;
+            '\\' if windows => {
+                let mut slashes = 1;
+                while chars.peek() == Some(&'\\') {
+                    chars.next();
+                    slashes += 1;
+                }
+                if chars.peek() == Some(&'"') {
+                    word.push_str(&"\\".repeat(slashes / 2));
+                    // an odd run escapes the quote, an even one leaves it to open or close
+                    if slashes % 2 == 1 {
+                        chars.next();
+                        word.push('"');
+                    }
+                } else {
+                    word.push_str(&"\\".repeat(slashes));
+                }
             }
-            (Some(q), c) if c == q => quote = None,
-            (Some('\''), c) => word.push(c),
-            (_, '\\') if windows && !chars.as_str().starts_with('"') => {
-                word.push('\\');
-                started = true;
-            }
-            (_, '\\') => {
+            '"' if windows => quote = if quote.is_some() { None } else { Some('"') },
+            c if windows => word.push(c),
+            '\'' if quote.is_none() => quote = Some('\''),
+            '\'' if quote == Some('\'') => quote = None,
+            '"' if quote.is_none() => quote = Some('"'),
+            '"' if quote == Some('"') => quote = None,
+            '\\' if quote != Some('\'') => {
                 if let Some(next) = chars.next() {
                     word.push(next);
                 }
-                started = true;
             }
-            (_, c) => {
-                word.push(c);
-                started = true;
-            }
+            c => word.push(c),
         }
+        started = true;
     }
     if started {
         words.push(word);
@@ -524,24 +555,48 @@ mod tests {
         );
         assert_eq!(
             split_for(
-                r#"C:\tools\server.exe "C:\My Files\x" \\host\share say\"hi"#,
+                r#"C:\tools\server.exe "C:\My Files\x" \\host\share say\"hi "C:\dir\\" next it's"#,
                 true
             ),
             [
                 r"C:\tools\server.exe",
                 r"C:\My Files\x",
                 r"\\host\share",
-                r#"say"hi"#
+                r#"say"hi"#,
+                r"C:\dir\",
+                "next",
+                "it's"
             ]
         );
+    }
+
+    #[test]
+    fn saved_commands_read_back_word_for_word() {
+        let words = [
+            "uvx",
+            "with space",
+            "it's",
+            r"a\b",
+            r"C:\dir\",
+            r"C:\My Files\",
+            r#"q"uote"#,
+            r#"a\"b"#,
+            r"\\host\share",
+            "",
+            r"trailing\\",
+        ]
+        .map(str::to_owned);
         for windows in [false, true] {
-            let words = ["uvx", "with space", r"C:\a b\c", r#"q"uote"#, ""].map(str::to_owned);
             let line = words
                 .iter()
                 .map(|w| quote_for(w, windows))
                 .collect::<Vec<_>>()
                 .join(" ");
-            assert_eq!(split_for(&line, windows), words, "windows: {windows}");
+            assert_eq!(
+                split_for(&line, windows),
+                words,
+                "windows: {windows}, line: {line}"
+            );
         }
     }
 

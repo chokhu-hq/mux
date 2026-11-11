@@ -98,6 +98,12 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
 
     let (events, inbox) = mpsc::unbounded_channel();
     let (stop, mut stopped) = mpsc::unbounded_channel::<()>();
+    // chats, logs and mcp keys all live in here, so other accounts on the machine are kept out
+    if let Some(dir) = state.parent()
+        && let Err(err) = mux_core::private_dir(dir)
+    {
+        log::warn!("couldn't make {} private: {err}", dir.display());
+    }
     let mut store = Store::load(&state);
     let seen = store.sessions_mut().map(|s| (s.id, s.status)).collect();
     store.save(&state)?;
@@ -173,9 +179,7 @@ impl Client {
             return Err(());
         }
         if self.queued.load(Ordering::Relaxed) + frame.len() > CLIENT_BACKLOG {
-            if !self.over.swap(true, Ordering::Relaxed) {
-                self.cut.notify_one();
-            }
+            self.cut_off();
             return Err(());
         }
         self.queued.fetch_add(frame.len(), Ordering::Relaxed);
@@ -183,11 +187,26 @@ impl Client {
         self.tx.send((frame, counted)).map_err(drop)
     }
 
-    // a transcript the client asked for can outgrow the backlog by itself, and it has to arrive for the chat to open
+    fn cut_off(&self) {
+        if !self.over.swap(true, Ordering::Relaxed) {
+            self.cut.notify_one();
+        }
+    }
+
+    // a transcript the client asked for can outgrow the backlog by itself, and it has to arrive for the chat to open.
+    // only up to half the backlog of it counts, so a client that keeps opening chats without reading is still cut off
     fn send_transcript(&self, pieces: &[ServerMsg]) {
+        if self.queued.load(Ordering::Relaxed) >= CLIENT_BACKLOG {
+            self.cut_off();
+            return;
+        }
+        let mut room = CLIENT_BACKLOG / 2;
         for piece in pieces {
             if let Ok(frame) = protocol::encode(piece) {
-                let _ = self.tx.send((frame, 0));
+                let counted = frame.len().min(room);
+                room -= counted;
+                self.queued.fetch_add(counted, Ordering::Relaxed);
+                let _ = self.tx.send((frame, counted));
             }
         }
     }
@@ -580,6 +599,7 @@ impl Server {
                 self.processes.remove(&id);
                 self.agents.remove(&id);
                 let _ = std::fs::remove_file(self.agent_path(id));
+                mcp::forget_claude(Some(id));
                 self.attached.remove(&id);
                 self.store.delete_session(id);
                 self.changed();
@@ -775,6 +795,7 @@ impl Server {
                 self.agent_changed(id);
             }
             ClientMsg::SetMcpServers { servers } => {
+                mcp::forget_claude(None);
                 self.store.mcp = servers;
                 self.changed();
                 for tx in self.clients.values() {
@@ -1278,6 +1299,36 @@ fn git_branch(folder: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_that_keeps_opening_big_chats_without_reading_is_cut_off() {
+        let (tx, _outbox) = mpsc::unbounded_channel();
+        let client = Client {
+            tx,
+            queued: Arc::new(AtomicUsize::new(0)),
+            cut: Arc::new(Notify::new()),
+            over: AtomicBool::new(false),
+        };
+        let big = |n: u64| ServerMsg::AgentTranscriptMore {
+            id: n,
+            items: vec![AgentItem::Assistant {
+                text: "x".repeat(TRANSCRIPT_PIECE - 1024),
+            }],
+        };
+        let chat: Vec<ServerMsg> = (0..6).map(big).collect();
+        client.send_transcript(&chat);
+        assert!(
+            !client.over.load(Ordering::Relaxed),
+            "one long chat still opens"
+        );
+        assert!(
+            client.send(ServerMsg::Focus).is_ok(),
+            "and what follows it still fits"
+        );
+        client.send_transcript(&chat);
+        client.send_transcript(&chat);
+        assert!(client.over.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn shortens_shell_titles_to_their_folder() {

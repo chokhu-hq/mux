@@ -42,7 +42,12 @@ pub fn path(file_name: &str) -> PathBuf {
 }
 
 fn open(path: &Path) -> Option<File> {
-    OpenOptions::new().create(true).append(true).open(path).ok()
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    // the agents' output goes in the log, so it's kept private like the chats
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path).ok()
 }
 
 impl Log for Logger {

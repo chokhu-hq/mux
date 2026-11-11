@@ -86,6 +86,12 @@ pub fn server_release() -> Option<(String, String)> {
     }
 }
 
+// the commit this build was made from, which the server it fetches for wsl has to match
+#[cfg(windows)]
+pub fn commit() -> Option<&'static str> {
+    COMMIT
+}
+
 // only builds made in ci check for and install updates, never one built from source
 pub fn is_release() -> bool {
     CHANNEL.is_some()

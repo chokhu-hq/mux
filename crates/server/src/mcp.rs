@@ -1,32 +1,54 @@
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use mux_core::protocol::{McpServer, McpTransport, Question, QuestionOption};
 use serde_json::{Map, Value, json};
 
-// writes a file only its owner can read, since mcp configs carry api keys and tokens
-pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    // a file made before this only gets its permissions narrowed here
-    #[cfg(unix)]
-    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    file.write_all(bytes)
-}
-
 // claude's servers go in a file rather than on its command line, where any process could read the secrets
 pub fn claude_file(servers: &[McpServer], session: u64) -> io::Result<Option<PathBuf>> {
+    claude_file_in(&folder(), servers, session)
+}
+
+// removes one session's claude config, or every session's when the servers change, since each is rewritten
+// with the new list the next time its claude starts
+pub fn forget_claude(session: Option<u64>) {
+    forget_claude_in(&folder(), session);
+}
+
+fn folder() -> PathBuf {
+    mux_core::protocol::data_dir().join("mcp")
+}
+
+fn claude_file_in(dir: &Path, servers: &[McpServer], session: u64) -> io::Result<Option<PathBuf>> {
     let Some(config) = claude(servers) else {
+        // keys from servers since turned off or removed don't stay behind
+        forget_claude_in(dir, Some(session));
         return Ok(None);
     };
-    let dir = mux_core::protocol::data_dir().join("mcp");
-    std::fs::create_dir_all(&dir)?;
+    mux_core::private_dir(dir)?;
     let path = dir.join(format!("claude-{session}.json"));
-    write_private(&path, config.as_bytes())?;
+    mux_core::write_private(&path, config.as_bytes())?;
     Ok(Some(path))
+}
+
+fn forget_claude_in(dir: &Path, session: Option<u64>) {
+    let paths: Vec<PathBuf> = match session {
+        Some(session) => vec![dir.join(format!("claude-{session}.json"))],
+        None => std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("claude-") && n.ends_with(".json"))
+            })
+            .collect(),
+    };
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn pairs(list: &[(String, String)]) -> Value {
@@ -264,6 +286,20 @@ mod tests {
         assert!(super::claude(&[]).is_none() && super::codex(&[]).is_none());
     }
 
+    #[test]
+    fn claude_configs_go_once_their_servers_or_session_do() {
+        let dir = std::env::temp_dir().join(format!("mux-mcp-{}", std::process::id()));
+        let servers = [stdio("probe")];
+        let one = claude_file_in(&dir, &servers, 1).unwrap().unwrap();
+        let two = claude_file_in(&dir, &servers, 2).unwrap().unwrap();
+        assert!(std::fs::read_to_string(&one).unwrap().contains("probe"));
+        assert!(claude_file_in(&dir, &[], 1).unwrap().is_none());
+        assert!(!one.exists() && two.exists());
+        forget_claude_in(&dir, None);
+        assert!(!two.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_files_are_readable_only_by_their_owner() {
@@ -271,7 +307,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mux-private-{}", std::process::id()));
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        write_private(&path, b"secret").unwrap();
+        mux_core::write_private(&path, b"secret").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             (mode, std::fs::read_to_string(&path).unwrap().as_str()),

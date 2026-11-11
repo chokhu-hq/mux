@@ -413,7 +413,8 @@ impl Agent {
             resumes: self.resumes,
         };
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
+        // private, since a chat holds the person's prompts, code and command output
+        mux_core::write_private(&tmp, &serde_json::to_vec(&saved).map_err(io::Error::other)?)?;
         fs::rename(tmp, path)
     }
 

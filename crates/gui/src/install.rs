@@ -188,6 +188,38 @@ fn verify(bytes: &[u8], signature: &[u8], key: &[u8; 32]) -> io::Result<()> {
     key.verify(bytes, &signature).map_err(|_| bad())
 }
 
+// a linux server for wsl, fetched from `url` and refused unless it's signed and, for an experimental build,
+// made from `commit`, since that release is replaced in place and may have moved on since this app was built
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn server_for_wsl(url: &str, commit: Option<&str>) -> io::Result<Vec<u8>> {
+    server_checked(url, commit, &work_dir().join("wsl-server"), &PUBLIC_KEY)
+}
+
+fn server_checked(
+    url: &str,
+    commit: Option<&str>,
+    dir: &Path,
+    key: &[u8; 32],
+) -> io::Result<Vec<u8>> {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir)?;
+    let (binary, signature) = (dir.join("mux-server"), dir.join("mux-server.sig"));
+    fetch(url, &binary, 0, &|_| {})?;
+    fetch(&format!("{url}.sig"), &signature, 0, &|_| {})?;
+    let (bytes, signed) = (std::fs::read(&binary)?, std::fs::read(&signature)?);
+    let _ = std::fs::remove_dir_all(dir);
+    verify(&bytes, &signed, key)?;
+    // the server carries the commit it was built from, so a different build is spotted before it runs
+    if let Some(commit) = commit
+        && !bytes.windows(commit.len()).any(|w| w == commit.as_bytes())
+    {
+        return Err(io::Error::other(
+            "The experimental release has moved on since this app was built, so its server wouldn't match. Update Mux and try again.",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn run(command: &mut std::process::Command) -> io::Result<()> {
     let output = command.stdin(Stdio::null()).output()?;
     if output.status.success() {
@@ -336,6 +368,40 @@ mod tests {
         let bytes = std::fs::read(&file).unwrap();
         let signature = std::fs::read(format!("{file}.sig")).unwrap();
         verify(&bytes, &signature, &PUBLIC_KEY).unwrap();
+    }
+
+    #[test]
+    fn a_wsl_server_must_be_signed_and_the_right_build() {
+        let root = std::env::temp_dir().join(format!("mux-wsl-server-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("mux-server-linux-x86_64");
+        let bytes = b"ELF ... built from abc1234def ...";
+        std::fs::write(&file, bytes).unwrap();
+        let pair = ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new([3; 32]));
+        let key: [u8; 32] = pair.pk.as_ref().try_into().unwrap();
+        let sign = |data: &[u8]| {
+            std::fs::write(
+                format!("{}.sig", file.display()),
+                pair.sk.sign(data, None).as_ref(),
+            )
+            .unwrap()
+        };
+        let url = format!("file://{}", file.display());
+        let work = root.join("work");
+        sign(bytes);
+        assert_eq!(
+            server_checked(&url, Some("abc1234def"), &work, &key).unwrap(),
+            bytes
+        );
+        assert!(server_checked(&url, None, &work, &key).is_ok());
+        let moved = server_checked(&url, Some("fff0000"), &work, &key).unwrap_err();
+        assert!(moved.to_string().contains("moved on"));
+        sign(b"something else");
+        assert!(server_checked(&url, Some("abc1234def"), &work, &key).is_err());
+        std::fs::remove_file(format!("{}.sig", file.display())).unwrap();
+        assert!(server_checked(&url, None, &work, &key).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

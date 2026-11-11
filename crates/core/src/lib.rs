@@ -32,6 +32,28 @@ pub fn clip_lines(text: &str) -> std::borrow::Cow<'_, str> {
     clipped.into()
 }
 
+// writes a file only its owner can read, for chats and mcp configs that hold code, keys and tokens
+pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    // a file made before this only gets its permissions narrowed here
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(bytes)
+}
+
+// makes a folder only its owner can open, so nothing saved inside leaks to other accounts
+pub fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(())
+}
+
 pub fn home_dir() -> std::path::PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(Into::into)

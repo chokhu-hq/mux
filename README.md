@@ -22,7 +22,7 @@
   <a href="#reporting-a-problem">Report a problem</a>
 </p>
 
-<img src="assets/screenshot.png" alt="Mux showing an agent chat beside a sidebar of projects, shells and tasks" width="900">
+<img src="assets/screenshot.png" alt="Mux showing a Claude agent reskinning a model through a Blender MCP server, beside a sidebar of projects and agents" width="900">
 
 </div>
 

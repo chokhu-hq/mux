@@ -18,6 +18,7 @@ mod segmented;
 mod session_row;
 mod sidebar;
 mod status_dot;
+mod switch;
 mod terminal_view;
 mod text_input;
 mod tooltip;
@@ -44,6 +45,7 @@ pub use segmented::Segmented;
 pub use session_row::SessionRow;
 pub use sidebar::{SHORTCUT as SIDEBAR_SHORTCUT, Sidebar};
 pub use status_dot::StatusDot;
+pub use switch::Switch;
 pub use terminal_view::{
     MAX_SIZE as TERMINAL_MAX_SIZE, MIN_SIZE as TERMINAL_MIN_SIZE, TerminalResponse, TerminalView,
 };

@@ -45,7 +45,7 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
             .unwrap_or(0);
         let mut target = selected;
         let mut hovered = None;
-        for (i, (value, _)) in self.options.iter().enumerate() {
+        for (i, (value, label)) in self.options.iter().enumerate() {
             let seg = Rect::from_min_size(
                 pos2(rect.left() + pad + segment.x * i as f32, rect.top() + pad),
                 segment,
@@ -53,6 +53,8 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
             let r = ui
                 .interact(seg, response.id.with(i), Sense::click())
                 .on_hover_cursor(CursorIcon::PointingHand);
+            let selected = *self.value == *value;
+            r.widget_info(|| WidgetInfo::selected(egui::Role::RadioButton, true, selected, *label));
             if r.hovered() {
                 hovered = Some(i);
             }

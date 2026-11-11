@@ -617,7 +617,9 @@ impl App {
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // a popup or a sheet over the page takes esc for itself first
         if !egui::Popup::is_any_open(&ctx)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.settings_open = false;

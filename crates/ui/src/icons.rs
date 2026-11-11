@@ -23,12 +23,15 @@ pub const COPY: char = '\u{e1ca}';
 pub const CORNERS_OUT: char = '\u{e1d0}';
 pub const DESKTOP: char = '\u{e560}';
 pub const DOTS_THREE: char = '\u{e1fe}';
+pub const EYE: char = '\u{e220}';
+pub const EYE_SLASH: char = '\u{e224}';
 pub const FILE: char = '\u{e230}';
 pub const FOLDER: char = '\u{e24a}';
 pub const FOLDER_OPEN: char = '\u{e256}';
 pub const GEAR: char = '\u{e270}';
 pub const GIT_BRANCH: char = '\u{e278}';
 pub const GIT_DIFF: char = '\u{e27c}';
+pub const GLOBE: char = '\u{e288}';
 pub const IMAGE: char = '\u{e2ca}';
 pub const INFO: char = '\u{e2ce}';
 pub const LIGHTNING: char = '\u{e2de}';
@@ -46,6 +49,7 @@ pub const PAPER_PLANE_RIGHT: char = '\u{e396}';
 pub const PENCIL_SIMPLE: char = '\u{e3b4}';
 pub const PENCIL_SIMPLE_LINE: char = '\u{ebc6}';
 pub const PLAY: char = '\u{e3d0}';
+pub const PLUGS: char = '\u{eb56}';
 pub const PLUS: char = '\u{e3d4}';
 pub const PLUGS_CONNECTED: char = '\u{eb5a}';
 pub const ROBOT: char = '\u{e762}';
@@ -66,7 +70,7 @@ pub const WARNING_CIRCLE: char = '\u{e4e2}';
 pub const X: char = '\u{e4f6}';
 pub const X_CIRCLE: char = '\u{e4f8}';
 
-pub const ALL: [(&str, char); 65] = [
+pub const ALL: [(&str, char); 69] = [
     ("arrows-in-line-vertical", ARROWS_IN_LINE_VERTICAL),
     ("arrows-left-right", ARROWS_LEFT_RIGHT),
     ("arrow-clockwise", ARROW_CLOCKWISE),
@@ -91,12 +95,15 @@ pub const ALL: [(&str, char); 65] = [
     ("corners-out", CORNERS_OUT),
     ("desktop", DESKTOP),
     ("dots-three", DOTS_THREE),
+    ("eye", EYE),
+    ("eye-slash", EYE_SLASH),
     ("file", FILE),
     ("folder", FOLDER),
     ("folder-open", FOLDER_OPEN),
     ("gear", GEAR),
     ("git-branch", GIT_BRANCH),
     ("git-diff", GIT_DIFF),
+    ("globe", GLOBE),
     ("image", IMAGE),
     ("info", INFO),
     ("lightning", LIGHTNING),
@@ -114,6 +121,7 @@ pub const ALL: [(&str, char); 65] = [
     ("pencil-simple", PENCIL_SIMPLE),
     ("pencil-simple-line", PENCIL_SIMPLE_LINE),
     ("play", PLAY),
+    ("plugs", PLUGS),
     ("plus", PLUS),
     ("robot", ROBOT),
     ("scroll", SCROLL),

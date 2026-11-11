@@ -7,6 +7,7 @@ pub struct TextInput<'a> {
     placeholder: &'a str,
     width: Option<f32>,
     rows: Option<usize>,
+    password: bool,
 }
 
 impl<'a> TextInput<'a> {
@@ -16,6 +17,7 @@ impl<'a> TextInput<'a> {
             placeholder: "",
             width: None,
             rows: None,
+            password: false,
         }
     }
 
@@ -35,6 +37,12 @@ impl<'a> TextInput<'a> {
         self
     }
 
+    // dots in place of what's typed, for keys and tokens
+    pub fn password(mut self, password: bool) -> Self {
+        self.password = password;
+        self
+    }
+
     pub fn show(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui);
         let width = self.width.unwrap_or_else(|| ui.available_width());
@@ -47,7 +55,8 @@ impl<'a> TextInput<'a> {
         };
         let response = edit
             .id(id)
-            .hint_text(self.placeholder)
+            .hint_text(egui::RichText::new(self.placeholder).color(p.text_faint))
+            .password(self.password)
             .frame(
                 Frame::new()
                     .fill(p.surface)

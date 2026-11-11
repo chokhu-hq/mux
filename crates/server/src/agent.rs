@@ -1884,6 +1884,12 @@ impl Agent {
                         AgentItem::UsageLimit { message: previous, .. } if previous.trim() == message.trim()
                     )) {
                         self.usage_limit(message, None);
+                    } else if let Some(last) = self.items.len().checked_sub(1).filter(|&i| {
+                        matches!(&self.items[i], AgentItem::Assistant { text } if text.trim() == message.trim())
+                    }) {
+                        // claude often says the error as a reply too, which becomes the error rather than showing twice
+                        self.items[last] = AgentItem::Error { message };
+                        self.changed.insert(last);
                     } else {
                         self.push(AgentItem::Error { message });
                     }
@@ -2871,6 +2877,23 @@ mod tests {
     }
 
     // the order claude 2.1.312 sent things in when two messages arrived during a turn and were answered together
+    #[test]
+    fn a_claude_error_said_as_a_reply_shows_once() {
+        let mut agent = claude_agent();
+        agent.set_busy(true);
+        let said = "There's an issue with the selected model.";
+        agent.handle(json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": said }] } }));
+        agent.handle(
+            json!({ "type": "result", "subtype": "success", "is_error": true, "result": said }),
+        );
+        assert_eq!(
+            agent.items,
+            [AgentItem::Error {
+                message: said.into()
+            }]
+        );
+    }
+
     #[test]
     fn claude_is_done_when_merged_messages_get_one_answer() {
         let mut agent = claude_agent();

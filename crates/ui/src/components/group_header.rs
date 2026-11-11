@@ -142,13 +142,24 @@ impl<'a> GroupHeader<'a> {
             let name = if field.is_some() {
                 Rect::NOTHING
             } else {
-                ui.painter().text(
-                    pos2(name_x, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    self.label,
+                // a long name is cut short before the buttons, leaving room for the status dot after it
+                let dot = if self.status.is_some() {
+                    space::SM + 7.0
+                } else {
+                    0.0
+                };
+                let room = caret_center.x - button.x / 2.0 - space::SM - dot - name_x;
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    self.label.to_owned(),
                     font::semibold(text::MD + 1.0),
                     p.text,
-                )
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(0.0));
+                let galley = ui.painter().layout_job(job);
+                let at = pos2(name_x, rect.center().y - galley.size().y / 2.0);
+                let shown = Rect::from_min_size(at, galley.size());
+                ui.painter().galley(at, galley, p.text);
+                shown
             };
             let mut after = name.right();
             if let Some(status) = self.status.filter(|_| field.is_none()) {

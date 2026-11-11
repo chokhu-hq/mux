@@ -791,14 +791,27 @@ impl App {
         crumbs.set_clip_rect(crumbs.max_rect().intersect(crumbs.clip_rect()));
         crumbs.spacing_mut().item_spacing.x = space::SM;
         if !info.project.is_empty() {
-            crumbs.add(
-                egui::Label::new(
-                    egui::RichText::new(&info.project)
-                        .font(font::medium(text::MD))
-                        .color(p.text_faint),
-                )
-                .truncate(),
+            // the project gives way to the session's own title, keeping only what the title leaves over
+            let title = crumbs
+                .painter()
+                .layout_no_wrap(info.title.clone(), font::medium(text::MD), p.text)
+                .size()
+                .x;
+            let extras = 3.0 * space::SM + icon::MD + 12.0;
+            let room = crumbs.available_width();
+            let max = (room - title - extras).max(room * 0.4).max(0.0);
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                info.project.clone(),
+                font::medium(text::MD),
+                p.text_faint,
             );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(max);
+            let project = crumbs.painter().layout_job(job);
+            let cut = project.elided;
+            let response = crumbs.add(egui::Label::new(project));
+            if cut {
+                response.tip(&info.project);
+            }
             crumbs.label(
                 egui::RichText::new("›")
                     .font(font::regular(text::MD))

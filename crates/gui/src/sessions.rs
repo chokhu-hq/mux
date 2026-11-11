@@ -227,6 +227,8 @@ pub struct Sessions {
     pub agent_defaults: mux_core::protocol::AgentSettings,
     // the mcp servers the server gives every agent, none until it has sent them
     pub mcp: Option<Vec<mux_core::protocol::McpServer>>,
+    // how each of them last started in each cli
+    pub mcp_status: Vec<(String, Provider, mux_core::protocol::McpState)>,
 }
 
 impl Sessions {
@@ -529,6 +531,7 @@ impl Sessions {
                 self.resets.insert(provider, resets);
             }
             ServerMsg::McpServers { servers } => self.mcp = Some(servers),
+            ServerMsg::McpStatus { statuses } => self.mcp_status = statuses,
             ServerMsg::ResetResult { provider, result } => {
                 if self.reset_pending == Some(provider) {
                     self.reset_pending = None;

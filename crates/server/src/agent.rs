@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::Stdio;
 use base64::Engine;
 use mux_core::protocol::{
     AgentItem, AgentSettings, AgentSummary, ContextUsage, Decision, FileChange, ItemStatus,
-    McpServer, QueueAction, Queued, Skill, UsageWindow, is_image,
+    McpServer, McpState, QueueAction, Queued, Skill, UsageWindow, is_image,
 };
 use mux_core::{Access, Provider, SessionStatus};
 use serde::{Deserialize, Serialize};
@@ -195,6 +195,9 @@ pub struct Agent {
     // the mcp servers mux adds, and the ones the running cli was started with
     pub mcp: Vec<McpServer>,
     started_mcp: Vec<McpServer>,
+    // how mux's servers started since the server last asked, and which ones already said they failed this launch
+    mcp_states: Vec<(String, McpState)>,
+    mcp_failed: HashSet<String>,
     // claude's latest reply, which a message sent now would be rewound to
     claude_head: Option<String>,
     // where claude's next launch picks the session up, after a rewind
@@ -314,6 +317,8 @@ impl Agent {
             default_model: None,
             mcp: Vec::new(),
             started_mcp: Vec::new(),
+            mcp_states: Vec::new(),
+            mcp_failed: HashSet::new(),
             claude_head: saved.claude_head,
             resume_at: saved.resume_at,
             pending_revert: saved.pending_revert,
@@ -397,6 +402,33 @@ impl Agent {
     // the skills when they changed since the last call
     pub fn take_skills(&mut self) -> Option<Vec<Skill>> {
         std::mem::take(&mut self.commands_changed).then(|| self.skills())
+    }
+
+    // one of mux's servers started or failed, which a failure also says in the chat, once each launch
+    fn mcp_started(&mut self, name: &str, state: McpState) {
+        if !self.started_mcp.iter().any(|s| s.enabled && s.name == name) {
+            return;
+        }
+        if let McpState::Failed(reason) = &state
+            && self.mcp_failed.insert(name.to_owned())
+        {
+            let reason = reason.trim();
+            let message = if reason.is_empty() {
+                format!(
+                    "The MCP server {name} couldn't start, so its tools aren't available. Check its command in Settings, under MCP servers."
+                )
+            } else {
+                format!(
+                    "The MCP server {name} couldn't start, so its tools aren't available. {reason}"
+                )
+            };
+            self.push(AgentItem::Error { message });
+        }
+        self.mcp_states.push((name.to_owned(), state));
+    }
+
+    pub fn take_mcp_states(&mut self) -> Vec<(String, McpState)> {
+        std::mem::take(&mut self.mcp_states)
     }
 
     pub fn is_running(&self) -> bool {
@@ -1250,6 +1282,7 @@ impl Agent {
         self.generation = generation;
         self.session = session;
         self.started_mcp = self.mcp.clone();
+        self.mcp_failed.clear();
         self.process = Some(Process {
             stdin: tx,
             child: Some(child),
@@ -1465,6 +1498,17 @@ impl Agent {
             return;
         }
         match method {
+            "mcpServer/startupStatus/updated" => {
+                let state = match params["status"].as_str() {
+                    Some("ready") => McpState::Connected,
+                    Some("starting") => McpState::Starting,
+                    Some("failed") => {
+                        McpState::Failed(params["error"].as_str().unwrap_or_default().to_owned())
+                    }
+                    _ => return,
+                };
+                self.mcp_started(params["name"].as_str().unwrap_or_default(), state);
+            }
             "turn/started" => {
                 self.turn_id = params["turn"]["id"].as_str().map(str::to_owned);
                 if let Some(turn) = self.turn_id.clone() {
@@ -1712,6 +1756,16 @@ impl Agent {
             }
             Some("system") if msg["subtype"] == "init" => {
                 self.session_id = msg["session_id"].as_str().map(str::to_owned);
+                // claude says how each server started, without a reason when one failed
+                for server in msg["mcp_servers"].as_array().into_iter().flatten() {
+                    let state = match server["status"].as_str() {
+                        Some("connected") => McpState::Connected,
+                        Some("failed") => McpState::Failed(String::new()),
+                        Some("pending") => McpState::Starting,
+                        _ => continue,
+                    };
+                    self.mcp_started(server["name"].as_str().unwrap_or_default(), state);
+                }
                 // skills are prompts and work when claude runs headless, unlike its terminal commands
                 let commands: Vec<String> = msg["skills"]
                     .as_array()
@@ -3635,6 +3689,46 @@ mod tests {
             written(&mut rx),
             json!({ "id": 3, "result": { "action": "accept", "_meta": { "persist": "session" } } })
         );
+    }
+
+    #[test]
+    fn a_mux_server_that_fails_to_start_says_so_once() {
+        let mut agent = agent();
+        agent.started_mcp = vec![McpServer {
+            name: "probe".into(),
+            enabled: true,
+            transport: mux_core::protocol::McpTransport::Http {
+                url: "http://x".into(),
+                headers: Vec::new(),
+            },
+        }];
+        let status = |name: &str, status: &str| {
+            json!({ "method": "mcpServer/startupStatus/updated",
+            "params": { "name": name, "status": status, "error": "No such file or directory" } })
+        };
+        // codex retries a failed server, which is still only said once
+        for _ in 0..2 {
+            agent.handle(status("probe", "failed"));
+        }
+        agent.handle(status("their_own", "failed"));
+        assert_eq!(agent.items.len(), 1);
+        assert!(
+            matches!(&agent.items[0], AgentItem::Error { message } if message.contains("probe") && message.contains("No such file"))
+        );
+        let states = agent.take_mcp_states();
+        assert_eq!(states.len(), 2, "only mux's own servers are tracked");
+
+        let mut claude = claude_agent();
+        claude.started_mcp = agent.started_mcp.clone();
+        claude.handle(
+            json!({ "type": "system", "subtype": "init", "session_id": "s",
+            "mcp_servers": [{ "name": "probe", "status": "connected" }] }),
+        );
+        assert_eq!(
+            claude.take_mcp_states(),
+            [("probe".to_owned(), McpState::Connected)]
+        );
+        assert!(claude.items.is_empty());
     }
 
     #[test]

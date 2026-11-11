@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use mux_core::protocol::{
-    self, AgentItem, ClientMsg, LimitReset, ModelOption, PROTOCOL, ResetResult, ServerMsg,
-    UsageWindow,
+    self, AgentItem, ClientMsg, LimitReset, McpState, ModelOption, PROTOCOL, ResetResult,
+    ServerMsg, UsageWindow,
 };
 use mux_core::{Provider, SessionStatus};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -108,6 +108,7 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
     let seen = store.sessions_mut().map(|s| (s.id, s.status)).collect();
     store.save(&state)?;
     let server = Server {
+        mcp_status: Vec::new(),
         store,
         state,
         clients: HashMap::new(),
@@ -317,6 +318,8 @@ where
 }
 
 struct Server {
+    // how each of mux's mcp servers last started in each cli, for settings to show
+    mcp_status: Vec<(String, Provider, McpState)>,
     store: Store,
     state: PathBuf,
     clients: HashMap<u64, Client>,
@@ -411,6 +414,9 @@ impl Server {
                 }
                 let _ = tx.send(ServerMsg::McpServers {
                     servers: self.store.mcp.clone(),
+                });
+                let _ = tx.send(ServerMsg::McpStatus {
+                    statuses: self.mcp_status.clone(),
                 });
                 self.clients.insert(client, tx);
             }
@@ -803,6 +809,10 @@ impl Server {
                     .collect();
                 mcp::forget_idle_claude(&running);
                 self.store.mcp = servers;
+                let names: Vec<&str> = self.store.mcp.iter().map(|s| s.name.as_str()).collect();
+                self.mcp_status
+                    .retain(|(name, ..)| names.contains(&name.as_str()));
+                self.broadcast_mcp_status();
                 self.changed();
                 for tx in self.clients.values() {
                     let _ = tx.send(ServerMsg::McpServers {
@@ -1092,6 +1102,7 @@ impl Server {
         let skills = agent.take_skills();
         let queue = agent.take_queue();
         let background = agent.take_background();
+        let mcp_states = agent.take_mcp_states();
         // saved when a turn starts or ends rather than on every streamed word, and the sidebar's summary with it
         let settled = busy.is_some()
             || agent.ids_changed()
@@ -1134,6 +1145,19 @@ impl Server {
         if let Some(tasks) = background {
             self.send_watchers(id, ServerMsg::AgentBackground { id, tasks });
         }
+        if !mcp_states.is_empty() {
+            for (name, state) in mcp_states {
+                match self
+                    .mcp_status
+                    .iter_mut()
+                    .find(|(n, p, _)| *n == name && *p == provider)
+                {
+                    Some(entry) => entry.2 = state,
+                    None => self.mcp_status.push((name, provider, state)),
+                }
+            }
+            self.broadcast_mcp_status();
+        }
         if let Some((queue, held)) = queue {
             // waiting messages are kept even when nothing else about the chat changed
             if let Some(agent) = self.agents.get(&id)
@@ -1155,6 +1179,14 @@ impl Server {
         {
             info.summary = Some(summary);
             self.changed();
+        }
+    }
+
+    fn broadcast_mcp_status(&self) {
+        for tx in self.clients.values() {
+            let _ = tx.send(ServerMsg::McpStatus {
+                statuses: self.mcp_status.clone(),
+            });
         }
     }
 

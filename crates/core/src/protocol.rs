@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 33;
+pub const PROTOCOL: u32 = 34;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -226,6 +226,15 @@ impl McpServer {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }
+}
+
+// how one of mux's mcp servers last started in an agent cli
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpState {
+    Starting,
+    Connected,
+    // with the cli's reason, when it gave one
+    Failed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +680,10 @@ pub enum ServerMsg {
     },
     McpServers {
         servers: Vec<McpServer>,
+    },
+    // the latest state of each of mux's mcp servers in each cli that has started it
+    McpStatus {
+        statuses: Vec<(String, Provider, McpState)>,
     },
 }
 

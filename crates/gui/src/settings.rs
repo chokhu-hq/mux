@@ -57,6 +57,7 @@ pub struct Page<'a> {
     pub themes: &'a mut crate::themes::Themes,
     // none until the server has sent its list
     pub mcp: Option<&'a mut Vec<mux_core::protocol::McpServer>>,
+    pub mcp_status: &'a [(String, Provider, mux_core::protocol::McpState)],
 }
 
 impl Page<'_> {
@@ -123,9 +124,12 @@ impl Page<'_> {
                         self.themes,
                     ),
                     // a windows app using wsl hands the commands to linux
-                    Tab::Mcp => {
-                        crate::mcp::show(ui, self.mcp, cfg!(windows) && self.prefs.wsl.is_none())
-                    }
+                    Tab::Mcp => crate::mcp::show(
+                        ui,
+                        self.mcp,
+                        self.mcp_status,
+                        cfg!(windows) && self.prefs.wsl.is_none(),
+                    ),
                     Tab::Usage => {
                         crate::token_usage::show(ui, self.tokens.as_ref(), &self.models);
                         usage(ui, &self.usage);

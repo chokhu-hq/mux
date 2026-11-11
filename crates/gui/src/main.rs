@@ -886,6 +886,7 @@ impl App {
         let distros = self.distros(&ctx);
         let previewed = self.themes.preview.take();
         let mut mcp = self.sessions.mcp.clone();
+        let mcp_status = self.sessions.mcp_status.clone();
         let close = settings::Page {
             tab: &mut self.settings_tab,
             prefs: &mut prefs,
@@ -897,6 +898,7 @@ impl App {
             models: self.sessions.models().clone(),
             themes: &mut self.themes,
             mcp: mcp.as_mut(),
+            mcp_status: &mcp_status,
         }
         .show(ui);
         if mcp != self.sessions.mcp

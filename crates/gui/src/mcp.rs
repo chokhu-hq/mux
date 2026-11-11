@@ -1,5 +1,6 @@
 use eframe::egui::{self, RichText};
-use mux_core::protocol::{McpServer, McpTransport};
+use mux_core::Provider;
+use mux_core::protocol::{McpServer, McpState, McpTransport};
 use mux_ui::theme::{self, font, space, text};
 use mux_ui::{Button, IconButton, Segmented, TextInput, TooltipExt, icons};
 use serde_json::Value;
@@ -99,7 +100,12 @@ impl Draft {
 }
 
 // the list is none until the server has sent it, since changing it before then would replace what's saved
-pub fn show(ui: &mut egui::Ui, servers: Option<&mut Vec<McpServer>>, windows: bool) {
+pub fn show(
+    ui: &mut egui::Ui,
+    servers: Option<&mut Vec<McpServer>>,
+    statuses: &[(String, Provider, McpState)],
+    windows: bool,
+) {
     let p = theme::palette(ui);
     let Some(servers) = servers else {
         ui.label(
@@ -158,6 +164,10 @@ pub fn show(ui: &mut egui::Ui, servers: Option<&mut Vec<McpServer>>, windows: bo
                     }
                     ui.add_space(space::SM);
                     Segmented::new(&mut server.enabled, &[(true, "On"), (false, "Off")]).show(ui);
+                    if server.enabled {
+                        ui.add_space(space::SM);
+                        status(ui, &name, statuses);
+                    }
                 });
             });
         }
@@ -295,6 +305,67 @@ pub fn show(ui: &mut egui::Ui, servers: Option<&mut Vec<McpServer>>, windows: bo
     });
 
     ui.data_mut(|d| d.insert_temp(id, draft));
+}
+
+// how the server last started, worst first, with which cli said so a hover away
+fn status(ui: &mut egui::Ui, name: &str, statuses: &[(String, Provider, McpState)]) {
+    let p = theme::palette(ui);
+    let mine: Vec<(Provider, &McpState)> = statuses
+        .iter()
+        .filter(|(n, ..)| n == name)
+        .map(|(_, provider, state)| (*provider, state))
+        .collect();
+    let failed: Vec<String> = mine
+        .iter()
+        .filter_map(|(provider, state)| match state {
+            McpState::Failed(reason) if reason.is_empty() => {
+                Some(format!("{} couldn't start it", provider.label()))
+            }
+            McpState::Failed(reason) => Some(format!("{}: {reason}", provider.label())),
+            _ => None,
+        })
+        .collect();
+    let connected: Vec<&str> = mine
+        .iter()
+        .filter(|(_, state)| **state == McpState::Connected)
+        .map(|(provider, _)| provider.label())
+        .collect();
+    let (glyph, label, color, tip) = if !failed.is_empty() {
+        (
+            icons::WARNING_CIRCLE,
+            "Failed",
+            p.warning,
+            failed.join("\n"),
+        )
+    } else if !connected.is_empty() {
+        let tip = format!("Connected in {}", connected.join(", "));
+        (icons::CHECK_CIRCLE, "Connected", p.success, tip)
+    } else if !mine.is_empty() {
+        (
+            icons::CLOCK,
+            "Starting",
+            p.text_faint,
+            "Starting up".to_owned(),
+        )
+    } else {
+        return;
+    };
+    let shown = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = space::XS;
+            ui.label(
+                RichText::new(label)
+                    .font(font::regular(text::SM + 1.0))
+                    .color(p.text_muted),
+            );
+            ui.label(
+                RichText::new(glyph.to_string())
+                    .font(mux_ui::theme::font::icon(mux_ui::theme::icon::MD))
+                    .color(color),
+            );
+        })
+        .response;
+    shown.tip(tip);
 }
 
 fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {

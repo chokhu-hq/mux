@@ -59,6 +59,7 @@ pub fn show(
             d.remove_temp::<String>(state_id.with("search"));
             d.remove_temp::<Provider>(state_id.with("viewing"));
             d.remove_temp::<bool>(state_id.with("access"));
+            d.remove_temp::<Cursor>(state_id.with("cursor"));
         });
     }
 
@@ -75,6 +76,14 @@ pub fn show(
             }
         });
     next
+}
+
+// the row the keys are on, for the search and agent it was set under
+#[derive(Clone, Default)]
+struct Cursor {
+    query: String,
+    viewing: Provider,
+    row: usize,
 }
 
 fn pick<'a>(
@@ -116,6 +125,27 @@ fn panel(
     let mut viewing = ui
         .data(|d| d.get_temp::<Provider>(viewing_id))
         .unwrap_or(settings.provider);
+    // arrows move through the models, enter picks one and tab steps through the agents
+    let (up, down, enter, back, tab) = ui.input_mut(|i| {
+        let none = egui::Modifiers::NONE;
+        // shift first, since a plain tab check would take shift+tab too
+        let back = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+        (
+            i.consume_key(none, egui::Key::ArrowUp),
+            i.consume_key(none, egui::Key::ArrowDown),
+            i.consume_key(none, egui::Key::Enter),
+            back,
+            i.consume_key(none, egui::Key::Tab),
+        )
+    });
+    if tab || back {
+        let at = Provider::ALL
+            .iter()
+            .position(|p| *p == viewing)
+            .unwrap_or(0);
+        let step = if back { Provider::ALL.len() - 1 } else { 1 };
+        viewing = Provider::ALL[(at + step) % Provider::ALL.len()];
+    }
 
     // the agents down the side, the one being looked at marked with a bar like t3 code's
     let mut tabs = Vec::new();
@@ -231,6 +261,34 @@ fn panel(
             .filter(|(_, m)| m.name.to_lowercase().contains(&query))
             .collect()
     };
+    // the highlighted row starts on the chosen model and starts over when the list changes
+    let cursor_id = state_id.with("cursor");
+    let start = rows
+        .iter()
+        .position(|(provider, model)| {
+            *provider == settings.provider
+                && pick(models, settings, *provider).is_some_and(|c| c.id == model.id)
+        })
+        .unwrap_or(0);
+    let mut cursor = ui
+        .data(|d| d.get_temp::<Cursor>(cursor_id))
+        .filter(|c| c.query == query && c.viewing == viewing)
+        .unwrap_or(Cursor {
+            query: query.clone(),
+            viewing,
+            row: start,
+        });
+    let moved = (up || down) && !rows.is_empty();
+    if moved {
+        let last = rows.len() - 1;
+        cursor.row = if down {
+            (cursor.row + 1).min(last)
+        } else {
+            cursor.row.saturating_sub(1)
+        };
+    }
+    cursor.row = cursor.row.min(rows.len().saturating_sub(1));
+    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
     let body = Rect::from_min_max(pos2(list.left(), header.bottom() + 1.0), list.max);
     let mut content = ui.new_child(
         egui::UiBuilder::new()
@@ -259,12 +317,19 @@ fn panel(
             .auto_shrink(false)
             .show(&mut content, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for (provider, model) in rows {
+                for (n, (provider, model)) in rows.into_iter().enumerate() {
                     let blocked = busy && provider != settings.provider;
                     let chosen = provider == settings.provider
                         && pick(models, settings, provider).is_some_and(|c| c.id == model.id);
-                    let row = model_row(ui, provider, model, chosen, blocked);
-                    if row.clicked() && !blocked && !chosen {
+                    let lit = n == cursor.row;
+                    let row = model_row(ui, provider, model, chosen, blocked, lit);
+                    if row.hovered() && pointer_moved {
+                        cursor.row = n;
+                    }
+                    if lit && moved {
+                        row.scroll_to_me(None);
+                    }
+                    if (row.clicked() || (lit && enter)) && !blocked && !chosen {
                         let mut changed = settings.clone();
                         // effort and speed carry over only when the new model supports them
                         if changed.provider != provider
@@ -283,6 +348,7 @@ fn panel(
                 }
             });
     }
+    ui.data_mut(|d| d.insert_temp(cursor_id, cursor));
 
     // the current model's reasoning, picked beside the list
     let current = pick(models, settings, settings.provider);
@@ -388,6 +454,7 @@ fn model_row(
     model: &ModelOption,
     chosen: bool,
     blocked: bool,
+    lit: bool,
 ) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
@@ -402,7 +469,7 @@ fn model_row(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .tip(&model.description)
     };
-    if response.hovered() && !blocked {
+    if lit && !blocked {
         ui.painter().rect_filled(
             rect,
             CornerRadius::same(radius::MD),

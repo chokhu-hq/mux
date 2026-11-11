@@ -54,6 +54,48 @@ pub fn clear(window: &impl HasWindowHandle) {
     }
 }
 
+// macos places the traffic lights for its own short title bar, above the line mux centres its buttons on.
+// the strip holding them is made taller to bring them down, and set again whenever macos lays it out afresh
+#[cfg(target_os = "macos")]
+pub fn center_traffic_lights(window: &impl HasWindowHandle, bar: f32) {
+    use objc2_app_kit::{NSView, NSWindowButton, NSWindowStyleMask};
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // the handle is winit's live content view, and this runs on the main thread that owns it
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    // full screen has no title bar to line up with
+    if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+        return;
+    }
+    let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) else {
+        return;
+    };
+    // both views belong to the window, which holds them for as long as this runs
+    let Some(strip) = (unsafe { close.superview().and_then(|titlebar| titlebar.superview()) })
+    else {
+        return;
+    };
+    // the buttons keep their place from the strip's bottom, so its height sets how far down they sit
+    let button = close.frame();
+    let height = f64::from(bar) / 2.0 + button.size.height / 2.0 + button.origin.y;
+    let mut frame = strip.frame();
+    let top = window.frame().size.height - height;
+    if (frame.size.height - height).abs() < 0.5 && (frame.origin.y - top).abs() < 0.5 {
+        return;
+    }
+    frame.size.height = height;
+    frame.origin.y = top;
+    strip.setFrame(frame);
+}
+
 // windows 11 draws its acrylic light or dark by the window's own dark mode, which starts out light whatever
 // the app looks like, so a dark mux would otherwise sit on a pale frost that greys everything out
 #[cfg(windows)]

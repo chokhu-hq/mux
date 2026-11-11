@@ -2596,6 +2596,8 @@ impl eframe::App for App {
             }
             backdrop::keep_caption_buttons_away(frame, blurred);
         }
+        #[cfg(target_os = "macos")]
+        backdrop::center_traffic_lights(frame, mux_ui::window::TITLEBAR_HEIGHT);
         #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         let blurred = {
             let _ = frame;

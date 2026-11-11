@@ -76,12 +76,15 @@ fn main() -> eframe::Result {
     if !try_see_through() {
         SEE_THROUGH.store(false, std::sync::atomic::Ordering::Relaxed);
     }
-    let mut viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
-    if let Ok(icon) =
-        eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/mux-256.png"))
-    {
-        viewport = viewport.with_icon(icon);
-    }
+    let viewport = window::viewport("Mux", vec2(1200.0, 800.0)).with_app_id("mux");
+    // on macos the bundle's icon is used, since one set here replaces it in the dock and skips apple's sizing
+    #[cfg(not(target_os = "macos"))]
+    let viewport = match eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../../assets/icons/mux-256.png"
+    )) {
+        Ok(icon) => viewport.with_icon(icon),
+        Err(_) => viewport,
+    };
     let options = eframe::NativeOptions {
         viewport,
         // on wayland mux reads the clipboard itself, since egui's fallback can't see pictures

@@ -107,15 +107,17 @@ jobs:
           lipo -create -output $app/MacOS/mux-gui \
             target/aarch64-apple-darwin/release/mux-gui \
             target/x86_64-apple-darwin/release/mux-gui
+          # the mac set follows apple's grid, an 824 point tile with a shadow in a 1024 canvas, so it sits with other icons
           set=mux.iconset
           mkdir $set
           for size in 16 32 128 256 512; do
-            cp assets/icons/mux-$size.png $set/icon_${size}x${size}.png
+            cp assets/icons/macos/mux-$size.png $set/icon_${size}x${size}.png
           done
-          cp assets/icons/mux-32.png $set/icon_16x16@2x.png
-          cp assets/icons/mux-64.png $set/icon_32x32@2x.png
-          cp assets/icons/mux-256.png $set/icon_128x128@2x.png
-          cp assets/icons/mux-512.png $set/icon_256x256@2x.png
+          cp assets/icons/macos/mux-32.png $set/icon_16x16@2x.png
+          cp assets/icons/macos/mux-64.png $set/icon_32x32@2x.png
+          cp assets/icons/macos/mux-256.png $set/icon_128x128@2x.png
+          cp assets/icons/macos/mux-512.png $set/icon_256x256@2x.png
+          cp assets/icons/macos/mux-1024.png $set/icon_512x512@2x.png
           iconutil -c icns $set -o $app/Resources/mux.icns
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           cat > $app/Info.plist <<EOF

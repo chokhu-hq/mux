@@ -192,13 +192,13 @@ impl Server {
     }
 
     // listed fresh each time a chat opens, so new files can be mentioned without restarting
-    pub(super) fn fetch_files(&self, id: u64) {
+    pub(super) fn fetch_files(&self, id: u64, refresh: bool) {
         let Some(folder) = self.store.session_path(id).map(PathBuf::from) else {
             return;
         };
         let events = self.events.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = events.send(Event::Files(id, files::list(&folder)));
+            let _ = events.send(Event::Files(id, files::list(&folder), refresh));
         });
     }
 
@@ -291,7 +291,7 @@ impl Server {
             self.send_watchers(id, ServerMsg::AgentBusy { id, busy });
             // the turn may have added or removed files, so `@` mentions see them without reopening the chat
             if !busy {
-                self.fetch_files(id);
+                self.fetch_files(id, true);
             }
         }
         if let Some(windows) = usage {

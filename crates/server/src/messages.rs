@@ -44,6 +44,7 @@ impl Server {
                 }
                 self.processes.remove(&id);
                 self.agents.remove(&id);
+                self.files_sent.remove(&id);
                 let _ = std::fs::remove_file(self.agent_path(id));
                 mcp::forget_claude(id);
                 mcp::forget_images(id);
@@ -104,7 +105,7 @@ impl Server {
                 self.send(client, ServerMsg::AgentQueue { id, queue, held });
                 self.send(client, ServerMsg::AgentBackground { id, tasks });
                 self.fetch_skills(id, provider);
-                self.fetch_files(id);
+                self.fetch_files(id, false);
                 for provider in Provider::ALL {
                     if !self.models.contains_key(&provider) {
                         self.fetch_models(provider);

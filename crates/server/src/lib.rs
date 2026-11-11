@@ -62,8 +62,8 @@ pub enum Event {
     History(Box<history::History>),
     // the skills found for a session's agent, tagged with which agent they're for
     Skills(u64, Provider, Vec<mux_core::protocol::Skill>),
-    // the project's files, listed for a session's `@` menu
-    Files(u64, Vec<String>),
+    // the project's files, listed for a session's `@` menu, and whether it's a refresh after a turn
+    Files(u64, Vec<String>, bool),
     // an agent's usage limit has reset, given with the reset it was waiting for
     Wake(u64, u64),
     // how spending one of an account's limit resets went
@@ -122,6 +122,7 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         seen,
         models: HashMap::new(),
         fetching_models: HashSet::new(),
+        files_sent: HashMap::new(),
         usage: HashMap::new(),
         resets: HashMap::new(),
         history: Some(Box::default()),
@@ -335,6 +336,8 @@ struct Server {
     // what each agent cli can run, fetched once the first agent is opened
     models: HashMap<Provider, Vec<ModelOption>>,
     fetching_models: HashSet<Provider>,
+    // a hash of the file list each session's clients last got, so a turn that changed no files sends nothing
+    files_sent: HashMap<u64, u64>,
     // the latest plan limits each agent cli reported
     usage: HashMap<Provider, Vec<UsageWindow>>,
     // the limit resets each agent's account has banked
@@ -494,8 +497,17 @@ impl Server {
                     self.agent_changed(id);
                 }
             }
-            Event::Files(id, files) => {
-                self.send_watchers(id, ServerMsg::AgentFiles { id, files });
+            Event::Files(id, files, refresh) => {
+                let hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    files.hash(&mut hasher);
+                    hasher.finish()
+                };
+                let unchanged = self.files_sent.insert(id, hash) == Some(hash);
+                if !(refresh && unchanged) {
+                    self.send_watchers(id, ServerMsg::AgentFiles { id, files });
+                }
             }
             Event::History(history) => {
                 let (today, days) = history.summary();

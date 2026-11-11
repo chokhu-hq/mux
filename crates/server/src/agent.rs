@@ -3692,6 +3692,28 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_in_page_comes_with_a_link_to_open_but_only_a_web_one() {
+        let mut agent = claude_agent();
+        let ask = |url: &str| {
+            json!({ "type": "control_request", "request_id": "r", "request": {
+            "subtype": "elicitation", "mcp_server_name": "linear", "message": "Sign in", "mode": "url", "url": url } })
+        };
+        agent.handle(ask("https://linear.app/oauth"));
+        agent.handle(ask("file:///etc/passwd"));
+        let urls: Vec<Option<String>> = agent
+            .items
+            .iter()
+            .map(|i| match i {
+                AgentItem::Question {
+                    form: Some(form), ..
+                } => form.url.clone(),
+                _ => panic!("expected a form"),
+            })
+            .collect();
+        assert_eq!(urls, [Some("https://linear.app/oauth".into()), None]);
+    }
+
+    #[test]
     fn a_mux_server_that_fails_to_start_says_so_once() {
         let mut agent = agent();
         agent.started_mcp = vec![McpServer {

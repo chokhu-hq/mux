@@ -208,6 +208,9 @@ pub struct Question {
 pub struct Form {
     pub server: String,
     pub message: String,
+    // a page the server wants opened, like a sign-in, when it's asking for that rather than a form
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 // an mcp server mux gives every agent it starts, alongside the ones in each cli's own config

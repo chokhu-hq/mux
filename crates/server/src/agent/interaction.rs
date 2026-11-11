@@ -44,12 +44,18 @@ impl Agent {
     // an mcp server asking the person for something, either a form to fill in or a page to visit
     pub(super) fn mcp_form(&mut self, request: Value, server: &str, params: &Value) {
         let message = params["message"].as_str().unwrap_or_default().to_owned();
+        // only a web page is offered to open, never a file or another kind of link
+        let url = params["url"]
+            .as_str()
+            .filter(|u| {
+                params["mode"] == "url" && (u.starts_with("https://") || u.starts_with("http://"))
+            })
+            .map(str::to_owned);
         let (questions, schema) = if params["mode"] == "url" {
-            let url = params["url"].as_str().unwrap_or_default().to_owned();
             let done = Question {
                 id: String::new(),
-                header: "Open this page, then come back".to_owned(),
-                question: url,
+                header: "Open the page, then come back".to_owned(),
+                question: params["url"].as_str().unwrap_or_default().to_owned(),
                 options: vec![QuestionOption {
                     label: "Done".to_owned(),
                     description: String::new(),
@@ -94,6 +100,7 @@ impl Agent {
         let form = Form {
             server: server.to_owned(),
             message,
+            url,
         };
         self.ask(request, questions, schema, Some(form));
     }

@@ -146,6 +146,17 @@ pub fn question(
             Some(form) => {
                 let title = format!("{} needs your input", form.server);
                 heading(ui, icons::CHAT_CIRCLE, p.accent, &title, &form.message);
+                if let Some(url) = &form.url {
+                    ui.add_space(space::MD);
+                    if Button::new("Open page")
+                        .primary()
+                        .show(ui)
+                        .on_hover_text(url)
+                        .clicked()
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+                }
             }
             None => {
                 let title = if questions.len() == 1 {

@@ -5,9 +5,9 @@ Mux is a native Rust and egui harness for the Codex CLI, Claude Code and OpenCod
 ## Layout
 
 - `crates/core`: shared code. `protocol.rs` holds the client and server messages and `PROTOCOL` (bump it whenever a message changes). `lib.rs` has `build_id()`, `login_shell()` and the Windows helpers (`windows_build()`, `windows_path()`).
-- `crates/server`: the background server. `agent.rs` drives Claude Code, `agent/opencode.rs` drives OpenCode, and Codex goes through its app-server JSON-RPC. `models.rs` lists models, `store.rs` saves state, `tray.rs` is the Windows tray.
+- `crates/server`: the background server. `lib.rs` runs the event loop, `messages.rs` handles what clients send and `agents.rs` the agent sessions. `agent.rs` holds one agent conversation, with each agent's protocol in `agent/claude.rs`, `agent/codex.rs` (its app-server JSON-RPC) and `agent/opencode.rs`, and switching agents mid-chat in `agent/switch.rs`. `models.rs` lists models, `store.rs` saves state, `tray.rs` is the Windows tray.
 - `crates/ui`: reusable widgets in `components/`, `theme.rs` (palettes, visuals, the `SelectionWatch` plugin), `highlight.rs` (syntax colours taken from the theme), `capture.rs` (screenshots).
-- `crates/gui`: the app. `main.rs` is the window, sidebar and chat. `sessions.rs` tracks sessions, `settings.rs` is the settings page, `themes.rs` loads themes, `update.rs` and `install.rs` are the self-updater.
+- `crates/gui`: the app. `main.rs` is the window and app state, `chat.rs` an agent's chat and composer controls, `picker.rs` the model picker, `titlebar.rs`, `split.rs` the side panel, and `renderer.rs` the Windows renderer choice. `sessions.rs` tracks sessions, with the sidebar in `sessions/sidebar.rs` and the chat mapping in `sessions/transcript.rs`. `settings.rs` is the settings page, `themes.rs` loads themes, `update.rs` and `install.rs` are the self-updater.
 - `crates/gui/themes/*.json`: the built-in themes, embedded at build time. Custom themes go in `<data dir>/themes/*.json` and can `extends` a built-in one.
 - `packaging/windows/mux.iss`: the Inno Setup installer. Never change its `AppId`.
 - `.github/workflows/release.yml`: builds, signs and publishes every push to `main` as the Experimental release.

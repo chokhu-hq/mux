@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use egui::{
     Align2, Color32, CursorIcon, Frame, Key, Margin, Modifiers, Response, ScrollArea, Sense,
     Stroke, TextEdit, Ui, vec2,
@@ -35,7 +37,7 @@ pub struct Composer<'a> {
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
     commands: &'a [super::SlashCommand],
-    files: &'a [String],
+    files: Option<&'a Arc<[String]>>,
     history: &'a [&'a str],
     queued: bool,
 }
@@ -51,14 +53,19 @@ impl<'a> Composer<'a> {
             context: None,
             attachments: None,
             commands: &[],
-            files: &[],
+            files: None,
             history: &[],
             queued: false,
         }
     }
 
     // the project's files, offered by typing `@`
-    pub fn files(mut self, files: &'a [String]) -> Self {
+    pub fn files(mut self, files: &'a Arc<[String]>) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    pub(super) fn files_from(mut self, files: Option<&'a Arc<[String]>>) -> Self {
         self.files = files;
         self
     }
@@ -142,7 +149,7 @@ impl<'a> Composer<'a> {
         let has_files = self.attachments.as_ref().is_some_and(|a| !a.is_empty());
         // the slash menu reads its keys first, so enter picks a command rather than sending
         let mut picked = None;
-        if !self.commands.is_empty() || !self.files.is_empty() {
+        if !self.commands.is_empty() || self.files.is_some_and(|f| !f.is_empty()) {
             let anchor = ui.cursor().min;
             let width = ui.available_width().min(440.0);
             if let Some(super::slash::Pick::Run(name)) = super::slash::menu(

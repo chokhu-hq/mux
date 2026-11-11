@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use egui::text::{CCursor, CCursorRange};
 use egui::{Align2, CornerRadius, Id, Key, Modifiers, Order, Pos2, Sense, Ui, vec2};
 
@@ -42,7 +44,7 @@ pub fn menu(
     edit_id: Id,
     draft: &mut String,
     commands: &[SlashCommand],
-    files: &[String],
+    files: Option<&Arc<[String]>>,
     anchor: Pos2,
     width: f32,
     focused: bool,
@@ -73,10 +75,12 @@ pub fn menu(
     let dismissed = ui.data(|d| d.get_temp::<String>(state_id.with("dismissed")));
     let open = focused && query.is_some() && dismissed.as_deref() != Some(draft.as_str());
     let query = query.unwrap_or_default();
-    let matches = if file {
-        file_rows(files, &query)
-    } else {
-        command_rows(commands, slash, &query)
+    // nothing is matched while the menu is shut, since that's most frames
+    let matches = match files {
+        _ if !open => Vec::new(),
+        Some(files) if file => file_rows(files, &found_files(ui, state_id, files, &query)),
+        None if file => Vec::new(),
+        _ => command_rows(commands, slash, &query),
     };
     let shown = spring_bool(
         ui.ctx(),
@@ -257,26 +261,62 @@ fn command_rows<'a>(commands: &'a [SlashCommand], slash: bool, query: &str) -> V
         .collect()
 }
 
+// the lowercased paths and the matches for what's typed, kept between frames
+// because a big repo takes milliseconds to search and the menu redraws far more often than it's typed in
+#[derive(Clone, Default)]
+struct FileSearch {
+    files: Option<Arc<[String]>>,
+    lower: Arc<[String]>,
+    query: String,
+    found: Arc<[usize]>,
+}
+
+fn found_files(ui: &Ui, id: Id, files: &Arc<[String]>, query: &str) -> Arc<[usize]> {
+    ui.data_mut(|d| {
+        let search = d.get_temp_mut_or_default::<FileSearch>(id.with("files"));
+        let same_files = search.files.as_ref().is_some_and(|f| Arc::ptr_eq(f, files));
+        if !same_files {
+            search.files = Some(files.clone());
+            search.lower = files.iter().map(|f| f.to_lowercase()).collect();
+            search.query.clear();
+            search.found = search_files(&search.lower, query);
+        } else if search.query != query {
+            search.found = search_files(&search.lower, query);
+        }
+        search.query = query.to_owned();
+        search.found.clone()
+    })
+}
+
 // files whose name starts with what's typed come first, then any whose path contains it, shallower paths before deeper
-fn file_rows<'a>(files: &'a [String], query: &str) -> Vec<Row<'a>> {
-    let mut found: Vec<(bool, usize, &'a str)> = files
+fn search_files(lower: &[String], query: &str) -> Arc<[usize]> {
+    let mut found: Vec<(bool, usize, &str, usize)> = lower
         .iter()
-        .filter_map(|path| {
-            let lower = path.to_lowercase();
-            if file_name(&lower).starts_with(query) {
-                Some((false, path.matches('/').count(), path.as_str()))
-            } else if lower.contains(query) {
-                Some((true, path.matches('/').count(), path.as_str()))
+        .enumerate()
+        .filter_map(|(i, path)| {
+            if file_name(path).starts_with(query) {
+                Some((false, path.matches('/').count(), path.as_str(), i))
+            } else if path.contains(query) {
+                Some((true, path.matches('/').count(), path.as_str(), i))
             } else {
                 None
             }
         })
         .collect();
-    found.sort();
+    let keep = MAX_FILES.min(found.len());
+    if keep < found.len() {
+        found.select_nth_unstable(keep);
+        found.truncate(keep);
+    }
+    found.sort_unstable();
+    found.into_iter().map(|(.., i)| i).collect()
+}
+
+fn file_rows<'a>(files: &'a [String], found: &[usize]) -> Vec<Row<'a>> {
     found
-        .into_iter()
-        .take(MAX_FILES)
-        .map(|(_, _, path)| {
+        .iter()
+        .map(|&i| files[i].as_str())
+        .map(|path| {
             let file = file_name(path);
             Row {
                 label: file.to_owned(),
@@ -296,4 +336,51 @@ fn file_rows<'a>(files: &'a [String], query: &str) -> Vec<Row<'a>> {
 
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lower(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| p.to_lowercase()).collect()
+    }
+
+    #[test]
+    fn names_first_then_paths_shallow_before_deep() {
+        let files = lower(&[
+            "src/deep/mod/Widget.rs",
+            "widget.rs",
+            "docs/widget-guide.md",
+            "src/big_widget.rs",
+        ]);
+        let found: Vec<&str> = search_files(&files, "widget")
+            .iter()
+            .map(|&i| files[i].as_str())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "widget.rs",
+                "docs/widget-guide.md",
+                "src/deep/mod/widget.rs",
+                "src/big_widget.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_best_few_are_kept() {
+        let files: Vec<String> = (0..500)
+            .rev()
+            .map(|i| format!("dir/file{i:03}.rs"))
+            .collect();
+        let found = search_files(&files, "file");
+        assert_eq!(found.len(), MAX_FILES);
+        assert_eq!(files[found[0]], "dir/file000.rs");
+        assert_eq!(
+            files[found[MAX_FILES - 1]],
+            format!("dir/file{:03}.rs", MAX_FILES - 1)
+        );
+    }
 }

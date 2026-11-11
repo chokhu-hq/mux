@@ -7,6 +7,8 @@ mod markdown;
 mod queue;
 mod slash;
 
+use std::sync::Arc;
+
 use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
 use mux_core::protocol::ContextUsage;
 
@@ -214,7 +216,7 @@ pub struct ChatView<'a> {
     attachments: Option<&'a mut Vec<String>>,
     dropping: bool,
     commands: &'a [SlashCommand],
-    files: &'a [String],
+    files: Option<&'a Arc<[String]>>,
     queue: &'a [mux_core::protocol::Queued],
     held: bool,
     background: &'a [mux_core::protocol::Background],
@@ -234,7 +236,7 @@ impl<'a> ChatView<'a> {
             attachments: None,
             dropping: false,
             commands: &[],
-            files: &[],
+            files: None,
             queue: &[],
             held: false,
             background: &[],
@@ -265,8 +267,8 @@ impl<'a> ChatView<'a> {
         self
     }
 
-    pub fn files(mut self, files: &'a [String]) -> Self {
-        self.files = files;
+    pub fn files(mut self, files: &'a Arc<[String]>) -> Self {
+        self.files = Some(files);
         self
     }
 
@@ -352,7 +354,7 @@ impl<'a> ChatView<'a> {
             .running(self.running)
             .context(self.context)
             .commands(self.commands)
-            .files(self.files)
+            .files_from(self.files)
             .history(&history)
             .queued(!self.queue.is_empty());
         if let Some(attachments) = self.attachments {

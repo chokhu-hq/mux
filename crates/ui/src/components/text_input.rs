@@ -6,6 +6,7 @@ pub struct TextInput<'a> {
     value: &'a mut String,
     placeholder: &'a str,
     width: Option<f32>,
+    rows: Option<usize>,
 }
 
 impl<'a> TextInput<'a> {
@@ -14,6 +15,7 @@ impl<'a> TextInput<'a> {
             value,
             placeholder: "",
             width: None,
+            rows: None,
         }
     }
 
@@ -27,13 +29,23 @@ impl<'a> TextInput<'a> {
         self
     }
 
+    // a box that takes several lines, at least `rows` tall
+    pub fn multiline(mut self, rows: usize) -> Self {
+        self.rows = Some(rows);
+        self
+    }
+
     pub fn show(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui);
         let width = self.width.unwrap_or_else(|| ui.available_width());
         let id = ui.next_auto_id();
         let focused = ui.memory(|m| m.has_focus(id));
         let border = if focused { p.accent } else { p.border_strong };
-        let response = TextEdit::singleline(self.value)
+        let edit = match self.rows {
+            Some(rows) => TextEdit::multiline(self.value).desired_rows(rows),
+            None => TextEdit::singleline(self.value),
+        };
+        let response = edit
             .id(id)
             .hint_text(self.placeholder)
             .frame(

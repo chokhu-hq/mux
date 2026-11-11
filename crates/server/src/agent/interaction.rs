@@ -1,4 +1,4 @@
-use mux_core::protocol::{AgentItem, Question, QuestionOption, TodoStatus, TodoStep};
+use mux_core::protocol::{AgentItem, Form, Question, QuestionOption, TodoStatus, TodoStep};
 use serde_json::{Value, json};
 
 use super::Agent;
@@ -10,20 +10,24 @@ pub(super) struct Asked {
     // claude echoes its questions back with the answers, codex wants them keyed by its question ids
     input: Value,
     ids: Vec<String>,
+    // an mcp server's form, whose `input` is the schema the answers are typed by
+    form: bool,
 }
 
 // what claude is told when plan mode catches its plan, so it stops rather than carrying on
 const PLAN_CAUGHT: &str = "Mux showed your proposed plan to the user. Stop here and wait for their feedback, or for them to ask you to carry it out.";
 
 impl Agent {
-    fn ask(&mut self, request: Value, questions: Vec<Question>, input: Value) {
+    fn ask(&mut self, request: Value, questions: Vec<Question>, input: Value, form: Option<Form>) {
         self.next_approval += 1;
         let id = self.next_approval;
         let ids = questions.iter().map(|q| q.id.clone()).collect();
+        let is_form = form.is_some();
         let index = self.push(AgentItem::Question {
             id,
             questions,
             answers: None,
+            form,
         });
         self.questions.insert(
             id,
@@ -32,8 +36,66 @@ impl Agent {
                 index,
                 input,
                 ids,
+                form: is_form,
             },
         );
+    }
+
+    // an mcp server asking the person for something, either a form to fill in or a page to visit
+    pub(super) fn mcp_form(&mut self, request: Value, server: &str, params: &Value) {
+        let message = params["message"].as_str().unwrap_or_default().to_owned();
+        let (questions, schema) = if params["mode"] == "url" {
+            let url = params["url"].as_str().unwrap_or_default().to_owned();
+            let done = Question {
+                id: String::new(),
+                header: "Open this page, then come back".to_owned(),
+                question: url,
+                options: vec![QuestionOption {
+                    label: "Done".to_owned(),
+                    description: String::new(),
+                }],
+                multiple: false,
+                other: false,
+                optional: false,
+            };
+            (vec![done], Value::Null)
+        } else {
+            // claude's request names its field order, and codex keeps the server's
+            let schema = params
+                .get("requested_schema")
+                .or(params.get("requestedSchema"))
+                .cloned()
+                .unwrap_or_default();
+            let order: Vec<String> = params["property_order"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(str::to_owned))
+                .collect();
+            (crate::mcp::questions(&schema, &order), schema)
+        };
+        // a form with nothing to fill in still needs something to answer, since no answers at all means declined
+        let questions = if questions.is_empty() {
+            vec![Question {
+                id: String::new(),
+                header: String::new(),
+                question: "Go ahead?".to_owned(),
+                options: vec![QuestionOption {
+                    label: "Yes".to_owned(),
+                    description: String::new(),
+                }],
+                multiple: false,
+                other: false,
+                optional: false,
+            }]
+        } else {
+            questions
+        };
+        let form = Form {
+            server: server.to_owned(),
+            message,
+        };
+        self.ask(request, questions, schema, Some(form));
     }
 
     // codex's request_user_input, where each question has an id the answer is keyed by
@@ -49,9 +111,10 @@ impl Agent {
                 options: options(&q["options"]),
                 multiple: false,
                 other: q["isOther"] == true || q["options"].as_array().is_none_or(Vec::is_empty),
+                optional: false,
             })
             .collect();
-        self.ask(request, questions, Value::Null);
+        self.ask(request, questions, Value::Null, None);
     }
 
     // claude's AskUserQuestion tool, which asks for permission to run and gets its answers in the reply
@@ -68,16 +131,35 @@ impl Agent {
                 options: options(&q["options"]),
                 multiple: q["multiSelect"] == true,
                 other: true,
+                optional: false,
             })
             .collect();
-        self.ask(request, questions, input);
+        self.ask(request, questions, input, None);
     }
 
     pub fn answer(&mut self, question: u64, answers: Vec<Vec<String>>) {
         let Some(asked) = self.questions.remove(&question) else {
             return;
         };
-        if self.settings.provider == mux_core::Provider::Claude {
+        if asked.form {
+            // nothing given back means the person declined
+            let result = if answers.is_empty() {
+                json!({ "action": "decline" })
+            } else if asked.input.is_null() {
+                json!({ "action": "accept" })
+            } else {
+                let content = crate::mcp::content(&asked.input, &asked.ids, &answers);
+                json!({ "action": "accept", "content": content })
+            };
+            if self.settings.provider == mux_core::Provider::Claude {
+                self.write(json!({
+                    "type": "control_response",
+                    "response": { "subtype": "success", "request_id": asked.request, "response": result }
+                }));
+            } else {
+                self.write(json!({ "id": asked.request, "result": result }));
+            }
+        } else if self.settings.provider == mux_core::Provider::Claude {
             let keyed: serde_json::Map<String, Value> = asked
                 .ids
                 .iter()

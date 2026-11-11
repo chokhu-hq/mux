@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 32;
+pub const PROTOCOL: u32 = 33;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -150,6 +150,9 @@ pub enum AgentItem {
         id: u64,
         questions: Vec<Question>,
         answers: Option<Vec<Vec<String>>>,
+        // set when an mcp server is asking rather than the agent, which can be declined
+        #[serde(default)]
+        form: Option<Form>,
     },
     // a plan proposed in plan mode, waiting to be carried out
     Plan {
@@ -196,6 +199,36 @@ pub struct Question {
     pub multiple: bool,
     // whether a typed answer is allowed besides the options
     pub other: bool,
+    // can be left blank
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Form {
+    pub server: String,
+    pub message: String,
+}
+
+// an mcp server mux gives every agent it starts, alongside the ones in each cli's own config
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub name: String,
+    pub enabled: bool,
+    pub transport: McpTransport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
+    Http {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -516,6 +549,10 @@ pub enum ClientMsg {
     UseReset {
         provider: Provider,
     },
+    // replaces the mcp servers mux gives its agents
+    SetMcpServers {
+        servers: Vec<McpServer>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -621,6 +658,9 @@ pub enum ServerMsg {
     ResetResult {
         provider: Provider,
         result: ResetResult,
+    },
+    McpServers {
+        servers: Vec<McpServer>,
     },
 }
 

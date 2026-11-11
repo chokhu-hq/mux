@@ -49,6 +49,7 @@ pub enum ChatItem {
     Question {
         questions: Vec<mux_core::protocol::Question>,
         answers: Option<Vec<Vec<String>>>,
+        form: Option<mux_core::protocol::Form>,
     },
     // a proposed plan, and whether it's the one still waiting to be carried out
     Plan {
@@ -617,8 +618,12 @@ fn show_item(
             }
         }
         ChatItem::Compaction(status) => cards::compaction(ui, *status),
-        ChatItem::Question { questions, answers } => {
-            if let Some(sent) = asks::question(ui, questions, answers.as_deref()) {
+        ChatItem::Question {
+            questions,
+            answers,
+            form,
+        } => {
+            if let Some(sent) = asks::question(ui, questions, answers.as_deref(), form.as_ref()) {
                 action = Some(ChatAction::Answer(index, sent));
             }
         }
@@ -1039,8 +1044,10 @@ mod tests {
                     }],
                     multiple: false,
                     other: false,
+                    optional: false,
                 }],
                 answers: None,
+                form: None,
             };
         let permission = |title: &str, detail: &str, decision| {
             ChatItem::Permission(PermissionRequest {

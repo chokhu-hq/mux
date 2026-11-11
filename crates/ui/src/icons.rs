@@ -46,6 +46,7 @@ pub const PENCIL_SIMPLE: char = '\u{e3b4}';
 pub const PENCIL_SIMPLE_LINE: char = '\u{ebc6}';
 pub const PLAY: char = '\u{e3d0}';
 pub const PLUS: char = '\u{e3d4}';
+pub const PLUGS_CONNECTED: char = '\u{eb5a}';
 pub const ROBOT: char = '\u{e762}';
 pub const SCROLL: char = '\u{eb7a}';
 pub const SHIELD_CHECK: char = '\u{e40c}';

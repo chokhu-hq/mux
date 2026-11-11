@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mux_core::protocol::{GroupInfo, SessionInfo};
+use mux_core::protocol::{GroupInfo, McpServer, SessionInfo};
 use mux_core::{SessionKind, SessionStatus};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,8 @@ pub struct Store {
     // agents a usage limit stopped, and when to carry on with each, in unix seconds
     #[serde(default)]
     pub wake: std::collections::HashMap<u64, u64>,
+    #[serde(default)]
+    pub mcp: Vec<McpServer>,
 }
 
 impl Store {

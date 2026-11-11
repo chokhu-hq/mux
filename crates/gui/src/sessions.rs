@@ -225,6 +225,8 @@ pub struct Sessions {
     pub split: Option<u64>,
     // the settings a new agent starts with, chosen in settings
     pub agent_defaults: mux_core::protocol::AgentSettings,
+    // the mcp servers the server gives every agent
+    pub mcp: Vec<mux_core::protocol::McpServer>,
 }
 
 impl Sessions {
@@ -526,6 +528,7 @@ impl Sessions {
             ServerMsg::AgentResets { provider, resets } => {
                 self.resets.insert(provider, resets);
             }
+            ServerMsg::McpServers { servers } => self.mcp = servers,
             ServerMsg::ResetResult { provider, result } => {
                 if self.reset_pending == Some(provider) {
                     self.reset_pending = None;
@@ -1431,11 +1434,13 @@ fn chat_items_from(
                 id,
                 questions,
                 answers,
+                form,
             } => {
                 approval = Some(*id);
                 items.push(ChatItem::Question {
                     questions: questions.clone(),
                     answers: answers.clone(),
+                    form: form.clone(),
                 });
             }
             AgentItem::Plan { text } => {

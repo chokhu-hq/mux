@@ -132,7 +132,7 @@ impl Agent {
 
     fn opencode_open(&mut self) {
         let cwd = self.cwd.clone().unwrap_or_default();
-        let params = json!({ "cwd": cwd, "mcpServers": [] });
+        let params = json!({ "cwd": cwd, "mcpServers": crate::mcp::acp(&self.mcp) });
         match self.session_id.clone() {
             Some(session) => {
                 let mut params = params;

@@ -1,6 +1,7 @@
 mod agent;
 mod history;
 mod listener;
+mod mcp;
 mod models;
 mod process;
 mod skills;
@@ -389,6 +390,9 @@ impl Server {
                         resets: resets.clone(),
                     });
                 }
+                let _ = tx.send(ServerMsg::McpServers {
+                    servers: self.store.mcp.clone(),
+                });
                 self.clients.insert(client, tx);
             }
             Event::Disconnected(client) => {
@@ -770,6 +774,15 @@ impl Server {
                 self.agent(id).answer(question, answers);
                 self.agent_changed(id);
             }
+            ClientMsg::SetMcpServers { servers } => {
+                self.store.mcp = servers;
+                self.changed();
+                for tx in self.clients.values() {
+                    let _ = tx.send(ServerMsg::McpServers {
+                        servers: self.store.mcp.clone(),
+                    });
+                }
+            }
             ClientMsg::RenameSession { id, title } => {
                 // a name given by hand stays, since only an agent still called "New agent" is named automatically
                 if let Some(info) = self.store.session_mut(id)
@@ -949,6 +962,8 @@ impl Server {
             .and_then(|list| list.iter().find(|m| m.is_default))
             .map(|m| m.id.clone());
         self.agent(id).default_model = default_model;
+        let mcp = self.store.mcp.clone();
+        self.agent(id).mcp = mcp;
         let folder = self.store.session_path(id).map(PathBuf::from);
         self.generation += 1;
         let (generation, events) = (self.generation, self.events.clone());

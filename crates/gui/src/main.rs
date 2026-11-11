@@ -31,6 +31,7 @@ mod drop;
 mod install;
 mod link;
 mod logs;
+mod mcp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod notify;
 mod prefs;
@@ -385,6 +386,10 @@ impl App {
             "toggle-sidebar" => self.sidebar.toggle(),
             "toggle-terminal" => self.sessions.toggle_split_terminal(),
             "settings" => self.settings_open = true,
+            "mcp" => {
+                self.settings_open = true;
+                self.settings_tab = settings::Tab::Mcp;
+            }
             "compact" => {
                 if let Some((session, _, outbox, _)) = self.sessions.selected()
                     && session.kind == SessionKind::Agent
@@ -607,6 +612,7 @@ impl App {
                         self.show_diff(at);
                     }
                 }
+                Some(ChatAction::Command(name)) if name == "mcp" => *run = Some("mcp"),
                 Some(ChatAction::Command(_)) => *run = Some("new-agent"),
                 _ => {}
             }
@@ -866,6 +872,7 @@ impl App {
         let mut prefs = self.prefs.clone();
         let distros = self.distros(&ctx);
         let previewed = self.themes.preview.take();
+        let mut mcp = self.sessions.mcp.clone();
         let close = settings::Page {
             tab: &mut self.settings_tab,
             prefs: &mut prefs,
@@ -876,8 +883,15 @@ impl App {
             distros,
             models: self.sessions.models().clone(),
             themes: &mut self.themes,
+            mcp: &mut mcp,
         }
         .show(ui);
+        if mcp != self.sessions.mcp {
+            self.sessions.mcp = mcp.clone();
+            self.sessions
+                .outbox
+                .push(ClientMsg::SetMcpServers { servers: mcp });
+        }
         if close {
             self.settings_open = false;
             self.themes.preview = None;
@@ -1773,6 +1787,7 @@ fn slash_commands(
         builtin("compact", "Summarise older messages to free up context"),
         builtin("plan", "Turn plan mode on or off"),
         builtin("new", "Start a new agent in this project"),
+        builtin("mcp", "Add or change the MCP servers agents get"),
     ];
     if changed {
         commands.push(builtin(
@@ -2726,7 +2741,7 @@ fn agent_chat(
                 outbox.push(ClientMsg::AgentConfigure { id, settings });
                 None
             }
-            "new" => Some(ChatAction::Command(name)),
+            "new" | "mcp" => Some(ChatAction::Command(name)),
             _ => None,
         },
         action => action,

@@ -1,7 +1,7 @@
 use egui::{
     Align2, Color32, CornerRadius, CursorIcon, Margin, RichText, Sense, Stroke, Ui, pos2, vec2,
 };
-use mux_core::protocol::{Question, TodoStatus, TodoStep};
+use mux_core::protocol::{Form, Question, TodoStatus, TodoStep};
 
 use super::markdown;
 use crate::components::{Button, TextInput, TooltipExt, hover_t};
@@ -69,6 +69,7 @@ pub fn question(
     ui: &mut Ui,
     questions: &[Question],
     answers: Option<&[Vec<String>]>,
+    form: Option<&Form>,
 ) -> Option<Vec<Vec<String>>> {
     let p = theme::palette(ui);
     if let Some(answers) = answers {
@@ -76,7 +77,12 @@ pub fn question(
         let said: Vec<String> = answers.iter().map(|a| a.join(", ")).collect();
         let said = said.join(" · ");
         let (glyph, label, color) = if answers.is_empty() {
-            (icons::X_CIRCLE, "Not answered", p.text_faint)
+            let label = if form.is_some() {
+                "Declined"
+            } else {
+                "Not answered"
+            };
+            (icons::X_CIRCLE, label, p.text_faint)
         } else {
             (icons::CHECK_CIRCLE, "Answered", p.success)
         };
@@ -136,18 +142,26 @@ pub fn question(
     forward(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 0.0;
-        let title = if questions.len() == 1 {
-            "The agent has a question"
-        } else {
-            "The agent has some questions"
-        };
-        heading(
-            ui,
-            icons::CHAT_CIRCLE,
-            p.accent,
-            title,
-            "It's waiting for your answer",
-        );
+        match form {
+            Some(form) => {
+                let title = format!("{} needs your input", form.server);
+                heading(ui, icons::CHAT_CIRCLE, p.accent, &title, &form.message);
+            }
+            None => {
+                let title = if questions.len() == 1 {
+                    "The agent has a question"
+                } else {
+                    "The agent has some questions"
+                };
+                heading(
+                    ui,
+                    icons::CHAT_CIRCLE,
+                    p.accent,
+                    title,
+                    "It's waiting for your answer",
+                );
+            }
+        }
         for (q, question) in questions.iter().enumerate() {
             ui.push_id(q, |ui| {
                 ui.add_space(space::MD);
@@ -224,7 +238,10 @@ pub fn question(
                 picks
             })
             .collect();
-        let ready = answers.iter().all(|a| !a.is_empty());
+        let ready = questions
+            .iter()
+            .zip(&answers)
+            .all(|(q, a)| q.optional || !a.is_empty());
         ui.horizontal(|ui| {
             if Button::new("Answer")
                 .primary()
@@ -233,6 +250,10 @@ pub fn question(
                 .clicked()
             {
                 sent = Some(answers);
+            }
+            // an mcp server's request can be turned down, which is sent back as no answers at all
+            if form.is_some() && Button::new("Decline").show(ui).clicked() {
+                sent = Some(Vec::new());
             }
         });
     });

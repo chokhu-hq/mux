@@ -12,17 +12,19 @@ const NAV: f32 = 180.0;
 pub enum Tab {
     #[default]
     General,
+    Mcp,
     Usage,
     Logs,
     About,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::General, Tab::Usage, Tab::Logs, Tab::About];
+    const ALL: [Tab; 5] = [Tab::General, Tab::Mcp, Tab::Usage, Tab::Logs, Tab::About];
 
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
+            Tab::Mcp => "MCP servers",
             Tab::Usage => "Usage",
             Tab::Logs => "Logs",
             Tab::About => "About",
@@ -32,6 +34,7 @@ impl Tab {
     fn icon(self) -> char {
         match self {
             Tab::General => icons::GEAR,
+            Tab::Mcp => icons::PLUGS_CONNECTED,
             Tab::Usage => icons::CHART_BAR,
             Tab::Logs => icons::SCROLL,
             Tab::About => icons::INFO,
@@ -52,6 +55,7 @@ pub struct Page<'a> {
     pub distros: Option<Vec<String>>,
     pub models: crate::sessions::Models,
     pub themes: &'a mut crate::themes::Themes,
+    pub mcp: &'a mut Vec<mux_core::protocol::McpServer>,
 }
 
 impl Page<'_> {
@@ -117,6 +121,7 @@ impl Page<'_> {
                         &self.models,
                         self.themes,
                     ),
+                    Tab::Mcp => crate::mcp::show(ui, self.mcp),
                     Tab::Usage => {
                         crate::token_usage::show(ui, self.tokens.as_ref(), &self.models);
                         usage(ui, &self.usage);

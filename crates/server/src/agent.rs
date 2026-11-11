@@ -7,7 +7,7 @@ use std::process::Stdio;
 use base64::Engine;
 use mux_core::protocol::{
     AgentItem, AgentSettings, AgentSummary, ContextUsage, Decision, FileChange, ItemStatus,
-    QueueAction, Queued, Skill, UsageWindow, is_image,
+    McpServer, QueueAction, Queued, Skill, UsageWindow, is_image,
 };
 use mux_core::{Access, Provider, SessionStatus};
 use serde::{Deserialize, Serialize};
@@ -192,6 +192,9 @@ pub struct Agent {
     todos: Option<usize>,
     // codex's default model, which plan mode needs named when none was picked
     pub default_model: Option<String>,
+    // the mcp servers mux adds, and the ones the running cli was started with
+    pub mcp: Vec<McpServer>,
+    started_mcp: Vec<McpServer>,
     // claude's latest reply, which a message sent now would be rewound to
     claude_head: Option<String>,
     // where claude's next launch picks the session up, after a rewind
@@ -298,6 +301,8 @@ impl Agent {
             questions: HashMap::new(),
             todos: None,
             default_model: None,
+            mcp: Vec::new(),
+            started_mcp: Vec::new(),
             claude_head: saved.claude_head,
             resume_at: saved.resume_at,
             pending_revert: saved.pending_revert,
@@ -555,6 +560,10 @@ impl Agent {
             return;
         }
         self.held = false;
+        // mcp servers are only read when the cli starts, so an idle one starts again to pick up a change
+        if self.process.is_some() && self.started_mcp != self.mcp {
+            self.exited();
+        }
         self.record(&text, &attachments, false);
         if !self.launch(false, session, generation, cwd, events) {
             return;
@@ -890,6 +899,19 @@ impl Agent {
             }));
         } else if self.settings.provider == Provider::OpenCode {
             self.opencode_choose(&pending.request, &pending.input, decision);
+        } else if let Some(persist) = pending.input.get("mcp") {
+            // codex asks before an mcp tool runs as a form, where always allowing lasts the session
+            let mut result = match decision {
+                Decision::Deny => json!({ "action": "decline" }),
+                _ => json!({ "action": "accept" }),
+            };
+            let lasting = persist
+                .as_array()
+                .is_some_and(|p| p.contains(&json!("session")));
+            if decision == Decision::AlwaysAllow && lasting {
+                result["_meta"] = json!({ "persist": "session" });
+            }
+            self.write(json!({ "id": pending.request, "result": result }));
         } else {
             let answer = match decision {
                 Decision::Allow => "accept",
@@ -1093,6 +1115,9 @@ impl Agent {
                 self.session_id.as_deref(),
                 self.resume_at.take().as_deref(),
             ));
+            if let Some(config) = crate::mcp::claude(&self.mcp) {
+                command.args(["--mcp-config".to_owned(), config]);
+            }
             command
         } else {
             let mut command = Command::from(mux_core::command("codex"));
@@ -1174,6 +1199,7 @@ impl Agent {
 
         self.generation = generation;
         self.session = session;
+        self.started_mcp = self.mcp.clone();
         self.process = Some(Process {
             stdin: tx,
             child: Some(child),
@@ -1300,6 +1326,13 @@ impl Agent {
             self.codex_question(id, params);
             return;
         }
+        let server = params["serverName"].as_str().unwrap_or_default();
+        if method == "mcpServer/elicitation/request"
+            && params["_meta"]["codex_approval_kind"] != "mcp_tool_call"
+        {
+            self.mcp_form(id, server, params);
+            return;
+        }
         let target = params["itemId"]
             .as_str()
             .and_then(|item| self.by_codex_id.get(item))
@@ -1323,6 +1356,27 @@ impl Agent {
                 };
                 ("Apply file changes?", paths)
             }
+            "mcpServer/elicitation/request" => {
+                let meta = &params["_meta"];
+                let tool = meta["tool_name"].as_str().unwrap_or_default();
+                let shown = meta["tool_params_display"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|p| {
+                        let name = p["display_name"].as_str().or(p["name"].as_str());
+                        let value = match &p["value"] {
+                            Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        format!("{}: {value}", name.unwrap_or_default())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let title = format!("Allow {server} to use {tool}?");
+                self.approve(id, title, shown, json!({ "mcp": meta["persist"] }));
+                return;
+            }
             _ => {
                 log::warn!("codex asked for {method}, which mux doesn't support yet");
                 // anything mux can't show yet is refused so codex never waits forever
@@ -1333,20 +1387,24 @@ impl Agent {
                 return;
             }
         };
+        self.approve(id, title.to_owned(), detail, Value::Null);
+    }
+
+    fn approve(&mut self, request: Value, title: String, detail: String, input: Value) {
         self.next_approval += 1;
         let approval = self.next_approval;
         let index = self.push(AgentItem::Approval {
             id: approval,
-            title: title.to_owned(),
+            title,
             detail,
             decision: None,
         });
         self.approvals.insert(
             approval,
             Pending {
-                request: id,
+                request,
                 index,
-                input: Value::Null,
+                input,
                 suggestions: Value::Null,
             },
         );
@@ -1925,6 +1983,11 @@ impl Agent {
     fn claude_request(&mut self, msg: &Value) {
         let request = &msg["request"];
         let id = msg["request_id"].clone();
+        if request["subtype"] == "elicitation" {
+            let server = request["mcp_server_name"].as_str().unwrap_or_default();
+            self.mcp_form(id, server, request);
+            return;
+        }
         if request["subtype"] != "can_use_tool" {
             log::warn!(
                 "claude sent a {} request, which mux doesn't support yet",
@@ -1953,6 +2016,14 @@ impl Agent {
                 "Apply file changes?".to_owned(),
                 input["file_path"].as_str().unwrap_or_default().to_owned(),
             ),
+            _ if request["mcp_server"]["name"].is_string() => {
+                let server = request["mcp_server"]["name"].as_str().unwrap_or_default();
+                let shown = request["display_name"].as_str().unwrap_or(tool);
+                (
+                    format!("Allow {server} to use {shown}?"),
+                    tool_detail(&input),
+                )
+            }
             other => (format!("Allow {other}?"), tool_detail(&input)),
         };
         self.next_approval += 1;
@@ -1978,6 +2049,9 @@ impl Agent {
         let mut params = json!({ "approvalPolicy": "on-request", "sandbox": "workspace-write" });
         if let Some(cwd) = &self.cwd {
             params["cwd"] = json!(cwd);
+        }
+        if let Some(servers) = crate::mcp::codex(&self.mcp) {
+            params["config"] = json!({ "mcp_servers": servers });
         }
         match self.thread_id.clone() {
             Some(thread) => {
@@ -2999,6 +3073,7 @@ mod tests {
             id,
             questions,
             answers: None,
+            ..
         } = agent.items[0].clone()
         else {
             panic!("expected an open question");
@@ -3359,7 +3434,7 @@ mod tests {
             }
         ));
 
-        agent.handle(json!({ "id": 7, "method": "mcpServer/elicitation/request", "params": {} }));
+        agent.handle(json!({ "id": 7, "method": "item/tool/call", "params": {} }));
         assert_eq!(
             agent.items.len(),
             1,
@@ -3448,6 +3523,110 @@ mod tests {
             turn_params("t", "hi", &[], &supervised)["approvalPolicy"],
             "untrusted"
         );
+    }
+
+    fn written(rx: &mut mpsc::UnboundedReceiver<String>) -> Value {
+        serde_json::from_str(&rx.try_recv().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn codex_asks_before_mcp_tools_and_always_allowing_lasts_the_session() {
+        let mut agent = agent();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        agent.process = Some(Process::fake(tx));
+        agent.handle(json!({ "id": 3, "method": "mcpServer/elicitation/request", "params": {
+            "serverName": "probe", "mode": "form", "message": "Allow?",
+            "requestedSchema": { "type": "object", "properties": {} },
+            "_meta": { "codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"],
+                "tool_name": "echo", "tool_params_display": [{ "name": "text", "display_name": "text", "value": "hi" }] }
+        } }));
+        let AgentItem::Approval {
+            id, title, detail, ..
+        } = agent.items[0].clone()
+        else {
+            panic!("expected an approval");
+        };
+        assert_eq!(
+            (title.as_str(), detail.as_str()),
+            ("Allow probe to use echo?", "text: hi")
+        );
+        agent.decide(id, Decision::AlwaysAllow);
+        assert_eq!(
+            written(&mut rx),
+            json!({ "id": 3, "result": { "action": "accept", "_meta": { "persist": "session" } } })
+        );
+    }
+
+    #[test]
+    fn mcp_forms_are_asked_and_answered_or_declined() {
+        let schema = json!({ "type": "object", "required": ["color"], "properties": {
+            "color": { "type": "string", "title": "Colour", "enum": ["red", "green"] } } });
+        let mut codex = agent();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        codex.process = Some(Process::fake(tx));
+        codex.handle(json!({ "id": 4, "method": "mcpServer/elicitation/request", "params": {
+            "serverName": "probe", "mode": "form", "message": "Pick one", "_meta": null, "requestedSchema": schema } }));
+        let AgentItem::Question {
+            id,
+            form: Some(form),
+            questions,
+            ..
+        } = codex.items[0].clone()
+        else {
+            panic!("expected a form");
+        };
+        assert_eq!(
+            (form.server.as_str(), form.message.as_str()),
+            ("probe", "Pick one")
+        );
+        assert_eq!(questions[0].options.len(), 2);
+        codex.answer(id, vec![vec!["green".into()]]);
+        assert_eq!(
+            written(&mut rx),
+            json!({ "id": 4, "result": { "action": "accept", "content": { "color": "green" } } })
+        );
+
+        let mut claude = claude_agent();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        claude.process = Some(Process::fake(tx));
+        claude.handle(json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "elicitation", "mcp_server_name": "probe", "message": "Pick one", "mode": "form",
+            "requested_schema": schema, "property_order": ["color"] } }));
+        let AgentItem::Question { id, .. } = claude.items[0].clone() else {
+            panic!("expected a form");
+        };
+        claude.answer(id, Vec::new());
+        let sent = written(&mut rx);
+        assert_eq!(sent["response"]["request_id"], "r1");
+        assert_eq!(sent["response"]["response"], json!({ "action": "decline" }));
+    }
+
+    #[test]
+    fn an_idle_agent_starts_again_when_its_mcp_servers_change() {
+        let mut agent = agent();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        agent.process = Some(Process::fake(tx));
+        agent.mcp = vec![McpServer {
+            name: "probe".into(),
+            enabled: true,
+            transport: mux_core::protocol::McpTransport::Http {
+                url: "http://x".into(),
+                headers: Vec::new(),
+            },
+        }];
+        let (events, _) = mpsc::unbounded_channel();
+        let cwd = PathBuf::from("/nonexistent/mux");
+        agent.started_mcp = agent.mcp.clone();
+        agent.send("hi".into(), Vec::new(), 1, 1, cwd.clone(), &events);
+        assert!(
+            agent.process.is_some(),
+            "an unchanged list keeps the running cli"
+        );
+        agent.busy = false;
+        agent.mcp.clear();
+        // the folder doesn't exist so the new start fails, which still shows the old process was let go
+        agent.send("hi".into(), Vec::new(), 1, 1, cwd, &events);
+        assert!(agent.process.is_none());
     }
 
     fn claude_agent() -> Agent {

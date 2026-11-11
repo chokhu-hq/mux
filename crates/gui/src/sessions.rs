@@ -56,6 +56,8 @@ pub struct Local {
     pub chat: Vec<ChatItem>,
     // which approval each chat item answers, so a click can be sent back to the right one
     pub approvals: Vec<Option<u64>>,
+    // files changed and lines added and removed across the chat, for the title bar
+    pub changes: (usize, usize, usize),
 }
 
 impl Local {
@@ -95,6 +97,7 @@ impl Local {
         );
         self.chat.extend(items);
         self.approvals.extend(approvals);
+        self.changes = changes(&self.chat);
         let is_message = |item: &AgentItem| matches!(item, AgentItem::User { .. });
         if let Some(message) = self.transcript[from..].iter().rposition(is_message)
             && let Some(shown) = self.chat[at..]
@@ -133,6 +136,24 @@ impl Local {
         shown.push_str(piece);
         true
     }
+}
+
+// counted when the chat changes rather than every frame, since a long chat can hold thousands of diff lines
+fn changes(chat: &[ChatItem]) -> (usize, usize, usize) {
+    let (mut files, mut added, mut removed) = (std::collections::HashSet::new(), 0, 0);
+    for item in chat {
+        if let ChatItem::Diff(diff) = item {
+            files.insert(diff.path.as_str());
+            for line in &diff.lines {
+                match line.kind {
+                    mux_ui::chat::DiffKind::Add => added += 1,
+                    mux_ui::chat::DiffKind::Remove => removed += 1,
+                    mux_ui::chat::DiffKind::Context => {}
+                }
+            }
+        }
+    }
+    (files.len(), added, removed)
 }
 
 // how much of the chat was built for good: everything before the latest message, which is done with

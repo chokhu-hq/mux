@@ -485,21 +485,7 @@ impl App {
             (true, Some(model)) => model,
             _ => session.meta.clone(),
         };
-        let (mut files, mut added, mut removed) = (Vec::new(), 0, 0);
-        for item in &local.chat {
-            if let ChatItem::Diff(diff) = item {
-                if !files.contains(&&diff.path) {
-                    files.push(&diff.path);
-                }
-                for line in &diff.lines {
-                    match line.kind {
-                        mux_ui::chat::DiffKind::Add => added += 1,
-                        mux_ui::chat::DiffKind::Remove => removed += 1,
-                        mux_ui::chat::DiffKind::Context => {}
-                    }
-                }
-            }
-        }
+        let (files, added, removed) = local.changes;
         self.titlebar = Some(TitleBar {
             id: session.id,
             provider: agent.then_some(session.provider),
@@ -507,7 +493,7 @@ impl App {
             title: session.title.clone(),
             branch,
             status: format!("{} · {meta}", session.status.label()),
-            changes: (agent && !files.is_empty()).then_some((files.len(), added, removed)),
+            changes: (agent && files > 0).then_some((files, added, removed)),
             restartable: ended && !agent,
         });
         let id = session.id;

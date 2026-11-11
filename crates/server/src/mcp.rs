@@ -9,10 +9,15 @@ pub fn claude_file(servers: &[McpServer], session: u64) -> io::Result<Option<Pat
     claude_file_in(&folder(), servers, session)
 }
 
-// removes one session's claude config, or every session's when the servers change, since each is rewritten
-// with the new list the next time its claude starts
-pub fn forget_claude(session: Option<u64>) {
+// removes a session's claude config, once the session is gone
+pub fn forget_claude(session: u64) {
     forget_claude_in(&folder(), session);
+}
+
+// removes the claude configs of sessions not running, when the servers change, since each is rewritten with the
+// new list the next time its claude starts. a running claude may still be about to read its own
+pub fn forget_idle_claude(running: &[u64]) {
+    forget_idle_in(&folder(), running);
 }
 
 fn folder() -> PathBuf {
@@ -22,7 +27,7 @@ fn folder() -> PathBuf {
 fn claude_file_in(dir: &Path, servers: &[McpServer], session: u64) -> io::Result<Option<PathBuf>> {
     let Some(config) = claude(servers) else {
         // keys from servers since turned off or removed don't stay behind
-        forget_claude_in(dir, Some(session));
+        forget_claude_in(dir, session);
         return Ok(None);
     };
     mux_core::private_dir(dir)?;
@@ -31,23 +36,22 @@ fn claude_file_in(dir: &Path, servers: &[McpServer], session: u64) -> io::Result
     Ok(Some(path))
 }
 
-fn forget_claude_in(dir: &Path, session: Option<u64>) {
-    let paths: Vec<PathBuf> = match session {
-        Some(session) => vec![dir.join(format!("claude-{session}.json"))],
-        None => std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("claude-") && n.ends_with(".json"))
-            })
-            .collect(),
-    };
-    for path in paths {
-        let _ = std::fs::remove_file(path);
+fn forget_claude_in(dir: &Path, session: u64) {
+    let _ = std::fs::remove_file(dir.join(format!("claude-{session}.json")));
+}
+
+fn forget_idle_in(dir: &Path, running: &[u64]) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let session = name.to_str().and_then(|n| {
+            n.strip_prefix("claude-")?
+                .strip_suffix(".json")?
+                .parse::<u64>()
+                .ok()
+        });
+        if session.is_some_and(|s| !running.contains(&s)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -295,8 +299,12 @@ mod tests {
         assert!(std::fs::read_to_string(&one).unwrap().contains("probe"));
         assert!(claude_file_in(&dir, &[], 1).unwrap().is_none());
         assert!(!one.exists() && two.exists());
-        forget_claude_in(&dir, None);
-        assert!(!two.exists());
+        let three = claude_file_in(&dir, &servers, 3).unwrap().unwrap();
+        forget_idle_in(&dir, &[3]);
+        assert!(
+            !two.exists() && three.exists(),
+            "a running claude keeps its file"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

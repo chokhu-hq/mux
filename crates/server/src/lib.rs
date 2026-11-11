@@ -599,7 +599,7 @@ impl Server {
                 self.processes.remove(&id);
                 self.agents.remove(&id);
                 let _ = std::fs::remove_file(self.agent_path(id));
-                mcp::forget_claude(Some(id));
+                mcp::forget_claude(id);
                 self.attached.remove(&id);
                 self.store.delete_session(id);
                 self.changed();
@@ -795,7 +795,13 @@ impl Server {
                 self.agent_changed(id);
             }
             ClientMsg::SetMcpServers { servers } => {
-                mcp::forget_claude(None);
+                let running: Vec<u64> = self
+                    .agents
+                    .iter()
+                    .filter(|(_, agent)| agent.is_running())
+                    .map(|(id, _)| *id)
+                    .collect();
+                mcp::forget_idle_claude(&running);
                 self.store.mcp = servers;
                 self.changed();
                 for tx in self.clients.values() {

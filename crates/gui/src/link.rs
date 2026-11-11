@@ -160,6 +160,7 @@ impl Link {
             Link::Stopping(connection) => {
                 connection.messages();
                 sessions.outbox.clear();
+                sessions.mcp = None;
                 if connection.is_closed() {
                     Link::start(ctx)
                 } else {
@@ -170,6 +171,8 @@ impl Link {
             Link::Down { error, retry_at } => {
                 // nothing can be delivered while offline, and replaying stale input later would be worse
                 sessions.outbox.clear();
+                // the server sends its mcp list again on connecting, and nothing may change it until then
+                sessions.mcp = None;
                 if now >= retry_at {
                     Link::start(ctx)
                 } else {

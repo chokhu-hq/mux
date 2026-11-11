@@ -883,14 +883,16 @@ impl App {
             distros,
             models: self.sessions.models().clone(),
             themes: &mut self.themes,
-            mcp: &mut mcp,
+            mcp: mcp.as_mut(),
         }
         .show(ui);
-        if mcp != self.sessions.mcp {
-            self.sessions.mcp = mcp.clone();
+        if mcp != self.sessions.mcp
+            && let Some(servers) = mcp.clone()
+        {
+            self.sessions.mcp = mcp;
             self.sessions
                 .outbox
-                .push(ClientMsg::SetMcpServers { servers: mcp });
+                .push(ClientMsg::SetMcpServers { servers });
         }
         if close {
             self.settings_open = false;

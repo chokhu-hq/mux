@@ -225,8 +225,8 @@ pub struct Sessions {
     pub split: Option<u64>,
     // the settings a new agent starts with, chosen in settings
     pub agent_defaults: mux_core::protocol::AgentSettings,
-    // the mcp servers the server gives every agent
-    pub mcp: Vec<mux_core::protocol::McpServer>,
+    // the mcp servers the server gives every agent, none until it has sent them
+    pub mcp: Option<Vec<mux_core::protocol::McpServer>>,
 }
 
 impl Sessions {
@@ -528,7 +528,7 @@ impl Sessions {
             ServerMsg::AgentResets { provider, resets } => {
                 self.resets.insert(provider, resets);
             }
-            ServerMsg::McpServers { servers } => self.mcp = servers,
+            ServerMsg::McpServers { servers } => self.mcp = Some(servers),
             ServerMsg::ResetResult { provider, result } => {
                 if self.reset_pending == Some(provider) {
                     self.reset_pending = None;

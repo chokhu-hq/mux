@@ -399,6 +399,10 @@ impl Agent {
         std::mem::take(&mut self.commands_changed).then(|| self.skills())
     }
 
+    pub fn is_running(&self) -> bool {
+        self.process.is_some()
+    }
+
     // the context usage when it changed since the last call, for the server to pass on
     pub fn take_context(&mut self) -> Option<ContextUsage> {
         std::mem::take(&mut self.context_changed)
@@ -572,9 +576,23 @@ impl Agent {
             return;
         }
         self.held = false;
-        // mcp servers are only read when the cli starts, so an idle one starts again to pick up a change
-        if self.process.is_some() && self.started_mcp != self.mcp {
+        // mcp servers are only read when the cli starts, so an idle one starts again to pick up a change.
+        // one with commands or helpers still going in the background waits, since starting again would end them
+        let working = self.has_running_background()
+            || self.items.iter().any(|i| {
+                matches!(
+                    i,
+                    AgentItem::Subagent {
+                        status: ItemStatus::Running,
+                        ..
+                    }
+                )
+            });
+        if self.process.is_some() && self.started_mcp != self.mcp && !working {
+            let held = self.held;
             self.exited();
+            // the queue was just let go by this send, and starting again shouldn't hold it back
+            self.held = held;
         }
         self.record(&text, &attachments, false);
         if !self.launch(false, session, generation, cwd, events) {
@@ -3663,6 +3681,25 @@ mod tests {
         );
         agent.busy = false;
         agent.mcp.clear();
+        // a helper still working in the background keeps the old cli until it's done
+        agent.items.push(AgentItem::Subagent {
+            task: "t".into(),
+            kind: String::new(),
+            prompt: String::new(),
+            background: true,
+            status: ItemStatus::Running,
+            activity: String::new(),
+            steps: Vec::new(),
+            result: String::new(),
+            tokens: 0,
+        });
+        agent.send("hi".into(), Vec::new(), 1, 1, cwd.clone(), &events);
+        assert!(
+            agent.process.is_some(),
+            "the background helper is left alone"
+        );
+        agent.busy = false;
+        agent.items.clear();
         // the folder doesn't exist so the new start fails, which still shows the old process was let go
         agent.send("hi".into(), Vec::new(), 1, 1, cwd, &events);
         assert!(agent.process.is_none());

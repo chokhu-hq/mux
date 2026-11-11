@@ -300,6 +300,12 @@ impl Agent {
         }
     }
 
+    pub(super) fn has_running_background(&self) -> bool {
+        self.background
+            .iter()
+            .any(|t| t.state == BackgroundState::Running)
+    }
+
     pub(super) fn stop_all_background(&mut self) {
         for tracked in &mut self.background {
             if tracked.state == BackgroundState::Running {

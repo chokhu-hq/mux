@@ -16,8 +16,11 @@ enum Kind {
 // the server being added or edited, as typed
 #[derive(Clone, Default)]
 struct Draft {
-    // the server being edited, or none for a new one
-    editing: Option<usize>,
+    // the name of the server being edited, or none for a new one. a name rather than a place in the list,
+    // since the list can change underneath from another window
+    editing: Option<String>,
+    // split and quoted the way the server's system does, which is linux for a windows app using wsl
+    windows: bool,
     name: String,
     kind: Kind,
     command: String,
@@ -31,20 +34,17 @@ struct Draft {
 }
 
 impl Draft {
-    fn from(index: usize, server: &McpServer) -> Self {
+    fn from(server: &McpServer, windows: bool) -> Self {
         let mut draft = Draft {
-            editing: Some(index),
+            editing: Some(server.name.clone()),
+            windows,
             name: server.name.clone(),
             hidden: true,
             ..Default::default()
         };
         match &server.transport {
             McpTransport::Stdio { command, args, env } => {
-                draft.command = std::iter::once(command)
-                    .chain(args)
-                    .map(|w| quote(w))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                draft.command = command_line(command, args, windows);
                 draft.env = lines(env, "=");
             }
             McpTransport::Http { url, headers } => {
@@ -69,7 +69,7 @@ impl Draft {
         }
         let transport = match self.kind {
             Kind::Command => {
-                let mut words = split(&self.command).into_iter();
+                let mut words = split_for(&self.command, self.windows).into_iter();
                 let Some(command) = words.next() else {
                     return Err("Enter the command that starts the server.".to_owned());
                 };
@@ -98,10 +98,20 @@ impl Draft {
     }
 }
 
-pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
+// the list is none until the server has sent it, since changing it before then would replace what's saved
+pub fn show(ui: &mut egui::Ui, servers: Option<&mut Vec<McpServer>>, windows: bool) {
     let p = theme::palette(ui);
+    let Some(servers) = servers else {
+        ui.label(
+            RichText::new("Waiting for the Mux server…")
+                .font(font::regular(text::MD))
+                .color(p.text_faint),
+        );
+        return;
+    };
     let id = ui.make_persistent_id("mcp-draft");
     let mut draft: Draft = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    draft.windows = windows;
 
     ui.add(
         egui::Label::new(
@@ -130,7 +140,7 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
                 divider(ui);
             }
             ui.push_id(i, |ui| {
-                let (name, detail) = (server.name.clone(), summary(server));
+                let (name, detail) = (server.name.clone(), summary(server, windows));
                 setting(ui, &name, &detail, |ui| {
                     if IconButton::new(icons::TRASH, "Remove")
                         .show(ui)
@@ -144,7 +154,7 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
                         .tip("Edit")
                         .clicked()
                     {
-                        draft = Draft::from(i, server);
+                        draft = Draft::from(server, windows);
                     }
                     ui.add_space(space::SM);
                     Segmented::new(&mut server.enabled, &[(true, "On"), (false, "Off")]).show(ui);
@@ -152,16 +162,20 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
             });
         }
         if let Some(i) = removed {
-            servers.remove(i);
-            draft.editing = draft
-                .editing
-                .filter(|&e| e != i)
-                .map(|e| e - usize::from(e > i));
+            let gone = servers.remove(i);
+            if draft.editing.as_ref() == Some(&gone.name) {
+                draft = Draft::default();
+            }
         }
     });
 
-    let title = match draft.editing.and_then(|i| servers.get(i)) {
-        Some(server) => format!("Edit {}", server.name),
+    // the server being edited, if it's still there
+    let editing = draft
+        .editing
+        .as_ref()
+        .and_then(|name| servers.iter().position(|s| &s.name == name));
+    let title = match editing {
+        Some(i) => format!("Edit {}", servers[i].name),
         None => "Add a server".to_owned(),
     };
     section(ui, &title, |ui| {
@@ -207,7 +221,6 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
             }
         }
         ui.horizontal(|ui| {
-            let editing = draft.editing.filter(|&i| i < servers.len());
             let label = if editing.is_some() {
                 "Save"
             } else {
@@ -229,7 +242,10 @@ pub fn show(ui: &mut egui::Ui, servers: &mut Vec<McpServer>) {
                                 Some(i) => servers[i] = server,
                                 None => servers.push(server),
                             }
-                            draft = Draft::default();
+                            draft = Draft {
+                                windows,
+                                ..Default::default()
+                            };
                         }
                     }
                     Err(error) => draft.error = error,
@@ -342,25 +358,23 @@ fn error(ui: &mut egui::Ui, message: &str) {
     }
 }
 
-fn summary(server: &McpServer) -> String {
+fn command_line(command: &str, args: &[String], windows: bool) -> String {
+    std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .map(|w| quote_for(w, windows))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn summary(server: &McpServer, windows: bool) -> String {
     match &server.transport {
-        McpTransport::Stdio { command, args, .. } => std::iter::once(command)
-            .chain(args)
-            .map(|w| quote(w))
-            .collect::<Vec<_>>()
-            .join(" "),
+        McpTransport::Stdio { command, args, .. } => command_line(command, args, windows),
         McpTransport::Http { url, .. } => url.clone(),
     }
 }
 
-// windows splits commands the way its c runtime does, where a backslash only matters before a quote
-const WINDOWS: bool = cfg!(windows);
-
-fn quote(word: &str) -> String {
-    quote_for(word, WINDOWS)
-}
-
-// a word written so `split_for` reads it back exactly
+// a word written so `split_for` reads it back exactly. windows splits the way its c runtime does,
+// where a backslash only matters before a quote
 fn quote_for(word: &str, windows: bool) -> String {
     let special: &[char] = if windows { &['"'] } else { &['"', '\'', '\\'] };
     if !word.is_empty() && !word.contains(char::is_whitespace) && !word.contains(special) {
@@ -400,11 +414,7 @@ fn lines(list: &[(String, String)], between: &str) -> String {
         .join("\n")
 }
 
-// a command line split into words the way the system's own shell would
-fn split(line: &str) -> Vec<String> {
-    split_for(line, WINDOWS)
-}
-
+// a command line split into words the way the server's own system would
 fn split_for(line: &str, windows: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -498,6 +508,18 @@ fn imported(text: &str) -> Result<Vec<McpServer>, String> {
         .unwrap_or(&value)
         .as_object()
         .ok_or("Expected servers keyed by name.")?;
+    // codex and opencode only speak streamable http, so an sse server would never connect for them
+    let sse: Vec<&str> = map
+        .iter()
+        .filter(|(_, config)| config["type"] == "sse" || config["transport"] == "sse")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !sse.is_empty() {
+        return Err(format!(
+            "{} uses SSE, which Mux doesn't support yet. Check if the server also has a streamable HTTP URL.",
+            sse.join(", ")
+        ));
+    }
     let servers: Vec<McpServer> = map
         .iter()
         .filter_map(|(name, config)| {
@@ -618,6 +640,8 @@ mod tests {
         let bare = r#""fs": { "command": "uvx", "args": ["mcp-fs"] },"#;
         assert_eq!(imported(bare).unwrap()[0].name, "fs");
         assert!(imported("{}").is_err() && imported("nope").is_err());
+        let sse = r#"{ "old": { "type": "sse", "url": "https://x.dev/sse" } }"#;
+        assert!(imported(sse).unwrap_err().contains("SSE"));
         let spaced = r#"{ "my server": { "command": "x" } }"#;
         assert!(imported(spaced).unwrap_err().contains("my server"));
     }
@@ -636,7 +660,7 @@ mod tests {
         };
         assert_eq!((command.as_str(), args.len()), ("npx", 2));
         assert_eq!(env[1], ("B".into(), "two".into()));
-        let again = Draft::from(0, &server).server(true).unwrap();
+        let again = Draft::from(&server, false).server(true).unwrap();
         assert_eq!(
             masked("A=1\nAuthorization: Bearer t", ':'),
             "A=1\nAuthorization: ••••••••"

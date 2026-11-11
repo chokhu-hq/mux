@@ -2,7 +2,7 @@
 mod common;
 
 use common::Server;
-use mux_core::protocol::{AgentItem, AgentSettings, ClientMsg, Decision, ItemStatus};
+use mux_core::protocol::{AgentItem, AgentSettings, ClientMsg, Decision, ItemStatus, ServerMsg};
 
 #[test]
 fn a_message_gets_a_reply_and_the_turn_ends() {
@@ -598,4 +598,19 @@ fn a_finished_turn_says_how_long_it_took() {
     });
     // the command runs for 400 ms in the fake
     assert!(took.flatten().is_some_and(|ms| ms >= 350), "{took:?}");
+}
+
+#[test]
+fn files_made_during_a_turn_show_up_for_mentions() {
+    let mut server = Server::start();
+    let id = server.claude_agent(AgentSettings::default());
+    let files = |msg: &ServerMsg| match msg {
+        ServerMsg::AgentFiles { id: of, files } if *of == id => Some(files.clone()),
+        _ => None,
+    };
+    server.wait_for("the files when the chat opens", files);
+    std::fs::write(server.dir.join("project").join("made.txt"), "").unwrap();
+    server.say(id, "hello");
+    let after = server.wait_for("the files after the turn", files);
+    assert!(after.contains(&"made.txt".to_string()), "{after:?}");
 }

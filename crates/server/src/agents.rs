@@ -289,6 +289,10 @@ impl Server {
         }
         if let Some(busy) = busy {
             self.send_watchers(id, ServerMsg::AgentBusy { id, busy });
+            // the turn may have added or removed files, so `@` mentions see them without reopening the chat
+            if !busy {
+                self.fetch_files(id);
+            }
         }
         if let Some(windows) = usage {
             self.set_usage(provider, windows);

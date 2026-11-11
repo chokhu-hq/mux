@@ -230,63 +230,69 @@ impl<'a> Composer<'a> {
                         crate::components::edit_menu(&field, self.draft);
                     });
                 ui.add_space(space::MD);
-                ui.horizontal(|ui| {
-                    // attach leads the row like t3 code's, with the pickers after it
-                    if IconButton::new(icons::PAPERCLIP, "Attach")
-                        .show(ui)
-                        .tip("Attach files")
-                        .clicked()
-                    {
-                        action = Some(ComposerAction::Attach);
-                    }
-                    // the right side goes first so the controls on the left get whatever room is left
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let ready = !self.draft.trim().is_empty() || has_files;
-                        // while the agent works an empty box offers stop, and typing turns it back into send
-                        if self.running && !ready {
-                            if round_button(ui, icons::STOP, true, true)
-                                .tip("Stop")
-                                .clicked()
-                            {
-                                action = Some(ComposerAction::Stop);
-                            }
-                        } else {
-                            let tip = if self.running {
-                                "Queue it for when the agent finishes"
-                            } else {
-                                "Send"
-                            };
-                            if round_button(ui, icons::ARROW_UP, ready, false)
-                                .tip(tip)
-                                .clicked()
-                            {
-                                send = true;
-                            }
-                        }
-                        if let Some(context) = self.context
-                            && ContextRing::new(context)
-                                .can_compact(!self.running)
-                                .show(ui)
+                // the row is as tall as send from the start, so attach centres on it rather than on its own height
+                let row = vec2(ui.available_width(), SEND);
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        // attach leads the row like t3 code's, with the pickers after it
+                        if IconButton::new(icons::PAPERCLIP, "Attach")
+                            .show(ui)
+                            .tip("Attach files")
+                            .clicked()
                         {
-                            action = Some(ComposerAction::Compact);
+                            action = Some(ComposerAction::Attach);
                         }
-                        if let Some(trailing) = self.trailing.take() {
-                            trailing(ui);
-                        }
-                        if let Some(controls) = self.controls.take() {
-                            // clipped to what's left, so they shrink rather than slide under the right side
-                            let room = ui.available_rect_before_wrap();
-                            ui.allocate_ui_with_layout(
-                                vec2(room.width(), control::MD),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.set_clip_rect(ui.clip_rect().intersect(room));
-                                    controls(ui);
-                                },
-                            );
-                        }
-                    });
-                });
+                        // the right side goes first so the controls on the left get whatever room is left
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let ready = !self.draft.trim().is_empty() || has_files;
+                            // while the agent works an empty box offers stop, and typing turns it back into send
+                            if self.running && !ready {
+                                if round_button(ui, icons::STOP, true, true)
+                                    .tip("Stop")
+                                    .clicked()
+                                {
+                                    action = Some(ComposerAction::Stop);
+                                }
+                            } else {
+                                let tip = if self.running {
+                                    "Queue it for when the agent finishes"
+                                } else {
+                                    "Send"
+                                };
+                                if round_button(ui, icons::ARROW_UP, ready, false)
+                                    .tip(tip)
+                                    .clicked()
+                                {
+                                    send = true;
+                                }
+                            }
+                            if let Some(context) = self.context
+                                && ContextRing::new(context)
+                                    .can_compact(!self.running)
+                                    .show(ui)
+                            {
+                                action = Some(ComposerAction::Compact);
+                            }
+                            if let Some(trailing) = self.trailing.take() {
+                                trailing(ui);
+                            }
+                            if let Some(controls) = self.controls.take() {
+                                // clipped to what's left, so they shrink rather than slide under the right side
+                                let room = ui.available_rect_before_wrap();
+                                ui.allocate_ui_with_layout(
+                                    vec2(room.width(), control::MD),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_clip_rect(ui.clip_rect().intersect(room));
+                                        controls(ui);
+                                    },
+                                );
+                            }
+                        });
+                    },
+                );
             });
 
         // the composer is the natural home for focus whenever nothing else holds it

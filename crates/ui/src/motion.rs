@@ -50,6 +50,17 @@ pub fn reduced(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp(reduced_id())).unwrap_or(false)
 }
 
+// a looping animation like a pulse or spinner redraws the whole window for its next frame,
+// so it runs well below the screen's rate, slower still in the background, and not at all when minimised
+pub fn ambient(ctx: &Context) {
+    let (focused, minimized) = ctx.input(|i| (i.focused, i.viewport().minimized.unwrap_or(false)));
+    if minimized {
+        return;
+    }
+    let fps = if focused { 30.0 } else { 8.0 };
+    ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / fps));
+}
+
 const STEP: f32 = 1.0 / 240.0;
 const REST: f32 = 0.0005;
 

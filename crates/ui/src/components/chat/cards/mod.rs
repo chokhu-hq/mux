@@ -75,7 +75,7 @@ pub(super) fn spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
     }
     let angle = (ui.input(|i| i.time) as f32 * TAU * 0.8) % TAU;
     rotated(ui, center, icons::SPINNER, size, angle, color);
-    ui.ctx().request_repaint();
+    motion::ambient(ui.ctx());
 }
 
 pub(super) fn caret(ui: &Ui, center: Pos2, turn: f32, color: Color32) {

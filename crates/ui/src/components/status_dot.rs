@@ -38,7 +38,7 @@ pub fn paint(ui: &Ui, c: egui::Pos2, status: SessionStatus) {
             3.5 + phase * 3.0,
             color.gamma_multiply(0.5 * (1.0 - phase)),
         );
-        ui.ctx().request_repaint();
+        crate::motion::ambient(ui.ctx());
     }
     ui.painter().circle_filled(c, 3.5, color);
 }

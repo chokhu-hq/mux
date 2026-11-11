@@ -391,6 +391,6 @@ pub fn thinking(ui: &mut Ui, turn: usize) {
     ui.painter().galley(pos, galley, p.text_faint);
 
     if !still {
-        ui.ctx().request_repaint();
+        motion::ambient(ui.ctx());
     }
 }

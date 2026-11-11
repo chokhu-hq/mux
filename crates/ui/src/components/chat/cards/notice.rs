@@ -164,7 +164,7 @@ pub fn compaction(ui: &mut Ui, status: ToolStatus) {
     let still = motion::reduced(ui.ctx());
     let color = if status == ToolStatus::Running && !still {
         let time = ui.input(|i| i.time) as f32;
-        ui.ctx().request_repaint();
+        motion::ambient(ui.ctx());
         p.text_faint
             .lerp_to_gamma(p.text_muted, 0.5 + 0.5 * (time * 3.0).sin())
     } else {

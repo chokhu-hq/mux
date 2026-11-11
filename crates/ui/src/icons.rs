@@ -1,5 +1,6 @@
 // phosphor icons v2.1.2, the regular and fill fonts share these codepoints
 pub const ARROWS_IN_LINE_VERTICAL: char = '\u{e532}';
+pub const ARROWS_LEFT_RIGHT: char = '\u{e0a0}';
 pub const ARROW_CIRCLE_UP: char = '\u{e030}';
 pub const ARROW_CLOCKWISE: char = '\u{e036}';
 pub const ARROW_SQUARE_OUT: char = '\u{e5de}';
@@ -65,8 +66,9 @@ pub const WARNING_CIRCLE: char = '\u{e4e2}';
 pub const X: char = '\u{e4f6}';
 pub const X_CIRCLE: char = '\u{e4f8}';
 
-pub const ALL: [(&str, char); 64] = [
+pub const ALL: [(&str, char); 65] = [
     ("arrows-in-line-vertical", ARROWS_IN_LINE_VERTICAL),
+    ("arrows-left-right", ARROWS_LEFT_RIGHT),
     ("arrow-clockwise", ARROW_CLOCKWISE),
     ("arrow-square-out", ARROW_SQUARE_OUT),
     ("arrow-up", ARROW_UP),

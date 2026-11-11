@@ -21,7 +21,7 @@ pub fn show(
     ui: &mut egui::Ui,
     models: &Models,
     settings: &AgentSettings,
-    locked: bool,
+    busy: bool,
 ) -> Option<AgentSettings> {
     let pick = |provider: Provider| pick(models, settings, provider);
     let current = pick(settings.provider);
@@ -69,7 +69,7 @@ pub fn show(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .frame(theme::floating(ui).inner_margin(0))
         .show(|ui| {
-            next = panel(ui, state_id, models, settings, locked);
+            next = panel(ui, state_id, models, settings, busy);
             if next.is_some() {
                 ui.close();
             }
@@ -97,7 +97,7 @@ fn panel(
     state_id: egui::Id,
     models: &Models,
     settings: &AgentSettings,
-    locked: bool,
+    busy: bool,
 ) -> Option<AgentSettings> {
     let p = theme::palette(ui);
     let size = vec2(RAIL + LIST + SIDE, BODY + BAR);
@@ -237,13 +237,13 @@ fn panel(
             .max_rect(body.shrink2(vec2(space::SM, space::XS)))
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    // a chat already running on one agent stays on it
-    if locked && query.is_empty() && viewing != settings.provider {
+    // the chat moves to another agent only between turns
+    if busy && query.is_empty() && viewing != settings.provider {
         note(
             &mut content,
             viewing,
-            &format!("This chat runs on {}", settings.provider.label()),
-            &format!("Start a new agent to use {}", viewing.label()),
+            &format!("{} is still working", settings.provider.label()),
+            &format!("Switch to {} once it finishes", viewing.label()),
         );
     } else if query.is_empty() && !models.contains_key(&viewing) {
         note(
@@ -260,7 +260,7 @@ fn panel(
             .show(&mut content, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (provider, model) in rows {
-                    let blocked = locked && provider != settings.provider;
+                    let blocked = busy && provider != settings.provider;
                     let chosen = provider == settings.provider
                         && pick(models, settings, provider).is_some_and(|c| c.id == model.id);
                     let row = model_row(ui, provider, model, chosen, blocked);
@@ -391,8 +391,12 @@ fn model_row(
 ) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, !blocked, &model.name));
     let response = if blocked {
-        response.tip(format!("Start a new agent to use {}", provider.label()))
+        response.tip(format!(
+            "Switch to {} once the current agent finishes",
+            provider.label()
+        ))
     } else {
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)

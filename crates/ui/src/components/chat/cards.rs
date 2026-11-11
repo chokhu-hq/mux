@@ -1346,6 +1346,21 @@ pub fn changes(ui: &mut Ui, changes: &Changes) -> bool {
 }
 
 // a quiet divider where older messages were summarised, so everything above it reads as history
+// where the chat moved to another agent, as a divider like a compaction's
+pub fn switched(ui: &mut Ui, from: &str, to: &str) {
+    let p = theme::palette(ui);
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    response
+        .on_hover_text("The new agent was given the conversation so far with your next message");
+    divider(
+        ui,
+        rect,
+        icons::ARROWS_LEFT_RIGHT,
+        &format!("Switched from {from} to {to}"),
+        p.text_faint,
+    );
+}
+
 pub fn compaction(ui: &mut Ui, status: ToolStatus) {
     let p = theme::palette(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
@@ -1363,6 +1378,12 @@ pub fn compaction(ui: &mut Ui, status: ToolStatus) {
     } else {
         p.text_faint
     };
+    divider(ui, rect, glyph, label, color);
+}
+
+// a centred icon and label with a rule either side
+fn divider(ui: &Ui, rect: egui::Rect, glyph: char, label: &str, color: egui::Color32) {
+    let p = theme::palette(ui);
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font::regular(text::SM), color);

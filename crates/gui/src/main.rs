@@ -2367,6 +2367,12 @@ fn agent_chat(
     let settings = local.settings.clone();
     let started = local.has_started();
     let configure = std::cell::Cell::new(None);
+    // the server only moves a chat to another agent between turns, with nothing left running in the background
+    let switch_busy = local.busy
+        || local
+            .background
+            .iter()
+            .any(|task| task.state == wire::BackgroundState::Running);
     for path in dropped {
         if !local.attachments.contains(&path) {
             local.attachments.push(path);
@@ -2395,7 +2401,7 @@ fn agent_chat(
             }
         })
         .trailing(|ui| {
-            if let Some(changed) = picker::show(ui, models, &settings, started) {
+            if let Some(changed) = picker::show(ui, models, &settings, switch_busy) {
                 configure.set(Some(changed));
             }
         })

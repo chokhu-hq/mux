@@ -702,12 +702,18 @@ impl Server {
             }
             ClientMsg::AgentConfigure { id, mut settings } => {
                 let path = self.agent_path(id);
+                let current = self.agent(id).settings.clone();
+                let names = (self.model_name(&current), self.model_name(&settings));
                 let agent = self.agent(id);
                 let before = agent.settings.provider;
-                // a conversation stays with the agent and the folder it started in
+                // a conversation stays in the folder it started in, and moves to another agent only between turns
                 if !agent.items.is_empty() {
-                    settings.provider = agent.settings.provider;
                     settings.worktree = agent.settings.worktree;
+                    if settings.provider != before
+                        && !agent.switch(settings.clone(), names.0, names.1)
+                    {
+                        settings = agent.settings.clone();
+                    }
                 }
                 agent.settings = settings.clone();
                 if let Err(err) = agent.save(&path) {
@@ -1051,6 +1057,25 @@ impl Server {
             };
             let _ = events.send(Event::Skills(id, provider, skills));
         });
+    }
+
+    // what a chat's switch line calls a model, the way the picker shows it
+    fn model_name(&self, settings: &mux_core::protocol::AgentSettings) -> String {
+        let list = self.models.get(&settings.provider);
+        let model = list.and_then(|list| {
+            settings
+                .model
+                .as_deref()
+                .and_then(|id| list.iter().find(|m| m.id == id))
+                .or_else(|| list.iter().find(|m| m.is_default))
+        });
+        match model {
+            Some(model) => model.name.clone(),
+            None => settings
+                .model
+                .clone()
+                .unwrap_or_else(|| settings.provider.label().to_owned()),
+        }
     }
 
     // listed fresh each time a chat opens, so new files can be mentioned without restarting

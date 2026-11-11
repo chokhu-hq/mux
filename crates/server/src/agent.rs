@@ -25,6 +25,7 @@ mod opencode;
 mod refresh;
 mod rewind;
 mod subagent;
+mod switch;
 
 pub(crate) use refresh::stop_claude;
 
@@ -58,6 +59,8 @@ struct Saved {
     queue: Vec<Queued>,
     #[serde(default)]
     resumes: u32,
+    #[serde(default)]
+    handover: switch::Handover,
 }
 
 enum Call {
@@ -231,6 +234,8 @@ pub struct Agent {
     // where background output is reported, kept from the launch for the followers it starts
     events: Option<UnboundedSender<Event>>,
     session: u64,
+    // other agents' conversations in this chat, and history owed to the one carrying it on
+    handover: switch::Handover,
 }
 
 impl Agent {
@@ -326,6 +331,7 @@ impl Agent {
             held: !saved.queue.is_empty(),
             queue: saved.queue,
             resumes: saved.resumes,
+            handover: saved.handover,
             limit_reset: None,
             windows: Vec::new(),
             pause: None,
@@ -458,6 +464,7 @@ impl Agent {
             pending_revert: self.pending_revert.clone(),
             queue: self.queue.clone(),
             resumes: self.resumes,
+            handover: self.handover.clone(),
         };
         let tmp = path.with_extension("json.tmp");
         // private, since a chat holds the person's prompts, code and command output
@@ -610,17 +617,7 @@ impl Agent {
         self.held = false;
         // mcp servers are only read when the cli starts, so an idle one starts again to pick up a change.
         // one with commands or helpers still going in the background waits, since starting again would end them
-        let working = self.has_running_background()
-            || self.items.iter().any(|i| {
-                matches!(
-                    i,
-                    AgentItem::Subagent {
-                        status: ItemStatus::Running,
-                        ..
-                    }
-                )
-            });
-        if self.process.is_some() && self.started_mcp != self.mcp && !working {
+        if self.process.is_some() && self.started_mcp != self.mcp && !self.working() {
             let held = self.held;
             self.exited();
             // the queue was just let go by this send, and starting again shouldn't hold it back
@@ -665,6 +662,7 @@ impl Agent {
     }
 
     fn transmit(&mut self, text: String, attachments: Vec<String>, steer: bool) {
+        let text = if steer { text } else { self.with_history(text) };
         if self.settings.provider == Provider::Claude {
             let content = claude_content(&text, &attachments, &self.skills());
             // claude echoes the text as sent, with skills and attachments rewritten, so that's what is matched later

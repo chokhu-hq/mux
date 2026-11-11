@@ -1445,6 +1445,10 @@ fn chat_items_from(
             AgentItem::Compaction { status } => {
                 items.push(ChatItem::Compaction(tool_status(*status)))
             }
+            AgentItem::Switched { from, to } => items.push(ChatItem::Switched {
+                from: from.clone(),
+                to: to.clone(),
+            }),
             AgentItem::Question {
                 id,
                 questions,

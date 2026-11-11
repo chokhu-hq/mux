@@ -43,6 +43,11 @@ pub enum ChatItem {
     Diff(FileDiff),
     Permission(PermissionRequest),
     Compaction(ToolStatus),
+    // the chat carried on with another agent from here
+    Switched {
+        from: String,
+        to: String,
+    },
     Subagent(Subagent),
     // how many files a finished turn changed, opening the first of them for review
     Changes(Changes),
@@ -645,6 +650,7 @@ fn show_item(
             }
         }
         ChatItem::Compaction(status) => cards::compaction(ui, *status),
+        ChatItem::Switched { from, to } => cards::switched(ui, from, to),
         ChatItem::Question {
             questions,
             answers,

@@ -34,6 +34,9 @@ impl Agent {
         self.live_text = None;
         self.compacting = None;
         self.todos = None;
+        if self.rewind_handover(index) {
+            return true;
+        }
         if self.settings.provider == Provider::Claude {
             // claude starts again at the reply before the message, or afresh when it was the first
             match point.filter(|head| !head.is_empty()) {

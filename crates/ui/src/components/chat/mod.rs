@@ -204,10 +204,12 @@ pub struct ChatView<'a> {
     draft: &'a mut String,
     running: bool,
     controls: Option<Controls<'a>>,
+    trailing: Option<Controls<'a>>,
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
     dropping: bool,
     commands: &'a [SlashCommand],
+    files: &'a [String],
     queue: &'a [mux_core::protocol::Queued],
     held: bool,
     background: &'a [mux_core::protocol::Background],
@@ -222,10 +224,12 @@ impl<'a> ChatView<'a> {
             session: 0,
             running: false,
             controls: None,
+            trailing: None,
             context: None,
             attachments: None,
             dropping: false,
             commands: &[],
+            files: &[],
             queue: &[],
             held: false,
             background: &[],
@@ -256,6 +260,11 @@ impl<'a> ChatView<'a> {
         self
     }
 
+    pub fn files(mut self, files: &'a [String]) -> Self {
+        self.files = files;
+        self
+    }
+
     pub fn attachments(mut self, attachments: &'a mut Vec<String>) -> Self {
         self.attachments = Some(attachments);
         self
@@ -269,6 +278,12 @@ impl<'a> ChatView<'a> {
 
     pub fn context(mut self, context: Option<ContextUsage>) -> Self {
         self.context = context;
+        self
+    }
+
+    // controls on the right beside send, like the model picker
+    pub fn trailing(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
+        self.trailing = Some(Box::new(add));
         self
     }
 
@@ -332,10 +347,14 @@ impl<'a> ChatView<'a> {
             .running(self.running)
             .context(self.context)
             .commands(self.commands)
+            .files(self.files)
             .history(&history)
             .queued(!self.queue.is_empty());
         if let Some(attachments) = self.attachments {
             input = input.attachments(attachments);
+        }
+        if let Some(trailing) = self.trailing {
+            input = input.trailing(trailing);
         }
         if let Some(controls) = self.controls {
             input = input.controls(controls);

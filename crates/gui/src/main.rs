@@ -15,11 +15,11 @@ use mux_ui::{
 };
 
 use link::Link;
+use mux_core::Provider;
 use mux_core::protocol::{self as wire, AgentSettings, UsageWindow};
-use mux_core::{Access, Provider};
 use mux_ui::chat::{ChatAction, ChatItem, ChatView, Decision};
 use prefs::Prefs;
-use sessions::{Models, Sessions};
+use sessions::Sessions;
 
 #[cfg(any(windows, target_os = "macos"))]
 mod backdrop;
@@ -34,6 +34,7 @@ mod logs;
 mod mcp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod notify;
+mod picker;
 mod prefs;
 mod sessions;
 mod settings;
@@ -1005,8 +1006,6 @@ impl App {
     }
 }
 
-const SHOWN_MODELS: usize = 5;
-
 // the first run screen: what mux is, the one thing to do next, and whether the agents are ready
 fn welcome(ui: &mut egui::Ui, agents: &[(Provider, AgentState)]) -> bool {
     let p = theme::palette(ui);
@@ -1442,263 +1441,31 @@ pub fn sign_in_command(provider: Provider) -> &'static str {
 // the agent, model, effort and speed pickers in the composer, returning new settings when one changes
 fn agent_controls(
     ui: &mut egui::Ui,
-    models: &Models,
     settings: &AgentSettings,
     locked: bool,
 ) -> Option<AgentSettings> {
-    let p = theme::palette(ui);
-    let pick = |provider: Provider| {
-        let list = models.get(&provider)?;
-        settings
-            .model
-            .as_deref()
-            .filter(|_| provider == settings.provider)
-            .and_then(|id| list.iter().find(|m| m.id == id))
-            .or_else(|| list.iter().find(|m| m.is_default))
-            .or(list.first())
-    };
-    let current = pick(settings.provider);
     let mut next = None;
     let menu = |response: &egui::Response| {
         egui::Popup::menu(response)
             .align(egui::RectAlign::TOP_START)
             .gap(space::XS)
     };
-
-    // the model chip carries the effort too, and a narrow composer drops labels in steps:
-    // the permission's name first, then build or plan, then the model's name, leaving their icons
-    let label = current.map_or(settings.provider.label(), |m| m.name.as_str());
-    let effort = current
-        .filter(|m| !m.efforts.is_empty())
-        .map(|m| effort_label(settings.effort.as_deref().unwrap_or(&m.default_effort)));
-    let full_label = match &effort {
-        Some(effort) => format!("{label} · {effort}"),
-        None => label.to_owned(),
-    };
-    let access = settings.access;
     let mode = if settings.plan { "Plan" } else { "Build" };
     let place = if settings.worktree {
         "Worktree"
     } else {
         "Local"
     };
+    // a narrow composer drops the labels and keeps the icons
     let gap = ui.spacing().item_spacing.x;
-    let separators = if locked { 2.0 } else { 3.0 } * (space::SM + gap);
-    let width = |label: &str| Chip::new(label).icon(icons::LIGHTNING).width(ui) + gap;
-    let toggle = |label: &str| {
-        Chip::new(label)
-            .icon(icons::LIGHTNING)
-            .toggle(false)
-            .width(ui)
-            + gap
-    };
-    let place_width = if locked { 0.0 } else { width(place) };
-    let budget = ui.available_width() - separators - place_width;
-    let model_full = Chip::new(&full_label).provider(settings.provider).width(ui) + gap;
-    let show_access = model_full + toggle(mode) + width(access.label()) <= budget;
-    let show_mode = model_full + toggle(mode) + width("") <= budget;
-    let show_model = model_full + toggle("") + width("") <= budget;
-    let shown = if show_model {
-        full_label.clone()
+    let place_width = if locked {
+        0.0
     } else {
-        effort.clone().unwrap_or_default()
+        Chip::new(place).icon(icons::FOLDER).width(ui) + space::SM + gap * 2.0
     };
-    let chip = Chip::new(&shown)
-        .provider(settings.provider)
-        .show(ui)
-        .tip(format!("Model: {full_label}"));
-    let viewing_id = chip.id.with("viewing");
-    // tabs and the more models row act inside the menu, so only picking a model or clicking away closes it
-    menu(&chip)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            // a fixed width keeps the menu compact, since the list below would otherwise fill the window
-            ui.set_width(300.0);
-            // the tabs pick which agent's models are listed, the model picked decides the agent
-            let mut viewing = ui
-                .data(|d| d.get_temp::<Provider>(viewing_id))
-                .unwrap_or(settings.provider);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = space::XS;
-                // measured once, so the tabs split the row evenly
-                let count = Provider::ALL.len() as f32;
-                let width = (ui.available_width() - space::XS * (count - 1.0)) / count;
-                // the highlight is drawn into this slot after the tabs, so it sits beneath their labels
-                let thumb = ui.painter().add(egui::Shape::Noop);
-                let mut tabs = Vec::new();
-                for provider in Provider::ALL {
-                    let tab = agent_tab(ui, provider, viewing == provider, width);
-                    if tab.clicked() {
-                        viewing = provider;
-                    }
-                    tabs.push(tab.rect);
-                }
-                let index = Provider::ALL
-                    .iter()
-                    .position(|p| *p == viewing)
-                    .unwrap_or(0);
-                let at = motion::spring(
-                    ui.ctx(),
-                    viewing_id.with("thumb"),
-                    index as f32,
-                    Spring::SNAPPY,
-                );
-                let step = tabs[1].left() - tabs[0].left();
-                ui.painter().set(
-                    thumb,
-                    egui::Shape::rect_filled(
-                        tabs[0].translate(vec2(step * at, 0.0)),
-                        egui::CornerRadius::same(theme::radius::MD),
-                        theme::tint(p, theme::fill::SELECTED),
-                    ),
-                );
-            });
-            // the list fades in after a tab switch instead of swapping in a single frame
-            let switched_id = viewing_id.with("switched");
-            let now = ui.input(|i| i.time);
-            let last = ui.data(|d| d.get_temp::<Provider>(viewing_id));
-            if last.is_some_and(|last| last != viewing) {
-                ui.data_mut(|d| d.insert_temp(switched_id, now));
-            }
-            ui.data_mut(|d| d.insert_temp(viewing_id, viewing));
-            let since = now - ui.data(|d| d.get_temp::<f64>(switched_id).unwrap_or(f64::MIN));
-            let fade = if motion::reduced(ui.ctx()) {
-                1.0
-            } else {
-                (since / 0.15).clamp(0.0, 1.0) as f32
-            };
-            if fade < 1.0 {
-                ui.ctx().request_repaint();
-            }
-            ui.multiply_opacity(fade * fade * (3.0 - 2.0 * fade));
-            ui.add_space(space::XS);
+    let mode_width = Chip::new(mode).icon(icons::ROBOT).toggle(false).width(ui) + gap;
+    let show_mode = mode_width + place_width <= ui.available_width();
 
-            if locked && viewing != settings.provider {
-                picker_note(
-                    ui,
-                    viewing,
-                    &format!("This chat runs on {}", settings.provider.label()),
-                    &format!("Start a new agent to use {}", viewing.label()),
-                );
-                return;
-            }
-            let Some(list) = models.get(&viewing) else {
-                picker_note(
-                    ui,
-                    viewing,
-                    &format!("Loading {} models…", viewing.label()),
-                    "",
-                );
-                return;
-            };
-            let chosen = pick(viewing).filter(|_| viewing == settings.provider);
-            // the newest few come first in both clis, and older ones wait behind a disclosure row
-            let more_id = viewing_id.with(("more", viewing));
-            let expanded = ui.data(|d| d.get_temp::<bool>(more_id).unwrap_or(false));
-            let current_index = chosen.and_then(|c| list.iter().position(|m| m.id == c.id));
-            let shown = if expanded {
-                list.len()
-            } else {
-                // the model in use always stays visible, even when it's an older one
-                SHOWN_MODELS
-                    .max(current_index.map_or(0, |i| i + 1))
-                    .min(list.len())
-            };
-            ui.spacing_mut().item_spacing.y = 0.0;
-            // a popup sizes itself from its last frame, so the list gets an explicit height rather than shrinking to fit
-            let size = vec2(
-                ui.available_width(),
-                (shown as f32 * theme::control::MD).min(280.0),
-            );
-            ui.allocate_ui(size, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for model in &list[..shown] {
-                            let item = MenuItem::new(&model.name)
-                                .checked(chosen.is_some_and(|c| c.id == model.id))
-                                .show(ui)
-                                .tip(&model.description);
-                            if item.clicked() {
-                                let mut changed = settings.clone();
-                                // effort and speed carry over only when the new model supports them
-                                if changed.provider != viewing
-                                    || changed
-                                        .effort
-                                        .as_ref()
-                                        .is_some_and(|e| !model.efforts.contains(e))
-                                {
-                                    changed.effort = None;
-                                }
-                                changed.fast &= model.fast.is_some() && changed.provider == viewing;
-                                changed.provider = viewing;
-                                changed.model = Some(model.id.clone());
-                                next = Some(changed);
-                                ui.close();
-                            }
-                        }
-                    });
-            });
-            let hidden = list.len() - shown;
-            if hidden > 0 || expanded {
-                let label = if expanded {
-                    "Fewer models".to_owned()
-                } else {
-                    format!("{hidden} more models")
-                };
-                let caret = if expanded {
-                    icons::CARET_UP
-                } else {
-                    icons::CARET_DOWN
-                };
-                if MenuItem::new(&label).icon(caret).show(ui).clicked() {
-                    ui.data_mut(|d| d.insert_temp(more_id, !expanded));
-                }
-            }
-
-            // the current model's effort sits under the list, so model and effort are picked in one place
-            if let Some(model) = current.filter(|m| !m.efforts.is_empty()) {
-                let chosen = settings
-                    .effort
-                    .clone()
-                    .unwrap_or_else(|| model.default_effort.clone());
-                menu_divider(ui);
-                menu_caption(ui, "Reasoning effort");
-                let total = model.efforts.len();
-                for (i, option) in model.efforts.iter().enumerate() {
-                    if MenuItem::new(&effort_label(option))
-                        .meter(i + 1, total)
-                        .checked(*option == chosen)
-                        .show(ui)
-                        .clicked()
-                    {
-                        let mut changed = settings.clone();
-                        changed.effort = Some(option.clone());
-                        next = Some(changed);
-                        ui.close();
-                    }
-                }
-            }
-            // fast mode is a faster tier of the same model, so it lives with the model too
-            if let Some(detail) = current.and_then(|m| m.fast.as_deref()) {
-                menu_divider(ui);
-                if MenuItem::new("Fast mode")
-                    .icon(icons::LIGHTNING)
-                    .detail(detail)
-                    .checked(settings.fast)
-                    .show(ui)
-                    .clicked()
-                {
-                    let mut changed = settings.clone();
-                    changed.fast = !changed.fast;
-                    next = Some(changed);
-                    ui.close();
-                }
-            }
-        });
-
-    control_separator(ui);
     // build or plan, a toggle since there are only the two
     let plan = Chip::new(if show_mode { mode } else { "" })
         .icon(if settings.plan {
@@ -1718,31 +1485,6 @@ fn agent_controls(
         changed.plan = !changed.plan;
         next = Some(changed);
     }
-
-    control_separator(ui);
-    let chip = Chip::new(if show_access { access.label() } else { "" })
-        .icon(access_icon(access))
-        .show(ui)
-        .tip(format!("Permissions: {}", access.label()));
-    menu(&chip).show(|ui| {
-        ui.set_width(320.0);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        menu_caption(ui, "Permissions");
-        for option in Access::ALL {
-            if MenuItem::new(option.label())
-                .icon(access_icon(option))
-                .detail(option.description())
-                .checked(option == access)
-                .show(ui)
-                .clicked()
-            {
-                let mut changed = settings.clone();
-                changed.access = option;
-                next = Some(changed);
-                ui.close();
-            }
-        }
-    });
 
     // where it works can only be picked before the first message
     if !locked {
@@ -2097,110 +1839,6 @@ fn menu_caption(ui: &mut egui::Ui, label: &str) {
         );
     });
     ui.add_space(space::XS);
-}
-
-fn menu_divider(ui: &mut egui::Ui) {
-    let p = theme::palette(ui);
-    ui.add_space(space::XS);
-    let line = ui.available_rect_before_wrap();
-    ui.painter()
-        .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
-    ui.add_space(space::XS + 1.0);
-}
-
-// fills the model list's usual space with a short centred message, so switching tabs never resizes the menu
-fn picker_note(ui: &mut egui::Ui, provider: Provider, title: &str, detail: &str) {
-    let p = theme::palette(ui);
-    let size = vec2(
-        ui.available_width(),
-        SHOWN_MODELS as f32 * theme::control::MD,
-    );
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let center = rect.center();
-    let lines = if detail.is_empty() { 0.0 } else { 18.0 };
-    let mark = egui::pos2(center.x, center.y - 14.0 - lines / 2.0);
-    provider_mark(
-        ui.painter(),
-        mark,
-        icon::LG + 4.0,
-        provider,
-        provider_color(provider, p.text_faint).gamma_multiply(0.7),
-    );
-    ui.painter().text(
-        egui::pos2(center.x, mark.y + 22.0),
-        egui::Align2::CENTER_CENTER,
-        title,
-        font::medium(text::MD),
-        p.text,
-    );
-    if !detail.is_empty() {
-        ui.painter().text(
-            egui::pos2(center.x, mark.y + 22.0 + lines),
-            egui::Align2::CENTER_CENTER,
-            detail,
-            font::regular(text::SM + 1.0),
-            p.text_faint,
-        );
-    }
-}
-
-fn access_icon(access: Access) -> char {
-    match access {
-        Access::Supervised => icons::LOCK_SIMPLE,
-        Access::AutoEdits => icons::PENCIL_SIMPLE_LINE,
-        Access::Auto => icons::SPARKLE,
-        Access::Full => icons::LOCK_SIMPLE_OPEN,
-    }
-}
-
-// one of the agent tabs at the top of the model menu, with the agent's own logo
-fn agent_tab(ui: &mut egui::Ui, provider: Provider, active: bool, width: f32) -> egui::Response {
-    let p = theme::palette(ui);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), egui::Sense::click());
-    // the active tab's highlight slides in from the row, so a tab only paints its own hover
-    if !active && response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            egui::CornerRadius::same(theme::radius::MD),
-            theme::tint(p, theme::fill::HOVER),
-        );
-    }
-    let text = if active { p.text } else { p.text_muted };
-    let label =
-        ui.painter()
-            .layout_no_wrap(provider.label().to_owned(), font::medium(text::MD), text);
-    let content = icon::MD + space::SM + label.size().x;
-    let left = rect.center().x - content / 2.0;
-    provider_mark(
-        ui.painter(),
-        pos2(left + icon::MD / 2.0, rect.center().y),
-        icon::MD,
-        provider,
-        provider_color(provider, text),
-    );
-    ui.painter().galley(
-        pos2(
-            left + icon::MD + space::SM,
-            rect.center().y - label.size().y / 2.0,
-        ),
-        label,
-        text,
-    );
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-fn effort_label(effort: &str) -> String {
-    match effort {
-        "" => "Auto".to_owned(),
-        "xhigh" => "Extra high".to_owned(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect())
-                .unwrap_or_default()
-        }
-    }
 }
 
 impl App {
@@ -2728,7 +2366,7 @@ fn agent_chat(
     }
     let settings = local.settings.clone();
     let started = local.has_started();
-    let mut configure = None;
+    let configure = std::cell::Cell::new(None);
     for path in dropped {
         if !local.attachments.contains(&path) {
             local.attachments.push(path);
@@ -2743,6 +2381,7 @@ fn agent_chat(
     let action = ChatView::new(&local.chat, &mut local.draft)
         .session(id)
         .commands(&commands)
+        .files(&local.files)
         .queue(&local.queue, local.held)
         .background(&local.background)
         .attachments(&mut local.attachments)
@@ -2750,7 +2389,16 @@ fn agent_chat(
         .running(local.busy)
         .reset(reset)
         .context(local.context)
-        .controls(|ui| configure = agent_controls(ui, models, &settings, started))
+        .controls(|ui| {
+            if let Some(changed) = agent_controls(ui, &settings, started) {
+                configure.set(Some(changed));
+            }
+        })
+        .trailing(|ui| {
+            if let Some(changed) = picker::show(ui, models, &settings, started) {
+                configure.set(Some(changed));
+            }
+        })
         .show(ui);
     let action = action.or(first_diff.filter(|_| review).map(ChatAction::OpenDiff));
     // mux's own slash commands are the same actions the buttons around the chat take
@@ -2771,7 +2419,7 @@ fn agent_chat(
         },
         action => action,
     };
-    if let Some(settings) = configure {
+    if let Some(settings) = configure.take() {
         local.settings = settings.clone();
         outbox.push(ClientMsg::AgentConfigure { id, settings });
     }

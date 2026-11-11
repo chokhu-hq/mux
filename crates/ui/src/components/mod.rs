@@ -53,7 +53,7 @@ pub use usage_ring::{UsageRing, usage_rows};
 
 use crate::motion::{Spring, spring_bool};
 
-pub(crate) fn hover_t(ui: &egui::Ui, response: &egui::Response) -> f32 {
+pub fn hover_t(ui: &egui::Ui, response: &egui::Response) -> f32 {
     spring_bool(
         ui.ctx(),
         response.id.with("hover"),

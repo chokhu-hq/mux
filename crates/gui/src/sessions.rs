@@ -37,6 +37,8 @@ pub struct Local {
     pub context: Option<ContextUsage>,
     // the skills the agent can be pointed at with `$name`, offered alongside mux's commands
     pub skills: Vec<Skill>,
+    // the project's files, offered by typing `@`
+    pub files: Vec<String>,
     // messages waiting for the agent to finish, and whether a stop is holding them
     pub queue: Vec<wire::Queued>,
     pub held: bool,
@@ -457,6 +459,11 @@ impl Sessions {
             ServerMsg::AgentSkills { id, skills } => {
                 if let Some(local) = self.locals.get_mut(&id) {
                     local.skills = skills;
+                }
+            }
+            ServerMsg::AgentFiles { id, files } => {
+                if let Some(local) = self.locals.get_mut(&id) {
+                    local.files = files;
                 }
             }
             ServerMsg::AgentTranscript {

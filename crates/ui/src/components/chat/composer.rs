@@ -31,9 +31,11 @@ pub struct Composer<'a> {
     running: bool,
     hint: &'a str,
     controls: Option<Controls<'a>>,
+    trailing: Option<Controls<'a>>,
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
     commands: &'a [super::SlashCommand],
+    files: &'a [String],
     history: &'a [&'a str],
     queued: bool,
 }
@@ -43,14 +45,22 @@ impl<'a> Composer<'a> {
         Self {
             draft,
             running: false,
-            hint: "Ask the agent…",
+            hint: "Ask anything. @ files, $ skills, / commands",
             controls: None,
+            trailing: None,
             context: None,
             attachments: None,
             commands: &[],
+            files: &[],
             history: &[],
             queued: false,
         }
+    }
+
+    // the project's files, offered by typing `@`
+    pub fn files(mut self, files: &'a [String]) -> Self {
+        self.files = files;
+        self
     }
 
     // messages sent before, oldest first, that up and down step through
@@ -86,6 +96,12 @@ impl<'a> Composer<'a> {
     // extra controls beside the attach button, like model and speed pickers
     pub fn controls(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
         self.controls = Some(Box::new(add));
+        self
+    }
+
+    // controls on the right just before send and the context ring
+    pub fn trailing(mut self, add: impl FnOnce(&mut Ui) + 'a) -> Self {
+        self.trailing = Some(Box::new(add));
         self
     }
 
@@ -126,7 +142,7 @@ impl<'a> Composer<'a> {
         let has_files = self.attachments.as_ref().is_some_and(|a| !a.is_empty());
         // the slash menu reads its keys first, so enter picks a command rather than sending
         let mut picked = None;
-        if !self.commands.is_empty() {
+        if !self.commands.is_empty() || !self.files.is_empty() {
             let anchor = ui.cursor().min;
             let width = ui.available_width().min(440.0);
             if let Some(super::slash::Pick::Run(name)) = super::slash::menu(
@@ -134,6 +150,7 @@ impl<'a> Composer<'a> {
                 edit_id,
                 self.draft,
                 self.commands,
+                self.files,
                 anchor,
                 width,
                 focused,
@@ -173,9 +190,9 @@ impl<'a> Composer<'a> {
             ))
             .corner_radius(radius::XL)
             .inner_margin(Margin {
-                left: 16,
+                left: 18,
                 right: 12,
-                top: 14,
+                top: 16,
                 bottom: 12,
             })
             // only the light theme lifts it with a shadow, the dark one lets the outline do it
@@ -206,38 +223,23 @@ impl<'a> Composer<'a> {
                                 .frame(Frame::NONE)
                                 .hint_text(self.hint)
                                 .font(font::regular(text::MD + 1.0))
-                                .desired_rows(1)
+                                .desired_rows(2)
                                 .desired_width(f32::INFINITY)
                                 .margin(Margin::ZERO),
                         );
                         crate::components::edit_menu(&field, self.draft);
                     });
-                ui.add_space(space::SM);
+                ui.add_space(space::MD);
                 ui.horizontal(|ui| {
-                    if let Some(controls) = self.controls.take() {
-                        // the controls get what's left once send, the context ring and attach have their room,
-                        // and are clipped to it, so they shrink rather than slide under them
-                        let gap = ui.spacing().item_spacing.x;
-                        // room for the ring with a label as wide as 100%
-                        let ring = if self.context.is_some() {
-                            56.0 + gap
-                        } else {
-                            0.0
-                        };
-                        let attach = control::SM + gap;
-                        let budget = (ui.available_width() - SEND - ring - attach - gap).max(0.0);
-                        let row = ui.available_rect_before_wrap();
-                        ui.allocate_ui_with_layout(
-                            vec2(budget, control::MD),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.set_clip_rect(ui.clip_rect().intersect(
-                                    egui::Rect::from_min_size(row.min, vec2(budget, row.height())),
-                                ));
-                                controls(ui);
-                            },
-                        );
+                    // attach leads the row like t3 code's, with the pickers after it
+                    if IconButton::new(icons::PAPERCLIP, "Attach")
+                        .show(ui)
+                        .tip("Attach files")
+                        .clicked()
+                    {
+                        action = Some(ComposerAction::Attach);
                     }
+                    // the right side goes first so the controls on the left get whatever room is left
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let ready = !self.draft.trim().is_empty() || has_files;
                         // while the agent works an empty box offers stop, and typing turns it back into send
@@ -268,12 +270,20 @@ impl<'a> Composer<'a> {
                         {
                             action = Some(ComposerAction::Compact);
                         }
-                        if IconButton::new(icons::PAPERCLIP, "Attach")
-                            .show(ui)
-                            .tip("Attach files")
-                            .clicked()
-                        {
-                            action = Some(ComposerAction::Attach);
+                        if let Some(trailing) = self.trailing.take() {
+                            trailing(ui);
+                        }
+                        if let Some(controls) = self.controls.take() {
+                            // clipped to what's left, so they shrink rather than slide under the right side
+                            let room = ui.available_rect_before_wrap();
+                            ui.allocate_ui_with_layout(
+                                vec2(room.width(), control::MD),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_clip_rect(ui.clip_rect().intersect(room));
+                                    controls(ui);
+                                },
+                            );
                         }
                     });
                 });
@@ -354,7 +364,7 @@ fn compact_notice(ui: &mut Ui, context: ContextUsage) -> bool {
     clicked
 }
 
-const SEND: f32 = 32.0;
+const SEND: f32 = 36.0;
 
 fn round_button(ui: &mut Ui, icon: char, enabled: bool, stop: bool) -> Response {
     let p = theme::palette(ui);

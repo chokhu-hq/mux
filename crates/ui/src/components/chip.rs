@@ -6,9 +6,13 @@ use super::{hover_t, provider_color, provider_mark};
 use crate::icons;
 use crate::theme::{self, control, font, icon, radius, space, text};
 
+const DETAIL_GAP: f32 = 4.0;
+
 // a compact label with a caret, used to open a menu of choices like a model picker
 pub struct Chip<'a> {
     label: &'a str,
+    // quieter text after the label, like a model's effort
+    detail: &'a str,
     provider: Option<Provider>,
     icon: Option<char>,
     // toggles have no menu, so no chevron
@@ -20,6 +24,7 @@ impl<'a> Chip<'a> {
     pub fn new(label: &'a str) -> Self {
         Self {
             label,
+            detail: "",
             provider: None,
             icon: None,
             caret: true,
@@ -37,6 +42,11 @@ impl<'a> Chip<'a> {
     // leads with an agent's logo, for pickers that choose between agents
     pub fn provider(mut self, provider: Provider) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    pub fn detail(mut self, detail: &'a str) -> Self {
+        self.detail = detail;
         self
     }
 
@@ -59,12 +69,25 @@ impl<'a> Chip<'a> {
                 .size()
                 .x
         };
+        let detail_w = if self.detail.is_empty() {
+            0.0
+        } else {
+            DETAIL_GAP
+                + ui.painter()
+                    .layout_no_wrap(
+                        self.detail.to_owned(),
+                        font::regular(text::SM + 1.0),
+                        theme::palette(ui).text_faint,
+                    )
+                    .size()
+                    .x
+        };
         let caret_w = if self.caret {
             space::XS + icon::SM
         } else {
             0.0
         };
-        space::SM + self.mark_width() + label_w + caret_w + space::SM
+        space::SM + self.mark_width() + label_w + detail_w + caret_w + space::SM
     }
 
     fn mark_width(&self) -> f32 {
@@ -131,6 +154,22 @@ impl<'a> Chip<'a> {
                 galley.clone(),
                 text_color,
             );
+            if !self.detail.is_empty() {
+                let at = x
+                    + galley.size().x
+                    + if self.label.is_empty() {
+                        0.0
+                    } else {
+                        DETAIL_GAP
+                    };
+                ui.painter().text(
+                    pos2(at, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    self.detail,
+                    font::regular(text::SM + 1.0),
+                    p.text_muted.lerp_to_gamma(p.text, lit * 0.5),
+                );
+            }
             if self.caret {
                 ui.painter().text(
                     pos2(rect.right() - space::SM, rect.center().y),

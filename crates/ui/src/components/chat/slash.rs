@@ -22,17 +22,32 @@ pub enum Pick {
     Fill,
 }
 
+// how many files the `@` menu offers at once, so a big repo stays quick to filter
+const MAX_FILES: usize = 50;
+
+// one line of the menu, a command to run or a skill or file to mention
+struct Row<'a> {
+    label: String,
+    detail: &'a str,
+    glyph: char,
+    // mux's own command to run, otherwise the text put in place of the typed word
+    run: Option<&'a str>,
+    insert: String,
+}
+
 // the menu of commands matching what's typed after the slash, floating just above the composer
+#[allow(clippy::too_many_arguments)]
 pub fn menu(
     ui: &mut Ui,
     edit_id: Id,
     draft: &mut String,
     commands: &[SlashCommand],
+    files: &[String],
     anchor: Pos2,
     width: f32,
     focused: bool,
 ) -> Option<Pick> {
-    // a slash opening the message offers everything, a `$` word anywhere offers skills to mention
+    // a slash opening the message offers everything, a `$` word anywhere offers skills and an `@` word files
     let cursor = egui::TextEdit::load_state(ui.ctx(), edit_id)
         .and_then(|state| state.cursor.char_range())
         .map_or(draft.chars().count(), |range| range.primary.index.into());
@@ -45,32 +60,24 @@ pub fn menu(
     });
     let slash = draft.starts_with('/') && !draft.contains(char::is_whitespace);
     let mention = !slash && draft[word_start..at].starts_with('$');
+    let file = !slash && draft[word_start..at].starts_with('@');
     let query = if slash {
         Some(draft[1..].to_lowercase())
-    } else if mention {
+    } else if mention || file {
         Some(draft[word_start + 1..at].to_lowercase())
     } else {
         None
     };
-    let commands: Vec<&SlashCommand> = commands.iter().filter(|c| slash || !c.builtin).collect();
     let state_id = edit_id.with("slash");
     // esc hides the menu for what's typed now, and it comes back once the text changes
     let dismissed = ui.data(|d| d.get_temp::<String>(state_id.with("dismissed")));
     let open = focused && query.is_some() && dismissed.as_deref() != Some(draft.as_str());
     let query = query.unwrap_or_default();
-    // names that start with what's typed come first, then ones that merely contain it
-    let mut matches: Vec<&SlashCommand> = commands
-        .iter()
-        .copied()
-        .filter(|c| c.name.to_lowercase().starts_with(&query))
-        .collect();
-    matches.extend(
-        commands
-            .iter()
-            .copied()
-            .filter(|c| !c.name.to_lowercase().starts_with(&query))
-            .filter(|c| c.name.to_lowercase().contains(&query)),
-    );
+    let matches = if file {
+        file_rows(files, &query)
+    } else {
+        command_rows(commands, slash, &query)
+    };
     let shown = spring_bool(
         ui.ctx(),
         state_id.with("open"),
@@ -133,7 +140,7 @@ pub fn menu(
                         .max_height(height - space::XS * 2.0)
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            for (i, command) in matches.iter().enumerate() {
+                            for (i, row_data) in matches.iter().enumerate() {
                                 let (rect, row) = ui.allocate_exact_size(
                                     vec2(ui.available_width(), ROW),
                                     Sense::click(),
@@ -157,30 +164,24 @@ pub fn menu(
                                     }
                                 }
                                 let y = rect.center().y;
-                                let glyph = if command.builtin {
-                                    icons::COMMAND
-                                } else {
-                                    icons::SPARKLE
-                                };
                                 ui.painter().text(
                                     egui::pos2(rect.left() + space::SM + icon::MD / 2.0, y),
                                     Align2::CENTER_CENTER,
-                                    glyph,
+                                    row_data.glyph,
                                     font::icon(icon::MD),
                                     p.text_muted,
                                 );
-                                let sigil = if command.builtin { '/' } else { '$' };
                                 let name = ui.painter().text(
                                     egui::pos2(rect.left() + space::SM + icon::MD + space::SM, y),
                                     Align2::LEFT_CENTER,
-                                    format!("{sigil}{}", command.name),
+                                    &row_data.label,
                                     font::medium(text::MD),
                                     p.text,
                                 );
                                 let room = rect.right() - space::SM - name.right() - space::MD;
                                 if room > 40.0 {
                                     let mut job = egui::text::LayoutJob::simple_singleline(
-                                        command.detail.clone(),
+                                        row_data.detail.to_owned(),
                                         font::regular(text::SM + 1.0),
                                         p.text_faint,
                                     );
@@ -206,13 +207,13 @@ pub fn menu(
         });
     ui.data_mut(|d| d.insert_temp(state_id, selected));
 
-    let command = matches.get(chosen?)?;
-    if command.builtin {
+    let row = matches.get(chosen?)?;
+    if let Some(name) = row.run {
         draft.clear();
-        return Some(Pick::Run(command.name.clone()));
+        return Some(Pick::Run(name.to_owned()));
     }
-    // a skill goes in as a `$name` mention wherever it was asked for, and the agent is told about it on send
-    let inserted = format!("${} ", command.name);
+    // a skill goes in as a `$name` mention and a file as `@path`, wherever it was asked for
+    let inserted = format!("{} ", row.insert);
     let (from, to) = if slash {
         (0, draft.len())
     } else {
@@ -227,4 +228,72 @@ pub fn menu(
         .set_char_range(Some(CCursorRange::one(CCursor::new(end))));
     state.store(ui.ctx(), edit_id);
     Some(Pick::Fill)
+}
+
+// names that start with what's typed come first, then ones that merely contain it
+fn command_rows<'a>(commands: &'a [SlashCommand], slash: bool, query: &str) -> Vec<Row<'a>> {
+    let commands: Vec<&SlashCommand> = commands.iter().filter(|c| slash || !c.builtin).collect();
+    let starts = |c: &&&SlashCommand| c.name.to_lowercase().starts_with(query);
+    let first = commands.iter().filter(starts);
+    let rest = commands
+        .iter()
+        .filter(|c| !starts(c) && c.name.to_lowercase().contains(query));
+    first
+        .chain(rest)
+        .map(|c| {
+            let sigil = if c.builtin { '/' } else { '$' };
+            Row {
+                label: format!("{sigil}{}", c.name),
+                detail: &c.detail,
+                glyph: if c.builtin {
+                    icons::COMMAND
+                } else {
+                    icons::SPARKLE
+                },
+                run: c.builtin.then_some(c.name.as_str()),
+                insert: format!("${}", c.name),
+            }
+        })
+        .collect()
+}
+
+// files whose name starts with what's typed come first, then any whose path contains it, shallower paths before deeper
+fn file_rows<'a>(files: &'a [String], query: &str) -> Vec<Row<'a>> {
+    let mut found: Vec<(bool, usize, &'a str)> = files
+        .iter()
+        .filter_map(|path| {
+            let lower = path.to_lowercase();
+            if file_name(&lower).starts_with(query) {
+                Some((false, path.matches('/').count(), path.as_str()))
+            } else if lower.contains(query) {
+                Some((true, path.matches('/').count(), path.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .take(MAX_FILES)
+        .map(|(_, _, path)| {
+            let file = file_name(path);
+            Row {
+                label: file.to_owned(),
+                detail: path[..path.len() - file.len()].trim_end_matches('/'),
+                glyph: icons::FILE,
+                run: None,
+                // claude code's way of mentioning a path with spaces in it
+                insert: if path.contains(char::is_whitespace) {
+                    format!("@\"{path}\"")
+                } else {
+                    format!("@{path}")
+                },
+            }
+        })
+        .collect()
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }

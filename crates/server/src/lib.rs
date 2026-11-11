@@ -1,4 +1,5 @@
 mod agent;
+mod files;
 mod history;
 mod listener;
 mod mcp;
@@ -59,6 +60,8 @@ pub enum Event {
     History(Box<history::History>),
     // the skills found for a session's agent, tagged with which agent they're for
     Skills(u64, Provider, Vec<mux_core::protocol::Skill>),
+    // the project's files, listed for a session's `@` menu
+    Files(u64, Vec<String>),
     // an agent's usage limit has reset, given with the reset it was waiting for
     Wake(u64, u64),
     // how spending one of an account's limit resets went
@@ -489,6 +492,9 @@ impl Server {
                     self.agent_changed(id);
                 }
             }
+            Event::Files(id, files) => {
+                self.send_watchers(id, ServerMsg::AgentFiles { id, files });
+            }
             Event::History(history) => {
                 let (today, days) = history.summary();
                 self.history = Some(history);
@@ -664,6 +670,7 @@ impl Server {
                 self.send(client, ServerMsg::AgentQueue { id, queue, held });
                 self.send(client, ServerMsg::AgentBackground { id, tasks });
                 self.fetch_skills(id, provider);
+                self.fetch_files(id);
                 for provider in Provider::ALL {
                     if !self.models.contains_key(&provider) {
                         self.fetch_models(provider);
@@ -1043,6 +1050,17 @@ impl Server {
                 Provider::OpenCode => return,
             };
             let _ = events.send(Event::Skills(id, provider, skills));
+        });
+    }
+
+    // listed fresh each time a chat opens, so new files can be mentioned without restarting
+    fn fetch_files(&self, id: u64) {
+        let Some(folder) = self.store.session_path(id).map(PathBuf::from) else {
+            return;
+        };
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = events.send(Event::Files(id, files::list(&folder)));
         });
     }
 

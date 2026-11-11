@@ -10,7 +10,25 @@ pub type Stream = std::net::TcpStream;
 
 #[cfg(unix)]
 pub fn connect(path: &Path) -> io::Result<Stream> {
+    ours(path)?;
     Stream::connect(path)
+}
+
+// the socket can fall back to a shared folder like /tmp, where another account could put one in the way first
+// to read what's typed into the user's shells, so one this user doesn't own is never used
+#[cfg(unix)]
+pub fn ours(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.uid() != unsafe { libc::getuid() } => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} belongs to another account, so Mux won't use it. Remove it or set XDG_RUNTIME_DIR.",
+                path.display()
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(windows)]
@@ -77,6 +95,23 @@ pub fn secret() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_this_accounts_socket_is_used() {
+        let path = std::env::temp_dir().join(format!("mux-ours-{}", std::process::id()));
+        assert!(ours(&path).is_ok(), "nothing there yet is fine");
+        std::fs::write(&path, "").unwrap();
+        assert!(ours(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        // root's files stand in for another account's, unless the test itself runs as root
+        if unsafe { libc::getuid() } != 0 {
+            assert_eq!(
+                ours(Path::new("/")).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
 
     #[test]
     fn address_files_round_trip() {

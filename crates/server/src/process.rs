@@ -36,7 +36,9 @@ pub struct Process {
     // raw output kept so a client attaching later can rebuild the screen
     pub replay: Vec<u8>,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    // what's typed goes to a thread of its own, since a program that isn't reading would block the write
+    // and with it every other session the server runs
+    input: mpsc::Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     term: Term<Listener>,
     parser: Processor,
@@ -93,10 +95,22 @@ impl Process {
             .master
             .try_clone_reader()
             .map_err(|e| io::Error::other(e.to_string()))?;
-        let writer = pair
+        let mut writer = pair
             .master
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
+        let (input, typed) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            for data in typed {
+                if writer
+                    .write_all(&data)
+                    .and_then(|_| writer.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         thread::spawn(move || {
             let mut buf = vec![0; 64 * 1024];
@@ -142,7 +156,7 @@ impl Process {
             exited: false,
             replay: Vec::new(),
             master: pair.master,
-            writer,
+            input,
             killer,
             term,
             parser: Processor::new(),
@@ -176,10 +190,7 @@ impl Process {
         if self.exited {
             return;
         }
-        let _ = self
-            .writer
-            .write_all(data)
-            .and_then(|_| self.writer.flush());
+        let _ = self.input.send(data.to_vec());
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {

@@ -103,6 +103,8 @@ fn local() -> io::Result<Stream> {
     let path = protocol::socket_path();
     match transport::connect(&path) {
         Ok(stream) => Ok(stream),
+        // starting a server wouldn't help when the socket's path is taken by someone else
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => Err(err),
         Err(_) => {
             start_server()?;
             let deadline = Instant::now() + Duration::from_secs(3);

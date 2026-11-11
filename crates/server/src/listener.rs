@@ -104,7 +104,8 @@ impl Listener {
                     let proven =
                         tokio::time::timeout(Duration::from_secs(5), read_secret(&mut stream))
                             .await;
-                    if matches!(proven, Ok(Some(given)) if given == *secret) {
+                    if matches!(proven, Ok(Some(given)) if same(given.as_bytes(), secret.as_bytes()))
+                    {
                         connection(stream, id, events).await;
                     } else {
                         log::warn!("turned away a connection without the server's secret");
@@ -166,8 +167,14 @@ fn bind_tcp(address: &Path) -> io::Result<Tcp> {
     })
 }
 
+// compares every byte whatever it finds, so how long it takes says nothing about how much of a guess was right
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
 #[cfg(unix)]
 fn bind_unix(path: &Path) -> io::Result<tokio::net::UnixListener> {
+    mux_core::transport::ours(path)?;
     if path.exists() {
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
             return Err(io::Error::new(

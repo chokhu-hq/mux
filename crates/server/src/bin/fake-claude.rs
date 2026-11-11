@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 fn main() {
+    if std::env::var_os("FAKE_CLAUDE_SLEEP").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        return;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let inherited: Vec<String> = std::env::vars()
         .map(|(key, _)| key)
@@ -288,7 +292,13 @@ impl Fake {
         }
         if text.contains("scenario:helper") {
             // like an mcp server the cli starts and leaves running
-            if let Ok(helper) = std::process::Command::new("/bin/sleep").arg("300").spawn() {
+            // a copy of this fake that only sleeps, since the tests' PATH holds nothing else to run
+            let helper = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .env("FAKE_CLAUDE_SLEEP", "1")
+                    .spawn()
+            });
+            if let Ok(helper) = helper {
                 log(json!({ "helper": helper.id() }));
             }
         }

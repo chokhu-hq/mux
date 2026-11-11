@@ -420,40 +420,40 @@ impl<'a> ChatView<'a> {
                         let show_items = |ui: &mut Ui, indices: &[usize]| {
                             show_items(ui, items, indices, running, turns, reset)
                         };
-                        let mut plain = Vec::new();
-                        let mut i = 0;
+                        // anything before the first message, then the turns, which are skipped whole
+                        // and in runs while off screen so a long chat costs little per frame. the last
+                        // turn is always drawn, since it's the one still growing
+                        let first = next_message(items, 0);
+                        take(&mut action, show_items(ui, &(0..first).collect::<Vec<_>>()));
+                        let mut starts = Vec::new();
+                        let mut i = first;
                         while i < items.len() {
-                            plain.push(i);
-                            let message = matches!(items[i], ChatItem::User { .. });
-                            let turn = message.then(|| fold(items, i + 1, running));
-                            let Some(turn) = turn.filter(|t| t.worth_folding(items)) else {
-                                i += 1;
-                                continue;
-                            };
-                            take(&mut action, show_items(ui, &plain));
-                            plain.clear();
-                            // a turn's steps fold behind one line once it's done, open while it runs
-                            lazy(ui, ("turn", i), |ui| {
-                                ui.push_id(("turn", i), |ui| {
-                                    let id = ui.make_persistent_id("fold");
-                                    let work: Vec<&ChatItem> =
-                                        turn.work.iter().map(|&w| &items[w]).collect();
-                                    let took = match &items[i] {
-                                        ChatItem::User { took, .. } => *took,
-                                        _ => None,
-                                    };
-                                    let label = cards::turn_summary(&work, turn.live, took);
-                                    let (_, open) =
-                                        cards::summary_row(ui, id, turn.live, turn.live, &label);
-                                    crate::components::reveal(ui, id.with("steps"), open, |ui| {
-                                        take(&mut action, show_items(ui, &turn.work));
-                                    });
-                                });
-                            });
-                            take(&mut action, show_items(ui, &turn.kept));
-                            i = turn.end;
+                            starts.push(i);
+                            i = next_message(items, i + 1);
                         }
-                        take(&mut action, show_items(ui, &plain));
+                        let last = starts.last().copied();
+                        for run in starts.chunks(TURNS_PER_RUN) {
+                            let mut draw_run = |ui: &mut Ui| {
+                                for &i in run {
+                                    let mut draw = |ui: &mut Ui| {
+                                        take(
+                                            &mut action,
+                                            show_turn(ui, items, i, running, &show_items),
+                                        );
+                                    };
+                                    if Some(i) == last {
+                                        draw(ui);
+                                    } else {
+                                        lazy(ui, ("whole-turn", i), draw);
+                                    }
+                                }
+                            };
+                            if last.is_some_and(|l| run.contains(&l)) {
+                                draw_run(ui);
+                            } else {
+                                lazy(ui, ("turns", run[0]), draw_run);
+                            }
+                        }
                         ui.add_space(space::SM);
                     });
                 });
@@ -462,6 +462,48 @@ impl<'a> ChatView<'a> {
         ui.allocate_rect(rect, Sense::hover());
         action
     }
+}
+
+// a message and what the agent did about it, its steps folded behind one line once there are enough of them
+fn show_turn(
+    ui: &mut Ui,
+    items: &[ChatItem],
+    i: usize,
+    running: bool,
+    show_items: &dyn Fn(&mut Ui, &[usize]) -> Option<ChatAction>,
+) -> Option<ChatAction> {
+    let mut action = None;
+    let turn = fold(items, i + 1, running);
+    if !turn.worth_folding(items) {
+        return show_items(ui, &(i..turn.end).collect::<Vec<_>>());
+    }
+    take(&mut action, show_items(ui, &[i]));
+    // a turn's steps fold behind one line once it's done, open while it runs
+    lazy(ui, ("turn", i), |ui| {
+        ui.push_id(("turn", i), |ui| {
+            let id = ui.make_persistent_id("fold");
+            let work: Vec<&ChatItem> = turn.work.iter().map(|&w| &items[w]).collect();
+            let took = match &items[i] {
+                ChatItem::User { took, .. } => *took,
+                _ => None,
+            };
+            let label = cards::turn_summary(&work, turn.live, took);
+            let (_, open) = cards::summary_row(ui, id, turn.live, turn.live, &label);
+            crate::components::reveal(ui, id.with("steps"), open, |ui| {
+                take(&mut action, show_items(ui, &turn.work));
+            });
+        });
+    });
+    take(&mut action, show_items(ui, &turn.kept));
+    action
+}
+
+// where the next message starts, or the end of the chat
+fn next_message(items: &[ChatItem], from: usize) -> usize {
+    items[from.min(items.len())..]
+        .iter()
+        .position(|item| matches!(item, ChatItem::User { .. }))
+        .map_or(items.len(), |at| from + at)
 }
 
 // the action of whatever was clicked, keeping the first one this frame
@@ -494,10 +536,7 @@ impl Fold {
 
 // the items from `start` up to the next message, split into the steps that fold and what stays out
 fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
-    let end = items[start..]
-        .iter()
-        .position(|item| matches!(item, ChatItem::User { .. }))
-        .map_or(items.len(), |at| start + at);
+    let end = next_message(items, start);
     let live = running && end == items.len();
     // the answer to the message, which is its last reply once the turn is done
     let reply = (start..end)
@@ -532,6 +571,9 @@ fn fold(items: &[ChatItem], start: usize, running: bool) -> Fold {
     }
 }
 
+// how many turns are skipped together while off screen
+const TURNS_PER_RUN: usize = 32;
+
 #[derive(Clone, Copy)]
 struct Measured {
     width: f32,
@@ -549,13 +591,17 @@ fn lazy(ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug, add: impl FnOn
     let known = ui
         .data(|d| d.get_temp::<Measured>(id))
         .filter(|m| m.width == width);
+    // the room kept is the block alone, with the usual gap after it either way, so blocks can nest
     if let Some(known) = known.filter(|m| top + m.height < near.top() || top > near.bottom()) {
-        ui.add_space(known.height);
+        ui.allocate_exact_size(egui::vec2(0.0, known.height), Sense::hover());
         return;
     }
     // egui numbers widgets by what came before them, and what came before may be skipped next frame
-    ui.scope_builder(UiBuilder::new().scope_id(id), add);
-    let height = ui.cursor().top() - top;
+    let height = ui
+        .scope_builder(UiBuilder::new().scope_id(id), add)
+        .response
+        .rect
+        .height();
     ui.data_mut(|d| d.insert_temp(id, Measured { width, height }));
 }
 

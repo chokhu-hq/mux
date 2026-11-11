@@ -297,10 +297,12 @@ impl<'a> ChatView<'a> {
             pos2(left + width, rect.bottom() - space::MD),
         );
         let mut bottom = ui.new_child(UiBuilder::new().max_rect(composer));
-        if let Some(task) = background::strip(&mut bottom, self.background) {
+        // each list above the composer gets at most a quarter of the chat, so the chat itself stays in view
+        let strip = (rect.height() / 4.0).max(cards::ROW * 3.0);
+        if let Some(task) = background::strip(&mut bottom, self.background, strip) {
             action = Some(ChatAction::StopBackground(task));
         }
-        if let Some(event) = queue::strip(&mut bottom, self.queue, self.held) {
+        if let Some(event) = queue::strip(&mut bottom, self.queue, self.held, strip) {
             use mux_core::protocol::QueueAction;
             action = Some(match event {
                 queue::QueueEvent::SendNow(i) => ChatAction::Queue(i, QueueAction::SendNow),

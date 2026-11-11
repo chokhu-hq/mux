@@ -19,7 +19,8 @@ pub enum QueueEvent {
 
 // messages waiting for the agent, just above the composer the way claude code shows them,
 // since the agent takes them in at its next step rather than where they'd sit in the chat
-pub fn strip(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent> {
+// past `max_height` the messages scroll, so a long queue never pushes the composer up over the chat
+pub fn strip(ui: &mut Ui, messages: &[Queued], held: bool, max_height: f32) -> Option<QueueEvent> {
     if messages.is_empty() {
         return None;
     }
@@ -33,13 +34,19 @@ pub fn strip(ui: &mut Ui, messages: &[Queued], held: bool) -> Option<QueueEvent>
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (i, message) in messages.iter().enumerate() {
-                ui.push_id(i, |ui| {
-                    if let Some(e) = row(ui, i, message) {
-                        event = Some(e);
+            egui::ScrollArea::vertical()
+                .id_salt("queued-messages")
+                .max_height(max_height)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (i, message) in messages.iter().enumerate() {
+                        ui.push_id(i, |ui| {
+                            if let Some(e) = row(ui, i, message) {
+                                event = Some(e);
+                            }
+                        });
                     }
                 });
-            }
             // what happens next, and why nothing has gone yet when a stop held the queue
             let (line, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());

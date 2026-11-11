@@ -13,7 +13,8 @@ use crate::theme::{self, control, font, icon, radius, space, text};
 
 // commands the agent left running, above the composer so they stay in sight while the chat scrolls,
 // returning the one to stop when its stop button is pressed
-pub fn strip(ui: &mut Ui, tasks: &[Background]) -> Option<String> {
+// past `max_height` the commands scroll, so a long list never pushes the composer up over the chat
+pub fn strip(ui: &mut Ui, tasks: &[Background], max_height: f32) -> Option<String> {
     if tasks.is_empty() {
         return None;
     }
@@ -30,13 +31,19 @@ pub fn strip(ui: &mut Ui, tasks: &[Background]) -> Option<String> {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
-            for task in tasks {
-                ui.push_id(&task.id, |ui| {
-                    if row(ui, task, now) {
-                        stop = Some(task.id.clone());
+            ScrollArea::vertical()
+                .id_salt("background-tasks")
+                .max_height(max_height)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for task in tasks {
+                        ui.push_id(&task.id, |ui| {
+                            if row(ui, task, now) {
+                                stop = Some(task.id.clone());
+                            }
+                        });
                     }
                 });
-            }
         });
     ui.add_space(space::SM);
     // the running time ticks over each second

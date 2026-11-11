@@ -146,6 +146,8 @@ impl Page<'_> {
 fn nav_item(ui: &mut egui::Ui, tab: Tab, selected: bool) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) = ui.allocate_exact_size(vec2(NAV, 32.0), Sense::click());
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, tab.label()));
     let t = mux_ui::motion::spring_bool(
         ui.ctx(),
         response.id.with("hover"),
@@ -683,7 +685,11 @@ pub(crate) fn setting(
     control: impl FnOnce(&mut egui::Ui),
 ) {
     let p = theme::palette(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
+    let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
+    // the text is painted by hand, so the row carries it for screen readers and test scripts
+    row.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{title}: {detail}"))
+    });
     // the control goes first, so the text knows how much room is left beside it
     let mut controls = ui.new_child(
         UiBuilder::new()

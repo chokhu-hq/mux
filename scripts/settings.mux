@@ -1,0 +1,14 @@
+# opens settings, visits each tab and saves a shot of each, then closes it again
+wait 1
+click Settings
+expect General
+shot settings-general
+click MCP servers
+expect Paste JSON
+shot settings-mcp
+click Usage
+shot settings-usage
+click About
+expect Version
+shot settings-about
+key escape

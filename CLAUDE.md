@@ -17,6 +17,7 @@ Mux is a native Rust and egui harness for the Codex CLI, Claude Code and OpenCod
 - `cargo build`, `cargo run -p mux-gui`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt`
 - `cargo run -p mux-ui --example gallery` shows every widget
 - Screenshots: set `MUX_SCREENSHOT=target/shots/<name>.png` (and optionally `MUX_SCREENSHOT_SIZE=WxH`, `MUX_SCREENSHOT_THEME`). The app settles its animations, saves a PNG and quits. Keep shots under `target/`.
+- Scripts: set `MUX_SCRIPT=scripts/settings.mux` to drive the app through steps like `click Settings`, `type`, `key ctrl+shift+k`, `expect`, `shot <name>` and `labels`, then quit with status 1 if any step failed. Widgets are found by their label in egui's accessibility tree, so a hand-painted widget needs `widget_info` to be clickable. The steps are listed at the top of `crates/ui/src/script.rs`.
 
 ## Working rules
 
@@ -49,7 +50,6 @@ Copy `state.json` in if you need real sessions. Stop the sandbox server by its e
 
 ## What's next
 
-- A scripted test mode (`MUX_SCRIPT`) that drives the app through a list of actions and captures screenshots, probably as an egui plugin using `input_hook` and `output_hook`. It was asked for and not started.
 - A server stress test: many clients and sessions at once, clients dropping mid-stream, and big outputs.
 - Things still to check on real Windows and macOS: dark Acrylic, the tray, the installer, the updater swap, the renderer fallback, the PATH merge, sign-in detection, and a light strip at the top left of the window on Windows.
 - Ideas offered but not taken up yet: Segoe UI on Windows, speech to text.

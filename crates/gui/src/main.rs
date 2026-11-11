@@ -96,6 +96,7 @@ fn main() -> eframe::Result {
     let start = || -> eframe::AppCreator<'static> {
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
+            mux_ui::script::install(&cc.egui_ctx);
             Ok(Box::new(App::new(&cc.egui_ctx)))
         })
     };
@@ -1970,6 +1971,8 @@ fn settings_row(
     let p = theme::palette(ui);
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_ROW), egui::Sense::click());
+    // named for screen readers and test scripts, since the row is painted by hand
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Settings"));
     let hover = motion::spring_bool(
         ui.ctx(),
         response.id.with("hover"),

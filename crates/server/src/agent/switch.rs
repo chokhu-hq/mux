@@ -1,12 +1,12 @@
 use mux_core::Provider;
-use mux_core::protocol::{AgentItem, AgentSettings, ContextUsage, ItemStatus};
+use mux_core::protocol::{AgentItem, AgentSettings, ContextUsage, ItemStatus, TodoStatus};
 use serde::{Deserialize, Serialize};
 
 use super::Agent;
 
 // how much earlier conversation goes to an agent taking over, in bytes, kept whole item by item
 const BUDGET: usize = 60_000;
-// a single command's output is cut to its tail before it counts against the budget
+// a single command's or tool's output is cut to its tail before it counts against the budget
 const OUTPUT: usize = 2_000;
 
 // an agent's own conversation set aside while another agent carries on the chat
@@ -152,7 +152,16 @@ impl Agent {
 // the earlier conversation as plain text for an agent taking over, whole items only, keeping the last
 // message and reply and the first message ahead of everything else, then as much of the most recent as fits
 fn history(items: &[AgentItem]) -> String {
-    let entries: Vec<(bool, String)> = items.iter().filter_map(entry).collect();
+    // only the latest task list still says where the work stands
+    let todos = items
+        .iter()
+        .rposition(|i| matches!(i, AgentItem::Todos { .. }));
+    let entries: Vec<(bool, String)> = items
+        .iter()
+        .enumerate()
+        .filter(|(n, i)| !matches!(i, AgentItem::Todos { .. }) || Some(*n) == todos)
+        .filter_map(|(_, i)| entry(i))
+        .collect();
     if entries.is_empty() {
         return String::new();
     }
@@ -215,19 +224,65 @@ fn entry(item: &AgentItem) -> Option<(bool, String)> {
             exit_code,
             ..
         } => {
-            let start = output.len().saturating_sub(OUTPUT);
-            let start = (start..=output.len())
-                .find(|i| output.is_char_boundary(*i))
-                .unwrap_or(output.len());
-            let cut = if start > 0 { "…" } else { "" };
             let code = exit_code.map_or(String::new(), |c| format!(" (exit {c})"));
             Some((
                 false,
-                format!(
-                    "Assistant ran `{command}`{code}:\n{cut}{}",
-                    &output[start..]
-                ),
+                format!("Assistant ran `{command}`{code}:\n{}", tail(output)),
             ))
+        }
+        AgentItem::Tool {
+            name,
+            detail,
+            output,
+            ..
+        } => {
+            let detail = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" {detail}")
+            };
+            let mut out = format!("Assistant used {name}{detail}");
+            if !output.trim().is_empty() {
+                out.push_str(&format!(":\n{}", tail(output)));
+            }
+            Some((false, out))
+        }
+        AgentItem::Subagent {
+            kind, task, result, ..
+        } if !result.trim().is_empty() => Some((
+            false,
+            format!(
+                "Assistant's {kind} helper ({task}) reported:\n{}",
+                tail(result)
+            ),
+        )),
+        AgentItem::Question {
+            questions,
+            answers: Some(answers),
+            ..
+        } => {
+            let mut out = String::from("Assistant asked, and the user answered:");
+            for (q, a) in questions.iter().zip(answers) {
+                let a = if a.is_empty() {
+                    "(left blank)".to_string()
+                } else {
+                    a.join(", ")
+                };
+                out.push_str(&format!("\n{}\nAnswer: {a}", q.question));
+            }
+            Some((false, out))
+        }
+        AgentItem::Todos { steps } if !steps.is_empty() => {
+            let mut out = String::from("Assistant's task list:");
+            for step in steps {
+                let mark = match step.status {
+                    TodoStatus::Done => "[x]",
+                    TodoStatus::Active => "[>]",
+                    TodoStatus::Pending => "[ ]",
+                };
+                out.push_str(&format!("\n{mark} {}", step.text));
+            }
+            Some((false, out))
         }
         AgentItem::FileChange { changes, .. } if !changes.is_empty() => {
             let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
@@ -237,6 +292,16 @@ fn entry(item: &AgentItem) -> Option<(bool, String)> {
         AgentItem::Error { message } => Some((false, format!("Error: {message}"))),
         _ => None,
     }
+}
+
+// the end of a long output, where results and errors usually are
+fn tail(output: &str) -> String {
+    let start = output.len().saturating_sub(OUTPUT);
+    let start = (start..=output.len())
+        .find(|i| output.is_char_boundary(*i))
+        .unwrap_or(output.len());
+    let cut = if start > 0 { "…" } else { "" };
+    format!("{cut}{}", &output[start..])
 }
 
 #[cfg(test)]
@@ -274,6 +339,47 @@ mod tests {
         assert!(fix < fixed);
         assert!(!text.contains("hmm"));
         assert!(!text.contains("left out"));
+    }
+
+    #[test]
+    fn history_carries_answers_tools_and_the_latest_task_list() {
+        let todos = |text: &str| AgentItem::Todos {
+            steps: vec![mux_core::protocol::TodoStep {
+                text: text.into(),
+                status: TodoStatus::Active,
+            }],
+        };
+        let items = [
+            user("pick a database"),
+            AgentItem::Question {
+                id: 1,
+                questions: vec![mux_core::protocol::Question {
+                    id: "db".into(),
+                    header: "Database".into(),
+                    question: "Which database?".into(),
+                    options: Vec::new(),
+                    multiple: false,
+                    other: true,
+                    optional: false,
+                }],
+                answers: Some(vec![vec!["Postgres".into()]]),
+                form: None,
+            },
+            todos("old plan"),
+            AgentItem::Tool {
+                name: "docs.search".into(),
+                detail: "postgres pooling".into(),
+                output: "use pgbouncer".into(),
+                status: ItemStatus::Done,
+                images: Vec::new(),
+            },
+            todos("set up the pool"),
+        ];
+        let text = history(&items);
+        assert!(text.contains("Which database?\nAnswer: Postgres"));
+        assert!(text.contains("Assistant used docs.search postgres pooling:\nuse pgbouncer"));
+        assert!(text.contains("[>] set up the pool"));
+        assert!(!text.contains("old plan"));
     }
 
     #[test]

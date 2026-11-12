@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use egui::{
-    Align2, Color32, CursorIcon, Frame, Key, Margin, Modifiers, Response, ScrollArea, Sense,
+    Align2, Color32, CursorIcon, Event, Frame, Key, Margin, Modifiers, Response, ScrollArea, Sense,
     Stroke, TextEdit, Ui, vec2,
 };
 
@@ -171,7 +171,16 @@ impl<'a> Composer<'a> {
         }
         // enter sends and shift+enter falls through to the text edit as a newline
         // messages can go out while the agent works, the agent picks them up as it goes
-        let mut send = focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        let mut send = focused
+            && ui.input_mut(|i| {
+                let before = i.events.len();
+                // consume_key matches logically, which would take shift+enter as a send too
+                i.events.retain(|e| {
+                    !matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. }
+                        if !modifiers.shift && modifiers.matches_logically(Modifiers::NONE))
+                });
+                i.events.len() != before
+            });
         let mut action = picked;
 
         if let Some(context) = self.context

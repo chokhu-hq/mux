@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct Store {
     next_id: u64,
     pub groups: Vec<GroupInfo>,
+    // moving a chat must not change the folder its conversation belongs to
+    #[serde(default)]
+    agent_folders: std::collections::HashMap<u64, String>,
     // agents that were mid-turn when the server last stopped, which it was too abrupt to stop itself
     #[serde(skip)]
     pub cut_off: Vec<u64>,
@@ -131,6 +134,15 @@ impl Store {
     }
 
     pub fn set_group_path(&mut self, id: u64, path: Option<String>) {
+        let sessions: Vec<_> = self
+            .groups
+            .iter()
+            .filter(|g| g.id == id)
+            .flat_map(|g| g.sessions.iter().map(|s| s.id))
+            .collect();
+        for session in sessions {
+            self.keep_agent_folder(session);
+        }
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == id) {
             group.path = path;
         }
@@ -141,12 +153,27 @@ impl Store {
         self.groups.retain(|g| g.id != id || !g.sessions.is_empty());
     }
 
-    // where a session runs: its own worktree when it has one, otherwise its group's folder
+    // a chat keeps its original folder when moved, with its worktree taking precedence
     pub fn session_path(&self, id: u64) -> Option<&str> {
         if let Some(worktree) = self.session(id).and_then(|s| s.worktree.as_deref()) {
             return Some(worktree);
         }
-        self.project_path(id)
+        self.agent_folders
+            .get(&id)
+            .map(String::as_str)
+            .or_else(|| self.project_path(id))
+    }
+
+    fn keep_agent_folder(&mut self, id: u64) {
+        if self.session(id).is_some_and(|s| {
+            s.kind == SessionKind::Agent
+                && s.summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.messages > 0)
+        }) && let Some(path) = self.project_path(id).map(str::to_owned)
+        {
+            self.agent_folders.entry(id).or_insert(path);
+        }
     }
 
     pub fn project_path(&self, id: u64) -> Option<&str> {
@@ -209,6 +236,7 @@ impl Store {
     }
 
     pub fn delete_session(&mut self, id: u64) {
+        self.agent_folders.remove(&id);
         for group in &mut self.groups {
             group.sessions.retain(|s| s.id != id);
         }
@@ -231,6 +259,7 @@ impl Store {
             .iter()
             .position(|s| s.id == id)
             .unwrap_or(0);
+        self.keep_agent_folder(id);
         let session = self.groups[from].sessions.remove(at);
         let mut index = index;
         if from == to && at < index {
@@ -261,6 +290,45 @@ mod tests {
             .iter()
             .map(|g| g.sessions.iter().map(|s| s.id).collect())
             .collect()
+    }
+
+    #[test]
+    fn moved_chats_keep_their_folder_across_state_round_trips() {
+        let mut store = Store::default();
+        let a = store.create_group("a", Some("/project-a".into()));
+        let b = store.create_group("b", Some("/project-b".into()));
+        let chat = store.create_session(Some(a), "chat", SessionKind::Agent);
+        store.session_mut(chat).unwrap().summary = Some(mux_core::protocol::AgentSummary {
+            messages: 1,
+            ..Default::default()
+        });
+        store.move_session(chat, b, 0);
+        store.set_group_path(b, Some("/project-c".into()));
+        let mut store: Store =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        assert_eq!(store.session_path(chat), Some("/project-a"));
+        assert_eq!(store.project_path(chat), Some("/project-c"));
+        store.session_mut(chat).unwrap().worktree = Some("/checkout".into());
+        assert_eq!(store.session_path(chat), Some("/checkout"));
+        store.delete_session(chat);
+        assert!(!store.agent_folders.contains_key(&chat));
+    }
+
+    #[test]
+    fn changing_a_project_folder_preserves_existing_chats() {
+        let mut store = Store::default();
+        let group = store.create_group("a", None);
+        let chat = store.create_session(Some(group), "chat", SessionKind::Agent);
+        store.set_group_path(group, Some("/first".into()));
+        assert_eq!(store.session_path(chat), Some("/first"));
+        store.session_mut(chat).unwrap().summary = Some(mux_core::protocol::AgentSummary {
+            messages: 1,
+            ..Default::default()
+        });
+        store.set_group_path(group, Some("/second".into()));
+        assert_eq!(store.session_path(chat), Some("/first"));
+        let new_chat = store.create_session(Some(group), "new", SessionKind::Agent);
+        assert_eq!(store.session_path(new_chat), Some("/second"));
     }
 
     #[test]

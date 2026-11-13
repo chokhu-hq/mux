@@ -89,11 +89,8 @@ impl Server {
             }
         }
         // the first message of a worktree agent makes its checkout, named after what it was asked
-        let wants_worktree = info.worktree.is_none()
-            && self
-                .agents
-                .get(&id)
-                .is_some_and(|a| a.settings.worktree && a.items.is_empty());
+        let wants_worktree =
+            info.worktree.is_none() && self.agents.get(&id).is_some_and(|a| a.settings.worktree);
         if wants_worktree {
             let title = self
                 .store
@@ -102,7 +99,7 @@ impl Server {
                 .unwrap_or_default();
             match self
                 .store
-                .project_path(id)
+                .session_path(id)
                 .map(|repo| worktree::add(repo, &title, id))
             {
                 Some(Ok(path)) => {
@@ -341,5 +338,54 @@ impl Server {
             info.summary = Some(summary);
             self.changed();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_worktree_creation_is_retried_without_starting_an_agent() {
+        let root = std::env::temp_dir().join(format!("mux-retry-worktree-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (events, _) = mpsc::unbounded_channel();
+        let (stop, _) = mpsc::unbounded_channel();
+        let mut server = Server {
+            mcp_status: Vec::new(),
+            store: Store::default(),
+            state: root.join("state.json"),
+            clients: HashMap::new(),
+            processes: HashMap::new(),
+            agents: HashMap::new(),
+            seen: HashMap::new(),
+            models: HashMap::new(),
+            fetching_models: HashSet::new(),
+            files_sent: HashMap::new(),
+            usage: HashMap::new(),
+            resets: HashMap::new(),
+            history: None,
+            attached: HashMap::new(),
+            generation: 0,
+            events,
+            stop,
+            leaving: false,
+        };
+        let group = server
+            .store
+            .create_group("not a repo", Some(root.to_string_lossy().into_owned()));
+        let id =
+            server
+                .store
+                .create_session(Some(group), "New agent", mux_core::SessionKind::Agent);
+        server.agent(id).settings.worktree = true;
+        for _ in 0..2 {
+            server.agent_send(id, "hello".into(), Vec::new());
+            assert!(server.agent(id).items.iter().all(|item| matches!(item,
+                AgentItem::Error { message } if message.contains("isn't a git repository"))));
+        }
+        assert_eq!(server.agent(id).items.len(), 2);
+        assert!(server.store.session(id).unwrap().worktree.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -287,7 +287,7 @@ fn general(
                 divider(ui);
             }
             ui.push_id(i, |ui| {
-                let name = crate::product(provider);
+                let name = provider.product();
                 let detail = match state {
                     crate::AgentState::Ready => format!("Runs {name}, found on your PATH"),
                     crate::AgentState::SignedOut => format!(

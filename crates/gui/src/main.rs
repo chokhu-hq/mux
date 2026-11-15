@@ -885,12 +885,12 @@ fn agent_status(ui: &mut egui::Ui, provider: Provider, state: AgentState) {
                 AgentState::Ready => (icons::CHECK_CIRCLE, "Installed".to_owned(), p.success),
                 AgentState::SignedOut => (
                     icons::WARNING_CIRCLE,
-                    format!("Sign in to {}", product(provider)),
+                    format!("Sign in to {}", provider.product()),
                     p.warning,
                 ),
                 AgentState::Missing => (
                     icons::WARNING_CIRCLE,
-                    format!("Install {}", product(provider)),
+                    format!("Install {}", provider.product()),
                     p.warning,
                 ),
             };
@@ -906,23 +906,6 @@ fn agent_status(ui: &mut egui::Ui, provider: Provider, state: AgentState) {
             );
         });
     });
-}
-
-// the name each agent's cli goes by
-fn product(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "Codex CLI",
-        Provider::Claude => "Claude Code",
-        Provider::OpenCode => "OpenCode",
-    }
-}
-
-fn cli(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "codex",
-        Provider::Claude => "claude",
-        Provider::OpenCode => "opencode",
-    }
 }
 
 // a terminal asked for a new text size, which every terminal then shares and keeps
@@ -1090,7 +1073,8 @@ fn installed_agents() -> [(Provider, AgentState); 3] {
     #[cfg(windows)]
     if let Some(distro) = mux_core::paths::wsl() {
         let found = wsl::installed(&distro, &Provider::ALL.map(cli));
-        return Provider::ALL.map(|provider| (provider, state(found.contains(&cli(provider)))));
+        return Provider::ALL
+            .map(|provider| (provider, state(found.contains(&provider.program()))));
     }
     Provider::ALL.map(|provider| (provider, state(installed(provider))))
 }
@@ -1106,7 +1090,7 @@ fn installed(provider: Provider) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|dir| {
             names.iter().any(|ext| {
-                let file = dir.join(cli(provider));
+                let file = dir.join(provider.program());
                 let file = if ext.is_empty() {
                     file
                 } else {
@@ -1140,7 +1124,7 @@ fn check_signins(
         }
         let (tx, ctx) = (tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            if let Some(signed_in) = exits_cleanly(cli(provider), args) {
+            if let Some(signed_in) = exits_cleanly(provider.program(), args) {
                 if !signed_in {
                     log::info!("{} isn't signed in", provider.label());
                 }

@@ -306,6 +306,24 @@ impl Provider {
             Self::OpenCode => "OpenCode",
         }
     }
+
+    // the name each agent's cli goes by
+    pub fn product(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex CLI",
+            Self::Claude => "Claude Code",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    // the program that runs it
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+        }
+    }
 }
 
 // how far an agent may go before it stops to ask, the same four modes t3 code offers

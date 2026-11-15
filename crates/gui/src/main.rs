@@ -46,6 +46,7 @@ mod sessions;
 mod settings;
 #[cfg(unix)]
 mod shell_env;
+mod ship;
 mod split;
 mod terminal;
 mod themes;
@@ -249,6 +250,8 @@ struct App {
     // every file changed in the open chat, with the agent's own hunks for when git can't say, and the one shown
     diffs: Vec<(String, String)>,
     diff_index: usize,
+    // the worktree chat whose diffs are open, which can commit and push from the viewer
+    ship: Option<ship::Ship>,
     // the title bar's changes were clicked, so the next frame opens the diff panel
     review: bool,
     // sessions whose desktop notification was clicked, sent from the threads waiting on them
@@ -315,6 +318,7 @@ impl App {
             split_shown: None,
             diffs: Vec::new(),
             diff_index: 0,
+            ship: None,
             review: false,
             opened: std::sync::mpsc::channel(),
             update: None,
@@ -501,6 +505,7 @@ impl App {
             restartable: ended && !agent,
         });
         let id = session.id;
+        let worktree = session.worktree.clone();
         if session.kind == SessionKind::Agent {
             if let Some((group, None, _)) = group {
                 let body = rect;
@@ -540,6 +545,8 @@ impl App {
                 Some(ChatAction::UseReset) => self.sessions.use_reset(Provider::Codex),
                 Some(ChatAction::OpenDiff(index)) => {
                     self.diffs = changed_files(&local.chat, folder.as_deref());
+                    // only a chat's own worktree is safe to commit and push from, never the project's checkout
+                    self.ship = worktree.map(|w| ship::Ship::new(id, w));
                     let clicked = match local.chat.get(index) {
                         Some(ChatItem::Diff(diff)) => Some(resolve(&diff.path, folder.as_deref())),
                         _ => None,
@@ -1471,6 +1478,7 @@ impl App {
         };
         let mut view = FileView::diff(mux_core::paths::local(path), &file_diff(path, fallback));
         view.step = Some((index, self.diffs.len()));
+        view.git = self.ship.as_ref().map(|_| mux_ui::GitBar::default());
         self.viewer = Some(view);
         self.viewer_open = true;
         self.diff_index = index;

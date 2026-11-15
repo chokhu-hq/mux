@@ -7,7 +7,7 @@ use egui::{
     vec2,
 };
 
-use super::{IconButton, TooltipExt};
+use super::{Button, IconButton, Size, TooltipExt};
 use crate::icons;
 use crate::theme::{self, Palette, font, icon, space, text};
 
@@ -22,6 +22,17 @@ pub enum FileViewAction {
     OpenInEditor,
     // move to the previous or next changed file
     Step(isize),
+    // ask the chat's agent to commit what it changed
+    Commit,
+    // push the worktree's branch and open a pull request for it
+    Push,
+}
+
+// commit and push for a worktree chat's changes, shown above its diffs
+#[derive(Default)]
+pub struct GitBar {
+    pub pushing: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +78,7 @@ pub struct FileView {
     diff: Option<Diff>,
     // which of the changed files this is, and how many there are
     pub step: Option<(usize, usize)>,
+    pub git: Option<GitBar>,
 }
 
 impl FileView {
@@ -87,6 +99,7 @@ impl FileView {
             settle: 3,
             diff: None,
             step: None,
+            git: None,
         }
     }
 
@@ -141,7 +154,28 @@ impl FileView {
             Stroke::new(1.0, p.border),
         );
 
-        let body = Rect::from_min_max(pos2(rect.left() + 1.0, header.bottom()), rect.max);
+        let mut top = header.bottom();
+        if let Some(error) = self.git.as_ref().and_then(|g| g.error.as_deref()) {
+            let galley = ui.painter().layout(
+                error.to_owned(),
+                font::regular(text::SM + 1.0),
+                p.danger,
+                rect.width() - space::MD * 2.0,
+            );
+            let strip = Rect::from_min_size(
+                pos2(rect.left(), top),
+                vec2(rect.width(), galley.size().y + space::SM * 2.0),
+            );
+            ui.painter()
+                .rect_filled(strip, 0.0, p.danger.gamma_multiply(0.12));
+            ui.painter().galley(
+                pos2(strip.left() + space::MD, strip.top() + space::SM),
+                galley,
+                p.danger,
+            );
+            top = strip.bottom();
+        }
+        let body = Rect::from_min_max(pos2(rect.left() + 1.0, top), rect.max);
         let mut body_ui = ui.new_child(UiBuilder::new().id_salt("body").max_rect(body));
         body_ui.set_clip_rect(body.intersect(ui.clip_rect()));
         match &self.content {
@@ -221,6 +255,24 @@ impl FileView {
                 .clicked()
             {
                 action = Some(FileViewAction::Step(-1));
+            }
+        }
+        if let Some(git) = &self.git {
+            row.add_space(space::SM);
+            let push = Button::new(if git.pushing { "Pushing…" } else { "Push" })
+                .size(Size::Sm)
+                .enabled(!git.pushing)
+                .show(&mut row)
+                .tip("Push this branch and open a pull request on GitHub");
+            if push.clicked() {
+                action = Some(FileViewAction::Push);
+            }
+            let commit = Button::new("Commit")
+                .size(Size::Sm)
+                .show(&mut row)
+                .tip("Ask the agent to commit its changes");
+            if commit.clicked() {
+                action = Some(FileViewAction::Commit);
             }
         }
         let buttons_left = row.min_rect().left();

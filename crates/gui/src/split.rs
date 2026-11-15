@@ -232,6 +232,13 @@ impl App {
         let panel = Rect::from_min_size(pos2(left, main.top()), vec2(full, main.height()));
         let mut panel_ui = ui.new_child(UiBuilder::new().id_salt("file-panel").max_rect(panel));
         panel_ui.set_clip_rect(panel.intersect(main).intersect(ui.clip_rect()));
+        self.poll_push(&ctx);
+        if let (Some(view), Some(ship)) = (&mut self.viewer, &self.ship)
+            && let Some(git) = &mut view.git
+        {
+            git.pushing = ship.pushing.is_some();
+            git.error.clone_from(&ship.error);
+        }
         let action = self.viewer.as_mut().and_then(|v| v.show(&mut panel_ui));
         if let (Some(action), Some(view)) = (action, &self.viewer) {
             match action {
@@ -243,6 +250,24 @@ impl App {
                 }
                 FileViewAction::CopyPath => ctx.copy_text(view.path.clone()),
                 FileViewAction::OpenInEditor => open_in_editor(&view.path, view.editor_line()),
+                FileViewAction::Commit => {
+                    if let Some(ship) = &mut self.ship {
+                        ship.error = None;
+                        self.sessions.outbox.push(ClientMsg::AgentSend {
+                            id: ship.id,
+                            text: ship::COMMIT.to_owned(),
+                            attachments: Vec::new(),
+                        });
+                    }
+                }
+                FileViewAction::Push => {
+                    if let Some(ship) = &mut self.ship
+                        && ship.pushing.is_none()
+                    {
+                        ship.error = None;
+                        ship.pushing = Some(ship::push(ship.worktree.clone(), ctx.clone()));
+                    }
+                }
                 FileViewAction::Step(by) => {
                     let count = self.diffs.len() as isize;
                     if count > 0 {
@@ -253,5 +278,24 @@ impl App {
             }
         }
         Rect::from_min_max(main.min, pos2(edge, main.bottom()))
+    }
+
+    // a finished push opens github's pull request page, or says why it didn't go
+    fn poll_push(&mut self, ctx: &egui::Context) {
+        let Some(ship) = &mut self.ship else {
+            return;
+        };
+        let Some(result) = ship.pushing.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        ship.pushing = None;
+        match result {
+            Ok(Some(url)) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+            Ok(None) => log::info!("pushed {}, whose remote isn't on github", ship.worktree),
+            Err(reason) => {
+                log::warn!("could not push {}: {reason}", ship.worktree);
+                ship.error = Some(reason);
+            }
+        }
     }
 }

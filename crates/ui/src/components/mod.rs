@@ -33,7 +33,7 @@ pub use command_palette::{
 pub use context_menu::{area_menu, copy_item, edit_menu};
 pub use context_ring::{ContextRing, tokens as short_tokens};
 pub use empty_state::EmptyState;
-pub use file_viewer::{FileView, FileViewAction, link_target, open_in_editor};
+pub use file_viewer::{FileView, FileViewAction, GitBar, link_target, open_in_editor};
 pub use group_header::{GroupHeader, GroupHeaderResponse};
 pub use icon::Icon;
 pub use icon_button::IconButton;

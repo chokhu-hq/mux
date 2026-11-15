@@ -776,6 +776,23 @@ fn git_branch(folder: &str) -> Option<String> {
     }
 }
 
+// where claude keeps its settings, skills and transcripts, which CLAUDE_CONFIG_DIR moves when it's set
+pub(crate) fn claude_dir() -> PathBuf {
+    env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| mux_core::home_dir().join(".claude"))
+}
+
+// where codex keeps its sessions, which CODEX_HOME moves when it's set
+pub(crate) fn codex_home() -> PathBuf {
+    env_dir("CODEX_HOME").unwrap_or_else(|| mux_core::home_dir().join(".codex"))
+}
+
+// a folder named by a variable, where an empty one counts as unset rather than the current folder
+pub(crate) fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

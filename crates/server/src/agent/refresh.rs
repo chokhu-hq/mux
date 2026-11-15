@@ -44,11 +44,7 @@ fn lock_paths(config: &Path) -> [PathBuf; 2] {
 
 // where claude keeps its sign-in, which can be moved with either of these
 fn config_dir() -> PathBuf {
-    let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
-    var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-        .or_else(|| var("CLAUDE_CONFIG_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| mux_core::home_dir().join(".claude"))
+    crate::env_dir("CLAUDE_SECURESTORAGE_CONFIG_DIR").unwrap_or_else(crate::claude_dir)
 }
 
 #[cfg(test)]

@@ -7,9 +7,7 @@ use serde_json::{Value, json};
 
 // claude's skills and custom commands live as markdown files, personal ones first and then the project's
 pub fn claude(project: &Path) -> Vec<Skill> {
-    let home = mux_core::home_dir();
-    let config =
-        std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
+    let config = crate::claude_dir();
     let mut skills = Vec::new();
     for (root, scope) in [(config, "Personal"), (project.join(".claude"), "Project")] {
         // a skill is a folder holding SKILL.md, sometimes a few folders down when it was synced from an account

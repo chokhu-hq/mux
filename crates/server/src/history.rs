@@ -114,10 +114,7 @@ struct Record {
 }
 
 fn roots() -> Vec<(Provider, PathBuf)> {
-    let home = mux_core::home_dir();
-    let codex = std::env::var_os("CODEX_HOME").map_or_else(|| home.join(".codex"), PathBuf::from);
-    let claude =
-        std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
+    let (codex, claude) = (crate::codex_home(), crate::claude_dir());
     vec![
         (Provider::Codex, codex.join("sessions")),
         (Provider::Codex, codex.join("archived_sessions")),

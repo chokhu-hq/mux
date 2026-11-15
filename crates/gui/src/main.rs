@@ -42,6 +42,7 @@ mod mcp;
 mod notify;
 mod picker;
 mod prefs;
+mod redact;
 mod renderer;
 mod sessions;
 mod settings;
@@ -410,8 +411,10 @@ impl App {
                 .clicked();
         if report && let Some(crash) = self.crash.take() {
             let agents = self.agents(ui.ctx());
-            ui.ctx().copy_text(logs::full_report(ui.ctx(), &agents));
-            mux_ui::chat::open_externally(&crash::issue_url(&crash));
+            let private = self.sessions.private();
+            ui.ctx()
+                .copy_text(logs::full_report(ui.ctx(), &agents, &private));
+            mux_ui::chat::open_externally(&crash::issue_url(&crash, &private));
         }
         if let Some(update) = &self.update {
             self.update_row(&mut ui_footer, update.clone());
@@ -669,6 +672,7 @@ impl App {
             themes: &mut self.themes,
             mcp: mcp.as_mut(),
             mcp_status: &mcp_status,
+            private: self.sessions.private(),
         }
         .show(ui);
         if mcp != self.sessions.mcp

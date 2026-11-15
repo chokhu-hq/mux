@@ -58,6 +58,8 @@ pub struct Page<'a> {
     // none until the server has sent its list
     pub mcp: Option<&'a mut Vec<mux_core::protocol::McpServer>>,
     pub mcp_status: &'a [(String, Provider, mux_core::protocol::McpState)],
+    // what's taken out of copied logs
+    pub private: crate::redact::Redactor,
 }
 
 impl Page<'_> {
@@ -134,7 +136,7 @@ impl Page<'_> {
                         crate::token_usage::show(ui, self.tokens.as_ref(), &self.models);
                         usage(ui, &self.usage);
                     }
-                    Tab::Logs => crate::logs::show(ui, &self.agents),
+                    Tab::Logs => crate::logs::show(ui, &self.agents, &self.private),
                     Tab::About => about(ui, self.prefs),
                 }
             });

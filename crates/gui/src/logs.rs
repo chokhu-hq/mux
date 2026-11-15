@@ -30,7 +30,11 @@ impl Entry {
 }
 
 // the settings tab that shows what the app and its server logged, ready to copy into a bug report
-pub fn show(ui: &mut egui::Ui, agents: &[(Provider, crate::AgentState)]) {
+pub fn show(
+    ui: &mut egui::Ui,
+    agents: &[(Provider, crate::AgentState)],
+    private: &crate::redact::Redactor,
+) {
     let p = theme::palette(ui);
     let entries = read(ui.ctx());
 
@@ -38,11 +42,11 @@ pub fn show(ui: &mut egui::Ui, agents: &[(Provider, crate::AgentState)]) {
         setting(
             ui,
             "Copy logs",
-            "For bug reports. It can include folder paths, so check it first",
+            "For bug reports. Your folders, name, emails and keys are taken out, but check it before sharing",
             |ui| {
                 let copy = mux_ui::Button::new("Copy").size(mux_ui::Size::Sm).show(ui);
                 if copy.clicked() {
-                    ui.ctx().copy_text(report(&entries, agents));
+                    ui.ctx().copy_text(private.apply(&report(&entries, agents)));
                     ui.data_mut(|d| d.insert_temp(copy.id.with("copied"), ui.input(|i| i.time)));
                 }
                 let copied = ui.data(|d| d.get_temp::<f64>(copy.id.with("copied")));
@@ -178,8 +182,12 @@ fn parse(source: &'static str, log: &str) -> Vec<Entry> {
 }
 
 // the copied report, for a crash report to hand over
-pub(crate) fn full_report(ctx: &egui::Context, agents: &[(Provider, crate::AgentState)]) -> String {
-    report(&read(ctx), agents)
+pub(crate) fn full_report(
+    ctx: &egui::Context,
+    agents: &[(Provider, crate::AgentState)],
+    private: &crate::redact::Redactor,
+) -> String {
+    private.apply(&report(&read(ctx), agents))
 }
 
 // what gets copied: enough about this machine to make sense of the log, then the log itself

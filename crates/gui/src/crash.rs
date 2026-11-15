@@ -41,10 +41,10 @@ pub(crate) fn take() -> Option<Crash> {
 }
 
 // a new github issue filled in with the build, the gpu and the panic, but not the log,
-// since the log can name private folders and the person should look it over before sharing it
-pub(crate) fn issue_url(crash: &Crash) -> String {
-    let message = crash
-        .panic
+// since the log can name more than redaction catches, and the person should look it over before sharing it
+pub(crate) fn issue_url(crash: &Crash, private: &crate::redact::Redactor) -> String {
+    let panic = private.apply(&crash.panic);
+    let message = panic
         .lines()
         .nth(1)
         .unwrap_or("panic")
@@ -54,8 +54,7 @@ pub(crate) fn issue_url(crash: &Crash) -> String {
         .collect::<String>();
     let title = format!("Crash: {message}");
     // frames without a name say nothing, and there are usually dozens of them
-    let mut panic: Vec<&str> = crash
-        .panic
+    let mut panic: Vec<&str> = panic
         .lines()
         .filter(|l| !l.trim_end().ends_with("<unknown>"))
         .collect();
@@ -75,7 +74,7 @@ fn body(crash: &Crash, panic: &str) -> String {
         "**What happened**\n\n<!-- What were you doing when Mux crashed? -->\n\n\
          **Build:** Mux {} ({}) on {} {}\n**GPU:** {gpu}\n\n\
          **Panic**\n\n```\n{panic}\n```\n\n\
-         <!-- The full log is on your clipboard. Check it for private folder names before pasting it here. -->\n",
+         <!-- The full log is on your clipboard. Folders, names, emails and keys were taken out, but check it before pasting it here. -->\n",
         mux_core::VERSION,
         crash.build,
         std::env::consts::OS,
@@ -115,7 +114,7 @@ mod tests {
 
     #[test]
     fn the_issue_names_the_panic_and_leaves_out_unnamed_frames() {
-        let url = issue_url(&crash(3));
+        let url = issue_url(&crash(3), &crate::redact::Redactor::here(&[], &[]));
         assert!(url.starts_with(
             "https://github.com/chokhu-hq/mux/issues/new?title=Crash%3A%20Failed%20to%20create"
         ));
@@ -126,7 +125,7 @@ mod tests {
 
     #[test]
     fn a_long_panic_is_cut_to_fit_a_link() {
-        let url = issue_url(&crash(2000));
+        let url = issue_url(&crash(2000), &crate::redact::Redactor::here(&[], &[]));
         assert!(url.len() <= MAX_URL);
         assert!(url.contains("frame_0"));
     }

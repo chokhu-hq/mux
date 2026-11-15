@@ -54,15 +54,8 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) -> bool {
             p.text_faint,
         );
         // the name and counts lead, and the folder fills what's left before the open icon
-        let file = std::path::Path::new(&diff.path);
-        let name = file
-            .file_name()
-            .map_or_else(|| diff.path.clone(), |n| n.to_string_lossy().into_owned());
+        let (name, folder) = mux_core::paths::name_and_folder(&diff.path);
         let name = mux_core::clip_lines(&name);
-        let folder = file
-            .parent()
-            .map(|d| mux_core::display_path(&d.to_string_lossy()))
-            .unwrap_or_default();
         let room = Rect::from_min_max(
             pos2(rect.left(), rect.top()),
             pos2(

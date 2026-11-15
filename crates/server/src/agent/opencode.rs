@@ -8,8 +8,7 @@ use mux_core::protocol::{
 use serde_json::{Value, json};
 
 use super::{
-    Agent, Call, file_name, media_type, old_new_hunk, running_command, settled, todo_steps,
-    trim_front,
+    Agent, Call, media_type, old_new_hunk, running_command, settled, todo_steps, trim_front,
 };
 
 // settings confirmed by opencode, so each prompt only sends what changed
@@ -469,7 +468,7 @@ fn prompt_blocks(text: &str, attachments: &[String]) -> Value {
     let mut blocks = Vec::new();
     for path in attachments {
         if !is_image(path) {
-            blocks.push(json!({ "type": "resource_link", "uri": format!("file://{path}"), "name": file_name(path) }));
+            blocks.push(json!({ "type": "resource_link", "uri": format!("file://{path}"), "name": mux_core::paths::file_name(path) }));
             continue;
         }
         match fs::read(path) {

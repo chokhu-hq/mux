@@ -759,10 +759,7 @@ impl Sessions {
         let Some(path) = pick_folder(None) else {
             return;
         };
-        let name = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+        let name = mux_core::paths::file_name(&path);
         self.outbox.push(ClientMsg::CreateGroup {
             name,
             path: Some(path),

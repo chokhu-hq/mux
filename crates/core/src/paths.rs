@@ -58,6 +58,22 @@ pub fn join(folder: &str, path: &str) -> String {
         .into_owned()
 }
 
+// the last part of a path, or the whole path when it has none
+pub fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+// a file's name and its folder written short, the way a header shows them
+pub fn name_and_folder(path: &str) -> (String, String) {
+    let folder = std::path::Path::new(path)
+        .parent()
+        .map(|d| crate::display_path(&d.to_string_lossy()))
+        .unwrap_or_default();
+    (file_name(path), folder)
+}
+
 // the folder a file is in, read the way the path is written
 pub fn parent(path: &str) -> String {
     if path.starts_with('/') {

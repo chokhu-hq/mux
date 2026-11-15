@@ -277,14 +277,7 @@ impl FileView {
         }
         let buttons_left = row.min_rect().left();
 
-        let file = Path::new(&self.path);
-        let name = file
-            .file_name()
-            .map_or_else(|| self.path.clone(), |n| n.to_string_lossy().into_owned());
-        let folder = file
-            .parent()
-            .map(|d| mux_core::display_path(&d.to_string_lossy()))
-            .unwrap_or_default();
+        let (name, folder) = mux_core::paths::name_and_folder(&self.path);
         let icon_center = pos2(rect.left() + icon::MD / 2.0, rect.center().y);
         ui.painter().text(
             icon_center,

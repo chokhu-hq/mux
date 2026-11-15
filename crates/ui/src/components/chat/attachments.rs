@@ -210,9 +210,7 @@ fn file(ui: &mut Ui, path: &str, height: f32) -> Response {
         font::icon(icon::LG),
         p.text_muted,
     );
-    let name = std::path::Path::new(path)
-        .file_name()
-        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+    let name = mux_core::paths::file_name(path);
     let left = icon_center.x + icon::LG / 2.0 + space::SM;
     let galley = crate::components::elided(
         ui,

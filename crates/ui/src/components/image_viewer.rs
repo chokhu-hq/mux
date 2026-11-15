@@ -292,9 +292,7 @@ fn clamp_pan(pan: Vec2, shown: Vec2, view: Vec2) -> Vec2 {
 
 fn title(ui: &mut Ui, screen: Rect, state: &mut State) {
     let path = &state.paths[state.index];
-    let name = std::path::Path::new(path)
-        .file_name()
-        .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+    let name = mux_core::paths::file_name(path);
     let y = screen.top() + BAR / 2.0;
     let mut left = screen.left() + space::LG;
     let painter = ui.painter();

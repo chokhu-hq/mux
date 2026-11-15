@@ -1238,12 +1238,6 @@ fn media_type(path: &str) -> &'static str {
     }
 }
 
-fn file_name(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
-}
-
 // what a claude session leaves in the environment of everything started from it, like a mux opened from a
 // claude code terminal, which would make each agent think it runs nested inside that session
 const PARENT_CLAUDE: [&str; 12] = [

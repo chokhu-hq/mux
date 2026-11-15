@@ -147,38 +147,35 @@ fn enabled(servers: &[McpServer]) -> impl Iterator<Item = &McpServer> {
 
 // claude's --mcp-config, or none when there's nothing to add
 pub fn claude(servers: &[McpServer]) -> Option<String> {
-    let map: Map<String, Value> = enabled(servers)
-        .map(|s| {
-            let config = match &s.transport {
-                McpTransport::Stdio { command, args, env } => {
-                    json!({ "command": command, "args": args, "env": pairs(env) })
-                }
-                McpTransport::Http { url, headers } => {
-                    json!({ "type": "http", "url": url, "headers": pairs(headers) })
-                }
-            };
-            (s.name.clone(), config)
-        })
-        .collect();
+    let map = by_name(
+        servers,
+        |url, headers| json!({ "type": "http", "url": url, "headers": headers }),
+    );
     (!map.is_empty()).then(|| json!({ "mcpServers": map }).to_string())
 }
 
 // codex's `mcp_servers` config table, passed when its thread opens
 pub fn codex(servers: &[McpServer]) -> Option<Value> {
-    let map: Map<String, Value> = enabled(servers)
+    let map = by_name(
+        servers,
+        |url, headers| json!({ "url": url, "http_headers": headers }),
+    );
+    (!map.is_empty()).then_some(Value::Object(map))
+}
+
+// the enabled servers keyed by name, where claude and codex agree on a command and differ only on http
+fn by_name(servers: &[McpServer], http: impl Fn(&str, Value) -> Value) -> Map<String, Value> {
+    enabled(servers)
         .map(|s| {
             let config = match &s.transport {
                 McpTransport::Stdio { command, args, env } => {
                     json!({ "command": command, "args": args, "env": pairs(env) })
                 }
-                McpTransport::Http { url, headers } => {
-                    json!({ "url": url, "http_headers": pairs(headers) })
-                }
+                McpTransport::Http { url, headers } => http(url, pairs(headers)),
             };
             (s.name.clone(), config)
         })
-        .collect();
-    (!map.is_empty()).then_some(Value::Object(map))
+        .collect()
 }
 
 // the acp session's `mcpServers` list, for opencode

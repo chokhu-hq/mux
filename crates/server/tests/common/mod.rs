@@ -264,6 +264,15 @@ impl Server {
         });
     }
 
+    // sends a message and waits for the turn it starts to finish with a new reply
+    pub fn reply(&mut self, id: u64, text: &str) {
+        let replies = self.assistant_text().len();
+        self.say(id, text);
+        self.wait("the reply", |s| {
+            !s.busy && s.assistant_text().len() > replies
+        });
+    }
+
     // takes in messages until `done` holds, keeping the agent's transcript up to date on the way
     pub fn wait(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + self.patience;

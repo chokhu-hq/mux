@@ -14,14 +14,6 @@ fn haiku() -> AgentSettings {
     }
 }
 
-fn reply(server: &mut Server, id: u64, text: &str) {
-    let replies = server.assistant_text().len();
-    server.say(id, text);
-    server.wait("the reply", |s| {
-        !s.busy && s.assistant_text().len() > replies
-    });
-}
-
 // what claude itself wrote down for the conversations in the test's project folder
 fn claude_transcripts(server: &Server) -> Vec<Vec<Value>> {
     let project = server.dir.join("project");
@@ -58,7 +50,7 @@ fn server_log(server: &Server) -> String {
 fn live_a_new_model_is_used_without_restarting_claude() {
     let mut server = Server::start_live();
     let id = server.claude_agent(haiku());
-    reply(&mut server, id, "Reply with only the word one.");
+    server.reply(id, "Reply with only the word one.");
     server.send(ClientMsg::AgentConfigure {
         id,
         settings: AgentSettings {
@@ -67,7 +59,7 @@ fn live_a_new_model_is_used_without_restarting_claude() {
             ..AgentSettings::default()
         },
     });
-    reply(&mut server, id, "Reply with only the word two.");
+    server.reply(id, "Reply with only the word two.");
     assert!(server.errors().is_empty(), "{:?}", server.errors());
     let log = server_log(&server);
     assert_eq!(log.matches("started Claude").count(), 1, "{log}");

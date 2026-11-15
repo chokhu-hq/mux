@@ -212,19 +212,11 @@ fn configure(server: &mut Server, id: u64, settings: AgentSettings) {
     });
 }
 
-fn reply(server: &mut Server, id: u64, text: &str) {
-    let replies = server.assistant_text().len();
-    server.say(id, text);
-    server.wait("the reply", |s| {
-        !s.busy && s.assistant_text().len() > replies
-    });
-}
-
 #[test]
 fn new_settings_reach_the_running_claude_without_a_relaunch() {
     let mut server = Server::start();
     let id = server.claude_agent(AgentSettings::default());
-    reply(&mut server, id, "first");
+    server.reply(id, "first");
     configure(
         &mut server,
         id,
@@ -235,7 +227,7 @@ fn new_settings_reach_the_running_claude_without_a_relaunch() {
             ..AgentSettings::default()
         },
     );
-    reply(&mut server, id, "second");
+    server.reply(id, "second");
     assert_eq!(server.claude_launches().len(), 1, "still the same process");
     let sent = server.claude_stdin();
     let subtypes: Vec<&str> = sent
@@ -285,7 +277,7 @@ fn a_stricter_access_level_starts_a_fresh_claude() {
         ..AgentSettings::default()
     };
     let id = server.claude_agent(auto);
-    reply(&mut server, id, "first");
+    server.reply(id, "first");
     configure(
         &mut server,
         id,
@@ -294,7 +286,7 @@ fn a_stricter_access_level_starts_a_fresh_claude() {
             ..AgentSettings::default()
         },
     );
-    reply(&mut server, id, "second");
+    server.reply(id, "second");
     let launches = server.claude_launches();
     assert_eq!(launches.len(), 2);
     let argv = launches[1]["argv"].to_string();
@@ -306,7 +298,7 @@ fn a_stricter_access_level_starts_a_fresh_claude() {
 fn a_setting_claude_refuses_is_applied_by_relaunching() {
     let mut server = Server::start_with(&[("FAKE_CLAUDE_FAIL", "set_model")]);
     let id = server.claude_agent(AgentSettings::default());
-    reply(&mut server, id, "first");
+    server.reply(id, "first");
     configure(
         &mut server,
         id,
@@ -315,8 +307,8 @@ fn a_setting_claude_refuses_is_applied_by_relaunching() {
             ..AgentSettings::default()
         },
     );
-    reply(&mut server, id, "second");
-    reply(&mut server, id, "third");
+    server.reply(id, "second");
+    server.reply(id, "third");
     let launches = server.claude_launches();
     assert_eq!(launches.len(), 2, "relaunched once it refused");
     assert!(launches[1]["argv"].to_string().contains("\"fake-2\""));
@@ -331,7 +323,7 @@ fn agents_forget_the_claude_session_mux_was_started_from() {
         ("CLAUDE_CODE_USE_BEDROCK", "1"),
     ]);
     let id = server.claude_agent(AgentSettings::default());
-    reply(&mut server, id, "hello");
+    server.reply(id, "hello");
     for launch in server.claude_log().iter().filter(|e| e["argv"].is_array()) {
         assert_eq!(
             launch["env"],
@@ -492,7 +484,7 @@ fn a_message_takes_over_from_waiting_for_a_limit() {
             )
         })
     });
-    reply(&mut server, id, "never mind");
+    server.reply(id, "never mind");
     // past when it would have carried on
     std::thread::sleep(std::time::Duration::from_secs(7));
     server.wait("anything late", |_| true);
@@ -512,7 +504,7 @@ fn a_conversation_claude_lost_carries_on_in_a_new_one() {
         access: mux_core::Access::Auto,
         ..AgentSettings::default()
     });
-    reply(&mut server, id, "first");
+    server.reply(id, "first");
     // a stricter level relaunches claude into the same conversation, which it no longer has
     configure(
         &mut server,
@@ -522,7 +514,7 @@ fn a_conversation_claude_lost_carries_on_in_a_new_one() {
             ..AgentSettings::default()
         },
     );
-    reply(&mut server, id, "second");
+    server.reply(id, "second");
     assert_eq!(server.errors().len(), 1, "{:?}", server.errors());
     assert!(server.errors()[0].contains("started a new one"));
     assert_eq!(
@@ -591,7 +583,7 @@ fn retries_show_while_they_happen_and_settle_once_claude_answers() {
 fn a_finished_turn_says_how_long_it_took() {
     let mut server = Server::start();
     let id = server.claude_agent(AgentSettings::default());
-    reply(&mut server, id, "scenario:tool");
+    server.reply(id, "scenario:tool");
     let took = server.items.iter().find_map(|i| match i {
         AgentItem::User { took, .. } => Some(*took),
         _ => None,

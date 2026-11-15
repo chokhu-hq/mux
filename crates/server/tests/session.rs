@@ -7,17 +7,17 @@ use std::time::{Duration, Instant};
 use mux_core::SessionKind;
 use mux_core::protocol::{self, AgentItem, ClientMsg, PROTOCOL, ServerMsg};
 
-#[test]
-fn shell_round_trip() {
-    let dir = std::env::temp_dir().join(format!("mux-it-{}", std::process::id()));
+// a server on its own socket in `dir`, with a client that has connected and said hello
+fn start(
+    dir: &std::path::Path,
+    read_timeout: Duration,
+) -> (std::thread::JoinHandle<std::io::Result<()>>, UnixStream) {
     let socket = dir.join("mux.sock");
-    let state = dir.join("state.json");
     let server = {
-        let (socket, state) = (socket.clone(), state.clone());
+        let (socket, state) = (socket.clone(), dir.join("state.json"));
         std::thread::spawn(move || mux_server::run_at(socket, state))
     };
-
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut stream = loop {
         match UnixStream::connect(&socket) {
             Ok(stream) => break stream,
@@ -25,13 +25,26 @@ fn shell_round_trip() {
             Err(err) => panic!("server never came up: {err}"),
         }
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let send = |stream: &mut UnixStream, msg| protocol::write(stream, &msg).unwrap();
-    let recv = |stream: &mut UnixStream| protocol::read::<ServerMsg>(stream).unwrap();
-
+    stream.set_read_timeout(Some(read_timeout)).unwrap();
     send(&mut stream, ClientMsg::Hello { protocol: PROTOCOL });
+    (server, stream)
+}
+
+fn send(stream: &mut UnixStream, msg: ClientMsg) {
+    protocol::write(stream, &msg).unwrap();
+}
+
+fn recv(stream: &mut UnixStream) -> ServerMsg {
+    protocol::read::<ServerMsg>(stream).unwrap()
+}
+
+#[test]
+fn shell_round_trip() {
+    let dir = std::env::temp_dir().join(format!("mux-it-{}", std::process::id()));
+    let socket = dir.join("mux.sock");
+    let state = dir.join("state.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (server, mut stream) = start(&dir, Duration::from_secs(5));
     assert!(matches!(
         recv(&mut stream),
         ServerMsg::Welcome { protocol: PROTOCOL }
@@ -91,26 +104,8 @@ fn shell_starts_in_group_folder() {
     let dir = std::env::temp_dir().join(format!("mux-it-folder-{}", std::process::id()));
     let project = dir.join("project-folder");
     std::fs::create_dir_all(&project).unwrap();
-    let socket = dir.join("mux.sock");
-    let server = {
-        let (socket, state) = (socket.clone(), dir.join("state.json"));
-        std::thread::spawn(move || mux_server::run_at(socket, state))
-    };
+    let (server, mut stream) = start(&dir, Duration::from_secs(5));
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut stream = loop {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => break stream,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Err(err) => panic!("server never came up: {err}"),
-        }
-    };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let send = |stream: &mut UnixStream, msg| protocol::write(stream, &msg).unwrap();
-    let recv = |stream: &mut UnixStream| protocol::read::<ServerMsg>(stream).unwrap();
-
-    send(&mut stream, ClientMsg::Hello { protocol: PROTOCOL });
     send(
         &mut stream,
         ClientMsg::CreateGroup {
@@ -163,26 +158,8 @@ fn shell_starts_in_group_folder() {
 #[test]
 fn agents_refuse_to_start_without_a_project_folder() {
     let dir = std::env::temp_dir().join(format!("mux-it-agent-{}", std::process::id()));
-    let socket = dir.join("mux.sock");
-    let server = {
-        let (socket, state) = (socket.clone(), dir.join("state.json"));
-        std::thread::spawn(move || mux_server::run_at(socket, state))
-    };
+    let (server, mut stream) = start(&dir, Duration::from_secs(5));
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut stream = loop {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => break stream,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Err(err) => panic!("server never came up: {err}"),
-        }
-    };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let send = |stream: &mut UnixStream, msg| protocol::write(stream, &msg).unwrap();
-    let recv = |stream: &mut UnixStream| protocol::read::<ServerMsg>(stream).unwrap();
-
-    send(&mut stream, ClientMsg::Hello { protocol: PROTOCOL });
     send(
         &mut stream,
         ClientMsg::CreateGroup {
@@ -257,26 +234,7 @@ fn opencode_live_turn() {
         r#"{"permission":{"bash":"ask","edit":"allow"}}"#,
     )
     .unwrap();
-    let socket = dir.join("mux.sock");
-    let _server = {
-        let (socket, state) = (socket.clone(), dir.join("state.json"));
-        std::thread::spawn(move || mux_server::run_at(socket, state))
-    };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut stream = loop {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => break stream,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Err(err) => panic!("server never came up: {err}"),
-        }
-    };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .unwrap();
-    let send = |stream: &mut UnixStream, msg| protocol::write(stream, &msg).unwrap();
-    let recv = |stream: &mut UnixStream| protocol::read::<ServerMsg>(stream).unwrap();
-
-    send(&mut stream, ClientMsg::Hello { protocol: PROTOCOL });
+    let (_server, mut stream) = start(&dir, Duration::from_secs(120));
     send(
         &mut stream,
         ClientMsg::CreateGroup {
@@ -470,26 +428,7 @@ fn claude_background_command_live() {
     let dir = std::env::temp_dir().join(format!("mux-it-bg-{}", std::process::id()));
     let project = dir.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let socket = dir.join("mux.sock");
-    let _server = {
-        let (socket, state) = (socket.clone(), dir.join("state.json"));
-        std::thread::spawn(move || mux_server::run_at(socket, state))
-    };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut stream = loop {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => break stream,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Err(err) => panic!("server never came up: {err}"),
-        }
-    };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .unwrap();
-    let send = |stream: &mut UnixStream, msg| protocol::write(stream, &msg).unwrap();
-    let recv = |stream: &mut UnixStream| protocol::read::<ServerMsg>(stream).unwrap();
-
-    send(&mut stream, ClientMsg::Hello { protocol: PROTOCOL });
+    let (_server, mut stream) = start(&dir, Duration::from_secs(120));
     send(
         &mut stream,
         ClientMsg::CreateGroup {

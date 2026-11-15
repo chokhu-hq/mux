@@ -67,3 +67,51 @@ pub(crate) fn renderer() -> eframe::egui_wgpu::WgpuConfiguration {
     }
     config
 }
+
+// logged once so a crash report shows which gpu and driver drew the window
+pub(crate) fn log_gpu(state: &eframe::egui_wgpu::RenderState) {
+    let info = state.adapter.get_info();
+    log::info!(
+        "drawing with {} ({:?}, {:?}), driver {} {}",
+        info.name,
+        info.device_type,
+        info.backend,
+        info.driver,
+        info.driver_info
+    );
+}
+
+// egui can't carry on once windows resets or removes the gpu, so a fresh window takes over from the server's state,
+// unless the last one also lost its gpu within a minute, which would only loop
+pub(crate) fn restart_when_gpu_lost(state: &eframe::egui_wgpu::RenderState) {
+    state.device.set_device_lost_callback(|reason, message| {
+        // destroyed is mux letting go of the gpu itself, not windows taking it away
+        if reason == eframe::wgpu::DeviceLostReason::Destroyed {
+            return;
+        }
+        log::error!("the gpu was lost ({reason:?}): {message}");
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(renderer_marker());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let last = std::env::var("MUX_GPU_LOST")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok());
+        if last.is_some_and(|last| now.saturating_sub(last) < 60) {
+            log::error!(
+                "the gpu was lost again within a minute, so mux is closing instead of reopening"
+            );
+            std::process::exit(1);
+        }
+        match std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .env("MUX_GPU_LOST", now.to_string())
+                .spawn()
+        }) {
+            Ok(_) => log::info!("reopening mux in a new window"),
+            Err(err) => log::error!("could not reopen mux: {err}"),
+        }
+        std::process::exit(0);
+    });
+}

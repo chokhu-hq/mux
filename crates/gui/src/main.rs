@@ -109,6 +109,10 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
             mux_ui::script::install(&cc.egui_ctx);
+            if let Some(state) = &cc.wgpu_render_state {
+                renderer::log_gpu(state);
+                renderer::restart_when_gpu_lost(state);
+            }
             Ok(Box::new(App::new(&cc.egui_ctx)))
         })
     };

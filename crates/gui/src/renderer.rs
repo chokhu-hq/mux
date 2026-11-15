@@ -71,6 +71,10 @@ pub(crate) fn renderer() -> eframe::egui_wgpu::WgpuConfiguration {
 // logged once so a crash report shows which gpu and driver drew the window
 pub(crate) fn log_gpu(state: &eframe::egui_wgpu::RenderState) {
     let info = state.adapter.get_info();
+    let _ = crate::crash::GPU.set(format!(
+        "{} ({:?}, {:?}), driver {} {}",
+        info.name, info.device_type, info.backend, info.driver, info.driver_info
+    ));
     log::info!(
         "drawing with {} ({:?}, {:?}), driver {} {}",
         info.name,

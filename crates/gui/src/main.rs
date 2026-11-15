@@ -31,6 +31,7 @@ mod backdrop;
 mod blur;
 mod chat;
 mod connection;
+mod crash;
 #[cfg(target_os = "linux")]
 mod drop;
 mod install;
@@ -66,6 +67,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     mux_core::logging::init("app.log");
+    crash::watch();
     // a build installed by the updater runs from here on, so what the last update left behind can go
     if update::is_release() {
         install::clean_up();
@@ -258,6 +260,8 @@ struct App {
     opened: (std::sync::mpsc::Sender<u64>, std::sync::mpsc::Receiver<u64>),
     // a newer release, once the check at launch finds one
     update: Option<update::Update>,
+    // what the last run panicked with, offered as a report until it's sent or mux restarts
+    crash: Option<crash::Crash>,
     // that update being downloaded and put in place
     installer: Option<install::Installer>,
     updates: std::sync::mpsc::Receiver<update::Update>,
@@ -322,6 +326,7 @@ impl App {
             review: false,
             opened: std::sync::mpsc::channel(),
             update: None,
+            crash: crash::take(),
             installer: None,
             updates: update::check(ctx),
             #[cfg(windows)]
@@ -399,6 +404,15 @@ impl App {
             .painter()
             .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
         ui_footer.add_space(space::SM + 1.0);
+        let report = self.crash.is_some()
+            && notice_row(&mut ui_footer, icons::WARNING_CIRCLE, "Mux crashed last time")
+                .tip("Click to report it on GitHub. The full log is copied so you can check it and paste it in.")
+                .clicked();
+        if report && let Some(crash) = self.crash.take() {
+            let agents = self.agents(ui.ctx());
+            ui.ctx().copy_text(logs::full_report(ui.ctx(), &agents));
+            mux_ui::chat::open_externally(&crash::issue_url(&crash));
+        }
         if let Some(update) = &self.update {
             self.update_row(&mut ui_footer, update.clone());
         }

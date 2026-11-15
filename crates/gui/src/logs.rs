@@ -177,6 +177,11 @@ fn parse(source: &'static str, log: &str) -> Vec<Entry> {
     entries
 }
 
+// the copied report, for a crash report to hand over
+pub(crate) fn full_report(ctx: &egui::Context, agents: &[(Provider, crate::AgentState)]) -> String {
+    report(&read(ctx), agents)
+}
+
 // what gets copied: enough about this machine to make sense of the log, then the log itself
 fn report(entries: &[Entry], agents: &[(Provider, crate::AgentState)]) -> String {
     let found = agents

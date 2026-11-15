@@ -35,7 +35,14 @@ pub async fn fetch(provider: Provider) -> io::Result<Catalog> {
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "took too long to list models"))?
 }
 
-async fn list() -> io::Result<Catalog> {
+// a short lived codex app-server: the requests go out after its handshake, and each reply goes to `answer` until
+// it has what it waited for. only replies count, so a request codex makes of mux is never taken for an answer
+pub(crate) async fn codex_rpc<T>(
+    requests: Vec<Value>,
+    experimental: bool,
+    exited: &str,
+    mut answer: impl FnMut(&Value) -> Option<io::Result<T>>,
+) -> io::Result<T> {
     let mut child = Command::from(mux_core::command("codex"))
         .arg("app-server")
         .stdin(Stdio::piped())
@@ -51,17 +58,17 @@ async fn list() -> io::Result<Catalog> {
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("no stdout"))?;
-
-    let init = json!({ "id": 0, "method": "initialize", "params": { "clientInfo": { "name": "mux", "version": mux_core::VERSION } } });
-    let list = json!({ "id": 1, "method": "model/list", "params": {} });
-    let limits = json!({ "id": 2, "method": "account/rateLimits/read", "params": {} });
-    for msg in [init, json!({ "method": "initialized" }), list, limits] {
+    let mut params = json!({ "clientInfo": { "name": "mux", "version": mux_core::VERSION } });
+    if experimental {
+        params["capabilities"] = json!({ "experimentalApi": true });
+    }
+    let init = json!({ "id": 0, "method": "initialize", "params": params });
+    for msg in [init, json!({ "method": "initialized" })]
+        .into_iter()
+        .chain(requests)
+    {
         stdin.write_all(format!("{msg}\n").as_bytes()).await?;
     }
-
-    let mut models: Option<Vec<ModelOption>> = None;
-    let mut usage: Option<Vec<UsageWindow>> = None;
-    let mut resets = None;
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines.next_line().await? {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -70,38 +77,56 @@ async fn list() -> io::Result<Catalog> {
         if msg.get("method").is_some() {
             continue;
         }
-        match msg["id"].as_u64() {
-            Some(1) => {
-                if let Some(error) = msg.get("error") {
-                    return Err(io::Error::other(
-                        error["message"]
-                            .as_str()
-                            .unwrap_or("model/list failed")
-                            .to_owned(),
-                    ));
-                }
-                let data = msg["result"]["data"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                models = Some(data.iter().filter_map(parse).collect());
-            }
-            // limits are a bonus, so a failure here just leaves them unknown
-            Some(2) => {
-                usage = Some(usage::codex(&msg["result"]["rateLimits"]));
-                resets = Some(parse_resets(&msg["result"]["rateLimitResetCredits"]));
-            }
-            _ => {}
+        if let Some(result) = answer(&msg) {
+            return result;
         }
-        if let (Some(models), Some(usage)) = (&models, &usage) {
-            return Ok(Catalog {
+    }
+    Err(io::Error::other(exited.to_owned()))
+}
+
+async fn list() -> io::Result<Catalog> {
+    let list = json!({ "id": 1, "method": "model/list", "params": {} });
+    let limits = json!({ "id": 2, "method": "account/rateLimits/read", "params": {} });
+    let mut models: Option<Vec<ModelOption>> = None;
+    let mut usage: Option<Vec<UsageWindow>> = None;
+    let mut resets = None;
+    codex_rpc(
+        vec![list, limits],
+        false,
+        "codex exited before listing models",
+        |msg| {
+            match msg["id"].as_u64() {
+                Some(1) => {
+                    if let Some(error) = msg.get("error") {
+                        return Some(Err(io::Error::other(
+                            error["message"]
+                                .as_str()
+                                .unwrap_or("model/list failed")
+                                .to_owned(),
+                        )));
+                    }
+                    let data = msg["result"]["data"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    models = Some(data.iter().filter_map(parse).collect());
+                }
+                // limits are a bonus, so a failure here just leaves them unknown
+                Some(2) => {
+                    usage = Some(usage::codex(&msg["result"]["rateLimits"]));
+                    resets = Some(parse_resets(&msg["result"]["rateLimitResetCredits"]));
+                }
+                _ => {}
+            }
+            let (models, usage) = (models.as_ref()?, usage.as_ref()?);
+            Some(Ok(Catalog {
                 models: models.clone(),
                 usage: Some(usage.clone()).filter(|u| !u.is_empty()),
                 resets: resets.clone(),
-            });
-        }
-    }
-    Err(io::Error::other("codex exited before listing models"))
+            }))
+        },
+    )
+    .await
 }
 
 // the resets codex says are still there to use, from its rate limit read
@@ -130,56 +155,35 @@ fn parse_resets(summary: &Value) -> Vec<LimitReset> {
 
 // spends one of the account's banked resets through a short lived app-server
 pub async fn use_codex_reset() -> ResetResult {
-    let attempt = async {
-        let mut child = Command::from(mux_core::command("codex"))
-            .arg("app-server")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("no stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("no stdout"))?;
-        // the key makes this one attempt, so a retry can never spend a second reset
-        let key = format!(
-            "mux-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        );
-        let init = json!({ "id": 0, "method": "initialize", "params": { "clientInfo": { "name": "mux", "version": mux_core::VERSION }, "capabilities": { "experimentalApi": true } } });
-        let consume = json!({ "id": 1, "method": "account/rateLimitResetCredit/consume", "params": { "idempotencyKey": key } });
-        for msg in [init, json!({ "method": "initialized" }), consume] {
-            stdin.write_all(format!("{msg}\n").as_bytes()).await?;
-        }
-        let mut lines = BufReader::new(stdout).lines();
-        while let Some(line) = lines.next_line().await? {
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if msg["id"].as_u64() != Some(1) || msg.get("method").is_some() {
-                continue;
+    // the key makes this one attempt, so a retry can never spend a second reset
+    let key = format!(
+        "mux-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let consume = json!({ "id": 1, "method": "account/rateLimitResetCredit/consume", "params": { "idempotencyKey": key } });
+    let attempt = codex_rpc(
+        vec![consume],
+        true,
+        "codex exited before answering",
+        |msg| {
+            if msg["id"].as_u64() != Some(1) {
+                return None;
             }
             if let Some(error) = msg.get("error") {
                 let message = error["message"].as_str().unwrap_or("codex refused");
-                return Ok(ResetResult::Failed(message.to_owned()));
+                return Some(Ok(ResetResult::Failed(message.to_owned())));
             }
-            return Ok(match msg["result"]["outcome"].as_str() {
+            Some(Ok(match msg["result"]["outcome"].as_str() {
                 Some("reset") | Some("alreadyRedeemed") => ResetResult::Reset,
                 Some("nothingToReset") => ResetResult::NothingToReset,
                 Some("noCredit") => ResetResult::NoneLeft,
                 other => ResetResult::Failed(format!("codex answered {other:?}")),
-            });
-        }
-        Err(io::Error::other("codex exited before answering"))
-    };
+            }))
+        },
+    );
     match tokio::time::timeout(Duration::from_secs(30), attempt).await {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => ResetResult::Failed(err.to_string()),

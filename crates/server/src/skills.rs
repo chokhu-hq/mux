@@ -1,12 +1,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use mux_core::protocol::Skill;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 
 // claude's skills and custom commands live as markdown files, personal ones first and then the project's
 pub fn claude(project: &Path) -> Vec<Skill> {
@@ -149,38 +146,13 @@ fn unquote(value: &str) -> String {
 
 // codex lists its skills for a folder through a short lived app-server
 pub async fn codex(project: &Path) -> io::Result<Vec<Skill>> {
-    let list = async {
-        let mut child = Command::from(mux_core::command("codex"))
-            .arg("app-server")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("no stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("no stdout"))?;
-        let init = json!({ "id": 0, "method": "initialize", "params": { "clientInfo": { "name": "mux", "version": mux_core::VERSION } } });
-        let list = json!({ "id": 1, "method": "skills/list", "params": { "cwds": [project] } });
-        for msg in [init, json!({ "method": "initialized" }), list] {
-            stdin.write_all(format!("{msg}\n").as_bytes()).await?;
-        }
-        let mut lines = BufReader::new(stdout).lines();
-        while let Some(line) = lines.next_line().await? {
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if msg["id"].as_u64() == Some(1) {
-                return Ok(parse_codex(&msg["result"]));
-            }
-        }
-        Err(io::Error::other("codex exited before listing skills"))
-    };
+    let list = json!({ "id": 1, "method": "skills/list", "params": { "cwds": [project] } });
+    let list = crate::models::codex_rpc(
+        vec![list],
+        false,
+        "codex exited before listing skills",
+        |msg| (msg["id"].as_u64() == Some(1)).then(|| Ok(parse_codex(&msg["result"]))),
+    );
     tokio::time::timeout(Duration::from_secs(20), list)
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "took too long to list skills"))?

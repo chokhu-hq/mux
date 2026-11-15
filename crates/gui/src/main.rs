@@ -1086,7 +1086,7 @@ fn installed_agents() -> [(Provider, AgentState); 3] {
     };
     #[cfg(windows)]
     if let Some(distro) = mux_core::paths::wsl() {
-        let found = wsl::installed(&distro, &Provider::ALL.map(cli));
+        let found = wsl::installed(&distro, &Provider::ALL.map(Provider::program));
         return Provider::ALL
             .map(|provider| (provider, state(found.contains(&provider.program()))));
     }

@@ -6,6 +6,7 @@ pub const ARROW_CLOCKWISE: char = '\u{e036}';
 pub const ARROW_SQUARE_OUT: char = '\u{e5de}';
 pub const ARROW_UP: char = '\u{e08e}';
 pub const ARROW_U_DOWN_LEFT: char = '\u{e07e}';
+pub const BRAIN: char = '\u{e74e}';
 pub const CALENDAR_BLANK: char = '\u{e10a}';
 pub const CARET_DOWN: char = '\u{e136}';
 pub const CARET_LEFT: char = '\u{e138}';
@@ -70,7 +71,7 @@ pub const WARNING_CIRCLE: char = '\u{e4e2}';
 pub const X: char = '\u{e4f6}';
 pub const X_CIRCLE: char = '\u{e4f8}';
 
-pub const ALL: [(&str, char); 69] = [
+pub const ALL: [(&str, char); 70] = [
     ("arrows-in-line-vertical", ARROWS_IN_LINE_VERTICAL),
     ("arrows-left-right", ARROWS_LEFT_RIGHT),
     ("arrow-clockwise", ARROW_CLOCKWISE),
@@ -78,6 +79,7 @@ pub const ALL: [(&str, char); 69] = [
     ("arrow-up", ARROW_UP),
     ("arrow-circle-up", ARROW_CIRCLE_UP),
     ("arrow-u-down-left", ARROW_U_DOWN_LEFT),
+    ("brain", BRAIN),
     ("calendar-blank", CALENDAR_BLANK),
     ("caret-down", CARET_DOWN),
     ("caret-left", CARET_LEFT),

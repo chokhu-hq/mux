@@ -345,19 +345,19 @@ pub fn thinking(ui: &mut Ui, turn: usize) {
     let time = ui.input(|i| i.time) as f32;
     let still = motion::reduced(ui.ctx());
 
-    for i in 0..3 {
-        // each dot brightens slightly after the one before it, so the light ripples across
-        let wave = if still {
-            1.0
-        } else {
-            0.5 + 0.5 * (time * 4.0 - i as f32 * 0.7).sin()
-        };
-        ui.painter().circle_filled(
-            pos2(rect.left() + 4.0 + i as f32 * 9.0, rect.center().y),
-            2.5,
-            p.text_muted.gamma_multiply(0.35 + 0.65 * wave),
-        );
-    }
+    // the brain breathes, so a long think still looks alive
+    let pulse = if still {
+        1.0
+    } else {
+        0.5 + 0.5 * (time * 3.0).sin()
+    };
+    glyph(
+        ui,
+        pos2(rect.left() + icon::MD / 2.0, rect.center().y),
+        icons::BRAIN,
+        icon::MD,
+        p.text_muted.gamma_multiply(0.45 + 0.55 * pulse),
+    );
 
     // the first turn always says thinking, later ones wander through the list
     let word = THINKING[(turn.saturating_sub(1) * 7) % THINKING.len()];
@@ -387,7 +387,10 @@ pub fn thinking(ui: &mut Ui, turn: usize) {
         );
     }
     let galley = ui.painter().layout_job(job);
-    let pos = pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0);
+    let pos = pos2(
+        rect.left() + icon::MD + space::SM,
+        rect.center().y - galley.size().y / 2.0,
+    );
     ui.painter().galley(pos, galley, p.text_faint);
 
     if !still {

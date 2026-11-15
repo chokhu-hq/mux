@@ -68,6 +68,41 @@ pub fn elided(
     ui.painter().layout_job(job)
 }
 
+// a frameless search box with a magnifier before it, filling `rect`. enter is left to the caller,
+// which usually picks a result with it
+pub fn search_field(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    text: &mut String,
+    hint: &str,
+) -> egui::Response {
+    use crate::theme::{font, icon, space};
+    let p = crate::theme::palette(ui);
+    ui.painter().text(
+        egui::pos2(rect.left() + icon::MD / 2.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        crate::icons::MAGNIFYING_GLASS,
+        font::icon(icon::MD),
+        p.text_faint,
+    );
+    let field = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + icon::MD + space::SM, rect.top()),
+        rect.max,
+    );
+    ui.put(
+        field,
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .hint_text(hint)
+            .font(font::regular(crate::theme::text::MD + 1.0))
+            .align(egui::Align2::LEFT_CENTER)
+            .margin(egui::Margin::ZERO)
+            .return_key(None),
+    )
+}
+
 // a name being renamed in place, in its own font and spot on a faint backing so it reads as editable
 pub(crate) fn rename_field(
     ui: &mut egui::Ui,

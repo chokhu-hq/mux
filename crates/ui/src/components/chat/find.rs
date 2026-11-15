@@ -1,12 +1,12 @@
 use egui::{
-    Align2, CornerRadius, Frame, Key, KeyboardShortcut, Margin, Modifiers, Rect, RichText, Stroke,
-    TextEdit, Ui, UiBuilder, pos2, vec2,
+    CornerRadius, Frame, Key, KeyboardShortcut, Margin, Modifiers, Rect, RichText, Stroke, Ui,
+    UiBuilder, pos2, vec2,
 };
 
 use super::ChatItem;
 use crate::components::{IconButton, TooltipExt};
 use crate::icons;
-use crate::theme::{self, font, icon, radius, space, text};
+use crate::theme::{self, font, radius, space, text};
 
 pub const SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const WIDTH: f32 = 340.0;
@@ -146,24 +146,16 @@ pub(super) fn bar(ui: &mut Ui, list: Rect, find: &mut Find, items: &[ChatItem]) 
                         .font(font::regular(text::SM + 1.0))
                         .color(p.text_faint),
                 );
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let (glyph, _) =
-                        ui.allocate_exact_size(vec2(icon::MD, icon::MD), egui::Sense::hover());
-                    ui.painter().text(
-                        glyph.center(),
-                        Align2::CENTER_CENTER,
-                        icons::MAGNIFYING_GLASS,
-                        font::icon(icon::MD),
-                        p.text_muted,
+                {
+                    let room = ui.available_rect_before_wrap();
+                    let id = ui.make_persistent_id("find-field");
+                    let edit = crate::components::search_field(
+                        ui,
+                        room,
+                        id,
+                        &mut find.query,
+                        "Find in chat",
                     );
-                    let edit = TextEdit::singleline(&mut find.query)
-                        .frame(egui::Frame::NONE)
-                        .hint_text("Find in chat")
-                        .font(font::regular(text::MD))
-                        .return_key(None)
-                        .desired_width(ui.available_width())
-                        .show(ui)
-                        .response;
                     if std::mem::take(&mut find.focus) {
                         edit.request_focus();
                     }
@@ -184,7 +176,7 @@ pub(super) fn bar(ui: &mut Ui, list: Rect, find: &mut Find, items: &[ChatItem]) 
                             find.step(1);
                         }
                     }
-                });
+                }
             });
         });
 }

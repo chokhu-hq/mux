@@ -204,33 +204,13 @@ fn panel(
         .data(|d| d.get_temp::<String>(search_id))
         .unwrap_or_default();
     let header = Rect::from_min_size(list.min, vec2(LIST, HEADER));
-    ui.painter().text(
-        pos2(
-            header.left() + space::MD + icon::MD / 2.0,
-            header.center().y,
-        ),
-        Align2::CENTER_CENTER,
-        icons::MAGNIFYING_GLASS,
-        font::icon(icon::MD),
-        p.text_faint,
-    );
-    let field_rect = Rect::from_min_max(
-        pos2(
-            header.left() + space::MD + icon::MD + space::SM,
-            header.top(),
-        ),
-        pos2(header.right() - space::MD, header.bottom()),
-    );
     let field_id = state_id.with("field");
-    let field = ui.put(
-        field_rect,
-        egui::TextEdit::singleline(&mut search)
-            .id(field_id)
-            .frame(egui::Frame::NONE)
-            .hint_text("Search models…")
-            .font(font::regular(text::MD + 1.0))
-            .align(egui::Align2::LEFT_CENTER)
-            .margin(egui::Margin::ZERO),
+    let field = mux_ui::search_field(
+        ui,
+        header.shrink2(vec2(space::MD, 0.0)),
+        field_id,
+        &mut search,
+        "Search models…",
     );
     if !ui.memory(|m| m.has_focus(field_id)) && !field.lost_focus() {
         field.request_focus();

@@ -1,6 +1,6 @@
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, Margin, Rect, Response, Sense, TextEdit, Ui, Vec2,
-    WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, CursorIcon, Rect, Response, Sense, Ui, Vec2, WidgetInfo, pos2,
+    vec2,
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 
@@ -164,24 +164,18 @@ impl<'a> SessionRow<'a> {
             );
 
             if let Some(draft) = self.rename.take() {
-                // the title's own font and place, on a faint backing so it reads as editable
                 let line = Rect::from_center_size(
                     pos2(inner.center().x, row(1.0)),
                     vec2(inner.width(), 20.0),
                 );
-                ui.painter().rect_filled(
-                    line.expand2(vec2(6.0, 2.0)),
-                    CornerRadius::same(radius::MD),
-                    theme::tint(p, theme::fill::SELECTED),
-                );
-                let edit = TextEdit::singleline(draft)
-                    .id(response.id.with("rename"))
-                    .frame(egui::Frame::NONE)
-                    .margin(Margin::ZERO)
-                    .font(font::medium(text::MD + 1.0))
-                    .text_color(p.text)
-                    .desired_width(line.width());
-                field = Some(ui.put(line, edit));
+                let id = response.id.with("rename");
+                field = Some(super::rename_field(
+                    ui,
+                    line,
+                    id,
+                    draft,
+                    font::medium(text::MD + 1.0),
+                ));
             } else {
                 let title = elided(
                     ui,

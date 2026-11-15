@@ -2,8 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use egui::epaint::TextShape;
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, Margin, Rect, Response, Sense, TextEdit, Ui, Vec2,
-    WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, CursorIcon, Rect, Response, Sense, Ui, Vec2, WidgetInfo, pos2,
 };
 
 use super::hover_t;
@@ -117,7 +116,6 @@ impl<'a> GroupHeader<'a> {
             );
             let name_x = folder_x + icon::LG / 2.0 + space::SM;
             if let Some(draft) = self.rename.take() {
-                // the name's own font and place, on a faint backing so it reads as editable
                 let line = Rect::from_min_max(
                     pos2(name_x, rect.center().y - 10.0),
                     pos2(
@@ -125,19 +123,14 @@ impl<'a> GroupHeader<'a> {
                         rect.center().y + 10.0,
                     ),
                 );
-                ui.painter().rect_filled(
-                    line.expand2(vec2(6.0, 2.0)),
-                    CornerRadius::same(radius::MD),
-                    theme::tint(p, theme::fill::SELECTED),
-                );
-                let edit = TextEdit::singleline(draft)
-                    .id(response.id.with("rename"))
-                    .frame(egui::Frame::NONE)
-                    .margin(Margin::ZERO)
-                    .font(font::semibold(text::MD + 1.0))
-                    .text_color(p.text)
-                    .desired_width(line.width());
-                field = Some(ui.put(line, edit));
+                let id = response.id.with("rename");
+                field = Some(super::rename_field(
+                    ui,
+                    line,
+                    id,
+                    draft,
+                    font::semibold(text::MD + 1.0),
+                ));
             }
             let name = if field.is_some() {
                 Rect::NOTHING

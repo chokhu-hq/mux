@@ -68,6 +68,30 @@ pub fn elided(
     ui.painter().layout_job(job)
 }
 
+// a name being renamed in place, in its own font and spot on a faint backing so it reads as editable
+pub(crate) fn rename_field(
+    ui: &mut egui::Ui,
+    line: egui::Rect,
+    id: egui::Id,
+    draft: &mut String,
+    font: egui::FontId,
+) -> egui::Response {
+    let p = crate::theme::palette(ui);
+    ui.painter().rect_filled(
+        line.expand2(egui::vec2(6.0, 2.0)),
+        egui::CornerRadius::same(crate::theme::radius::MD),
+        crate::theme::tint(p, crate::theme::fill::SELECTED),
+    );
+    let edit = egui::TextEdit::singleline(draft)
+        .id(id)
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::ZERO)
+        .font(font)
+        .text_color(p.text)
+        .desired_width(line.width());
+    ui.put(line, edit)
+}
+
 pub fn hover_t(ui: &egui::Ui, response: &egui::Response) -> f32 {
     spring_bool(
         ui.ctx(),

@@ -971,34 +971,30 @@ fn changed_files(chat: &[ChatItem], folder: Option<&str>) -> Vec<(String, String
 // git runs where the server does, so it reads the same repository the agent changed
 fn file_diff(path: &str, fallback: &str) -> String {
     let dir = mux_core::paths::parent(path);
-    let git = |args: &[&str]| {
-        mux_core::paths::command("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(args)
-            .output()
-            .ok()
-    };
-    let text = |out: std::process::Output| String::from_utf8_lossy(&out.stdout).into_owned();
-    let inside = git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|o| o.status.success());
-    if !inside {
+    let git = |args: &[&str]| mux_core::git(mux_core::paths::command("git"), &dir, args);
+    let text = |out: Vec<u8>| String::from_utf8_lossy(&out).into_owned();
+    if git(&["rev-parse", "--is-inside-work-tree"]).is_err() {
         return fallback.to_owned();
     }
-    if let Some(out) = git(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path])
-        && out.status.success()
-        && !out.stdout.is_empty()
+    if let Ok(out) = git(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path])
+        && !out.is_empty()
     {
         return text(out);
     }
-    // a file git doesn't track yet is all new, and comparing it with nothing shows that
-    let tracked =
-        git(&["ls-files", "--error-unmatch", "--", path]).is_some_and(|o| o.status.success());
+    // a file git doesn't track yet is all new, and comparing it with nothing shows that.
+    // that comparison exits 1 whenever there's a difference, so its output is read whatever the status
+    let tracked = git(&["ls-files", "--error-unmatch", "--", path]).is_ok();
     if !tracked
         && std::path::Path::new(&mux_core::paths::local(path)).is_file()
-        && let Some(out) = git(&["diff", "--no-color", "--no-index", "--", "/dev/null", path])
+        && let Ok(out) = mux_core::paths::command("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["diff", "--no-color", "--no-index", "--", "/dev/null", path])
+            .stdin(std::process::Stdio::null())
+            .output()
         && !out.stdout.is_empty()
     {
-        return text(out);
+        return text(out.stdout);
     }
     // committed since, so what the agent showed is the best account of the change
     fallback.to_owned()

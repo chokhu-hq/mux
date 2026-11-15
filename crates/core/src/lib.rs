@@ -178,6 +178,37 @@ pub fn login_shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_owned())
 }
 
+// runs git in a folder with nothing to read from, answering what it printed or the stderr line that says what went
+// wrong, which is its fatal or error line when there is one since progress lines can come first
+pub fn git(
+    mut command: std::process::Command,
+    dir: impl AsRef<std::ffi::OsStr>,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Result<Vec<u8>, String> {
+    let output = command
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("couldn't run git: {err}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let reason = lines
+        .iter()
+        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+        .or(lines.last())
+        .map_or("git failed without saying why", |l| l);
+    Err(reason.to_owned())
+}
+
 // a program to run, found the way a shell would and kept from opening a console window on windows
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[cfg(windows)]

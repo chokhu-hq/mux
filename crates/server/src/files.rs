@@ -5,24 +5,19 @@ const LIMIT: usize = 20_000;
 
 // the project's files for `@` mentions, relative and with forward slashes, honouring .gitignore where there is one
 pub fn list(dir: &Path) -> Vec<String> {
-    let output = mux_core::command("git")
-        .arg("-C")
-        .arg(dir)
-        .args([
+    let output = mux_core::git(
+        mux_core::command("git"),
+        dir,
+        [
             "ls-files",
             "--cached",
             "--others",
             "--exclude-standard",
             "-z",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    if let Ok(output) = output
-        && output.status.success()
-    {
-        let mut files: Vec<String> = output
-            .stdout
+        ],
+    );
+    if let Ok(stdout) = output {
+        let mut files: Vec<String> = stdout
             .split(|b| *b == 0)
             .filter(|f| !f.is_empty())
             .map(|f| String::from_utf8_lossy(f).into_owned())

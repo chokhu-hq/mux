@@ -49,23 +49,9 @@ fn push_now(worktree: &str) -> Result<Option<String>, String> {
 
 // git runs where the server does, so it reads the same checkout the agent changed
 fn git(dir: &str, args: &[&str]) -> Result<String, String> {
-    let out = mux_core::paths::command("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| format!("Couldn't run git: {err}"))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let reason = stderr
-        .lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty())
-        .unwrap_or("git failed without saying why");
-    Err(format!("git {}: {reason}", args[0]))
+    mux_core::git(mux_core::paths::command("git"), dir, args)
+        .map(|out| String::from_utf8_lossy(&out).into_owned())
+        .map_err(|reason| format!("git {}: {reason}", args[0]))
 }
 
 // github's compare page for a branch, from any of the ways an origin on github is written

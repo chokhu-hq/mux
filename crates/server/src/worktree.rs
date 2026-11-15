@@ -15,24 +15,21 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
     );
     let dir = root.join(name).join(format!("{slug}-{id}"));
     let branch = format!("mux/{slug}-{id}");
-    let output = mux_core::command("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "add", "-b", &branch])
-        .arg(&dir)
-        .arg("HEAD")
-        .output()
-        .map_err(|err| format!("Couldn't run git to make a worktree: {err}"))?;
-    if !output.status.success() {
-        let reason = String::from_utf8_lossy(&output.stderr);
-        let reason = reason
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or_default();
+    let args: [&std::ffi::OsStr; 6] = [
+        "worktree".as_ref(),
+        "add".as_ref(),
+        "-b".as_ref(),
+        branch.as_ref(),
+        dir.as_os_str(),
+        "HEAD".as_ref(),
+    ];
+    if let Err(reason) = mux_core::git(mux_core::command("git"), repo, args) {
         return Err(if reason.contains("not a git repository") {
             "This project isn't a git repository, so the agent can't get its own worktree. Switch it to Local to work in the folder itself.".to_owned()
         } else if reason.contains("invalid reference: HEAD") {
             "This project has no initial commit, so the agent can't get its own worktree. Make a commit first or switch it to Local.".to_owned()
+        } else if reason.starts_with("couldn't run git") {
+            format!("Couldn't run git to make a worktree: {reason}")
         } else {
             format!(
                 "Couldn't make a worktree: {}",
@@ -46,12 +43,11 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
 // git refuses to remove a checkout with uncommitted work, which is the point, and the branch always stays
 pub fn remove(path: String) {
     std::thread::spawn(move || {
-        let _ = mux_core::command("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["worktree", "remove"])
-            .arg(&path)
-            .output();
+        let _ = mux_core::git(
+            mux_core::command("git"),
+            &path,
+            ["worktree", "remove", &path],
+        );
     });
 }
 

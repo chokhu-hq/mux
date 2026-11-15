@@ -3,12 +3,14 @@ use std::fs;
 use base64::Engine;
 use mux_core::Access;
 use mux_core::protocol::{
-    AgentItem, ContextUsage, Decision, FileChange, ItemStatus, Skill, TodoStatus, TodoStep,
-    is_image,
+    AgentItem, ContextUsage, Decision, FileChange, ItemStatus, Skill, is_image,
 };
 use serde_json::{Value, json};
 
-use super::{Agent, Call, Pending, file_name, media_type, trim_front};
+use super::{
+    Agent, Call, file_name, media_type, old_new_hunk, running_command, settled, todo_steps,
+    trim_front,
+};
 
 // settings confirmed by opencode, so each prompt only sends what changed
 #[derive(Clone, Default, PartialEq)]
@@ -252,20 +254,7 @@ impl Agent {
             Some("tool_call") => self.opencode_tool(update),
             Some("tool_call_update") => self.opencode_tool_update(update),
             Some("plan") => {
-                let steps = update["entries"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|e| TodoStep {
-                        text: e["content"].as_str().unwrap_or_default().to_owned(),
-                        status: match e["status"].as_str() {
-                            Some("completed") => TodoStatus::Done,
-                            Some("in_progress") => TodoStatus::Active,
-                            _ => TodoStatus::Pending,
-                        },
-                    })
-                    .collect();
-                self.set_todos(steps);
+                self.set_todos(todo_steps(&update["entries"], "content", "in_progress"))
             }
             Some("usage_update") => {
                 if let (Some(used), Some(window)) =
@@ -306,13 +295,7 @@ impl Agent {
         // text after a tool call is a new reply, not more of the one before it
         self.live_text = None;
         let entry = match update["kind"].as_str() {
-            Some("execute") => AgentItem::Command {
-                command: command_of(update),
-                output: String::new(),
-                exit_code: None,
-                status: ItemStatus::Running,
-                background: false,
-            },
+            Some("execute") => running_command(command_of(update), false),
             Some("edit" | "delete" | "move") => AgentItem::FileChange {
                 changes: Vec::new(),
                 status: ItemStatus::Running,
@@ -370,10 +353,7 @@ impl Agent {
                     *exit_code = exit;
                 }
                 if let Some(status) = status {
-                    *s = match (status, *exit_code) {
-                        (ItemStatus::Done, Some(code)) if code != 0 => ItemStatus::Failed,
-                        (status, _) => status,
-                    };
+                    *s = settled(status, *exit_code);
                 }
             }
             Some(AgentItem::FileChange { changes, status: s }) => {
@@ -443,23 +423,7 @@ impl Agent {
                 (format!("Allow {name}?"), detail_of(call))
             }
         };
-        self.next_approval += 1;
-        let approval = self.next_approval;
-        let index = self.push(AgentItem::Approval {
-            id: approval,
-            title,
-            detail,
-            decision: None,
-        });
-        self.approvals.insert(
-            approval,
-            Pending {
-                request: id,
-                index,
-                input: params["options"].clone(),
-                suggestions: Value::Null,
-            },
-        );
+        self.approve(id, title, detail, params["options"].clone(), Value::Null);
     }
 
     pub(super) fn opencode_choose(&self, id: &Value, options: &Value, decision: Decision) {
@@ -594,16 +558,9 @@ fn file_diffs(update: &Value) -> Vec<FileChange> {
         .filter_map(|c| {
             let old = c["oldText"].as_str().unwrap_or_default();
             let new = c["newText"].as_str().unwrap_or_default();
-            let mut diff = String::from("@@\n");
-            for line in old.lines() {
-                diff.push_str(&format!("-{line}\n"));
-            }
-            for line in new.lines() {
-                diff.push_str(&format!("+{line}\n"));
-            }
             Some(FileChange {
                 path: c["path"].as_str()?.to_owned(),
-                diff,
+                diff: old_new_hunk(old, new),
             })
         })
         .collect()

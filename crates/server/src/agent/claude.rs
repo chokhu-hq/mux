@@ -366,13 +366,7 @@ impl Agent {
             return;
         }
         let entry = match name {
-            "Bash" => AgentItem::Command {
-                command: field("command"),
-                output: String::new(),
-                exit_code: None,
-                status: ItemStatus::Running,
-                background: input["run_in_background"] == true,
-            },
+            "Bash" => running_command(field("command"), input["run_in_background"] == true),
             "Edit" | "MultiEdit" | "Write" => AgentItem::FileChange {
                 changes: vec![FileChange {
                     path: field("file_path"),
@@ -380,13 +374,7 @@ impl Agent {
                 }],
                 status: ItemStatus::Running,
             },
-            _ => AgentItem::Tool {
-                name: name.to_owned(),
-                detail: tool_detail(input),
-                output: String::new(),
-                status: ItemStatus::Running,
-                images: Vec::new(),
-            },
+            _ => running_tool(name.to_owned(), tool_detail(input)),
         };
         let index = self.push(entry);
         self.by_codex_id.insert(id, index);
@@ -504,23 +492,8 @@ impl Agent {
             }
             other => (format!("Allow {other}?"), tool_detail(&input)),
         };
-        self.next_approval += 1;
-        let approval = self.next_approval;
-        let index = self.push(AgentItem::Approval {
-            id: approval,
-            title,
-            detail,
-            decision: None,
-        });
-        self.approvals.insert(
-            approval,
-            Pending {
-                request: id,
-                index,
-                input,
-                suggestions: request["permission_suggestions"].clone(),
-            },
-        );
+        let suggestions = request["permission_suggestions"].clone();
+        self.approve(id, title, detail, input, suggestions);
     }
 }
 
@@ -717,16 +690,7 @@ pub(super) fn claude_answer(decision: Decision, input: Value, suggestions: &Valu
 // shows claude's edits the way codex reports them, as a patch the diff card can read
 pub(super) fn edit_diff(tool: &str, input: &Value) -> String {
     let text = |v: &Value| v.as_str().unwrap_or_default().to_owned();
-    let hunk = |old: &str, new: &str| {
-        let mut out = String::from("@@\n");
-        for line in old.lines() {
-            out.push_str(&format!("-{line}\n"));
-        }
-        for line in new.lines() {
-            out.push_str(&format!("+{line}\n"));
-        }
-        out
-    };
+    let hunk = old_new_hunk;
     match tool {
         "Write" => text(&input["content"]),
         "MultiEdit" => input["edits"]

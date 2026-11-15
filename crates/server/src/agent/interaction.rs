@@ -1,7 +1,9 @@
-use mux_core::protocol::{AgentItem, Form, Question, QuestionOption, TodoStatus, TodoStep};
+use mux_core::protocol::{
+    AgentItem, Form, ItemStatus, Question, QuestionOption, TodoStatus, TodoStep,
+};
 use serde_json::{Value, json};
 
-use super::Agent;
+use super::{Agent, Pending};
 
 // a question the agent is waiting on, with what's needed to send the answer back
 pub(super) struct Asked {
@@ -229,38 +231,96 @@ impl Agent {
     }
 
     pub(super) fn claude_todos(&mut self, input: &Value) {
-        let steps = input["todos"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|t| TodoStep {
-                text: t["content"].as_str().unwrap_or_default().to_owned(),
-                status: match t["status"].as_str() {
-                    Some("completed") => TodoStatus::Done,
-                    Some("in_progress") => TodoStatus::Active,
-                    _ => TodoStatus::Pending,
-                },
-            })
-            .collect();
-        self.set_todos(steps);
+        self.set_todos(todo_steps(&input["todos"], "content", "in_progress"));
     }
 
     pub(super) fn codex_todos(&mut self, params: &Value) {
-        let steps = params["plan"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|t| TodoStep {
-                text: t["step"].as_str().unwrap_or_default().to_owned(),
-                status: match t["status"].as_str() {
-                    Some("completed") => TodoStatus::Done,
-                    Some("inProgress") => TodoStatus::Active,
-                    _ => TodoStatus::Pending,
-                },
-            })
-            .collect();
-        self.set_todos(steps);
+        self.set_todos(todo_steps(&params["plan"], "step", "inProgress"));
     }
+
+    // an approval card the agent waits on, with what's needed to send the decision back
+    pub(super) fn approve(
+        &mut self,
+        request: Value,
+        title: String,
+        detail: String,
+        input: Value,
+        suggestions: Value,
+    ) {
+        self.next_approval += 1;
+        let approval = self.next_approval;
+        let index = self.push(AgentItem::Approval {
+            id: approval,
+            title,
+            detail,
+            decision: None,
+        });
+        self.approvals.insert(
+            approval,
+            Pending {
+                request,
+                index,
+                input,
+                suggestions,
+            },
+        );
+    }
+}
+
+// a task list from any agent, which differ only in what they call a step's text and the step being worked on
+pub(super) fn todo_steps(list: &Value, text: &str, active: &str) -> Vec<TodoStep> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| TodoStep {
+            text: t[text].as_str().unwrap_or_default().to_owned(),
+            status: match t["status"].as_str() {
+                Some("completed") => TodoStatus::Done,
+                Some(s) if s == active => TodoStatus::Active,
+                _ => TodoStatus::Pending,
+            },
+        })
+        .collect()
+}
+
+pub(super) fn running_command(command: String, background: bool) -> AgentItem {
+    AgentItem::Command {
+        command,
+        output: String::new(),
+        exit_code: None,
+        status: ItemStatus::Running,
+        background,
+    }
+}
+
+pub(super) fn running_tool(name: String, detail: String) -> AgentItem {
+    AgentItem::Tool {
+        name,
+        detail,
+        output: String::new(),
+        status: ItemStatus::Running,
+        images: Vec::new(),
+    }
+}
+
+// a command that finished with a failing exit code failed, whatever the agent called it
+pub(super) fn settled(status: ItemStatus, exit_code: Option<i32>) -> ItemStatus {
+    match (status, exit_code) {
+        (ItemStatus::Done, Some(code)) if code != 0 => ItemStatus::Failed,
+        (status, _) => status,
+    }
+}
+
+// a replacement of old text with new as a patch the diff card can read
+pub(super) fn old_new_hunk(old: &str, new: &str) -> String {
+    let mut out = String::from("@@\n");
+    for line in old.lines() {
+        out.push_str(&format!("-{line}\n"));
+    }
+    for line in new.lines() {
+        out.push_str(&format!("+{line}\n"));
+    }
+    out
 }
 
 fn options(value: &Value) -> Vec<QuestionOption> {

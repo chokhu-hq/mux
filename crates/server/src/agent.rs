@@ -33,6 +33,7 @@ mod switch;
 pub(crate) use claude::forget_parent_claude;
 use claude::{claude_answer, claude_args, claude_content};
 use codex::{add_skills, turn_params};
+use interaction::{old_new_hunk, running_command, running_tool, settled, todo_steps};
 pub(crate) use refresh::stop_claude;
 
 // long command output is cut down to its tail, which is the part people read

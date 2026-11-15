@@ -128,7 +128,13 @@ impl Agent {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let title = format!("Allow {server} to use {tool}?");
-                self.approve(id, title, shown, json!({ "mcp": meta["persist"] }));
+                self.approve(
+                    id,
+                    title,
+                    shown,
+                    json!({ "mcp": meta["persist"] }),
+                    Value::Null,
+                );
                 return;
             }
             _ => {
@@ -141,27 +147,7 @@ impl Agent {
                 return;
             }
         };
-        self.approve(id, title.to_owned(), detail, Value::Null);
-    }
-
-    pub(super) fn approve(&mut self, request: Value, title: String, detail: String, input: Value) {
-        self.next_approval += 1;
-        let approval = self.next_approval;
-        let index = self.push(AgentItem::Approval {
-            id: approval,
-            title,
-            detail,
-            decision: None,
-        });
-        self.approvals.insert(
-            approval,
-            Pending {
-                request,
-                index,
-                input,
-                suggestions: Value::Null,
-            },
-        );
+        self.approve(id, title.to_owned(), detail, Value::Null, Value::Null);
     }
 
     pub(super) fn notification(&mut self, method: &str, params: &Value) {
@@ -290,13 +276,10 @@ impl Agent {
             Some("agentMessage") => AgentItem::Assistant {
                 text: item["text"].as_str().unwrap_or_default().to_owned(),
             },
-            Some("commandExecution") => AgentItem::Command {
-                command: item["command"].as_str().unwrap_or_default().to_owned(),
-                output: String::new(),
-                exit_code: None,
-                status: ItemStatus::Running,
-                background: false,
-            },
+            Some("commandExecution") => running_command(
+                item["command"].as_str().unwrap_or_default().to_owned(),
+                false,
+            ),
             Some("fileChange") => AgentItem::FileChange {
                 changes: file_changes(item),
                 status: ItemStatus::Running,
@@ -306,17 +289,14 @@ impl Agent {
                 return;
             }
             // named the way claude names them, so both show the same
-            Some("mcpToolCall") => AgentItem::Tool {
-                name: format!(
+            Some("mcpToolCall") => running_tool(
+                format!(
                     "mcp__{}__{}",
                     item["server"].as_str().unwrap_or_default(),
                     item["tool"].as_str().unwrap_or_default()
                 ),
-                detail: tool_detail(&item["arguments"]),
-                output: String::new(),
-                status: ItemStatus::Running,
-                images: Vec::new(),
-            },
+                tool_detail(&item["arguments"]),
+            ),
             Some("plan") => AgentItem::Plan {
                 text: item["text"].as_str().unwrap_or_default().to_owned(),
             },
@@ -375,10 +355,7 @@ impl Agent {
                     trim_front(output);
                 }
                 *exit_code = item["exitCode"].as_i64().map(|c| c as i32);
-                *s = match (status, *exit_code) {
-                    (ItemStatus::Done, Some(code)) if code != 0 => ItemStatus::Failed,
-                    (status, _) => status,
-                };
+                *s = settled(status, *exit_code);
             }
             Some(AgentItem::FileChange { changes, status: s }) => {
                 *changes = file_changes(item);

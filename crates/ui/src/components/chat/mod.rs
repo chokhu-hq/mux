@@ -3,6 +3,7 @@ mod attachments;
 mod background;
 mod cards;
 mod composer;
+mod find;
 mod markdown;
 mod queue;
 mod slash;
@@ -15,6 +16,7 @@ use mux_core::protocol::ContextUsage;
 pub use attachments::open_externally;
 pub use cards::thinking;
 pub use composer::{Composer, ComposerAction, Controls};
+pub use find::{Find, SHORTCUT as FIND_SHORTCUT};
 pub use markdown::markdown;
 pub use slash::SlashCommand;
 
@@ -220,6 +222,7 @@ pub struct ChatView<'a> {
     queue: &'a [mux_core::protocol::Queued],
     held: bool,
     background: &'a [mux_core::protocol::Background],
+    find: Option<&'a mut Find>,
 }
 
 impl<'a> ChatView<'a> {
@@ -240,7 +243,14 @@ impl<'a> ChatView<'a> {
             queue: &[],
             held: false,
             background: &[],
+            find: None,
         }
+    }
+
+    // a find bar over the chat, opened with the find shortcut
+    pub fn find(mut self, find: &'a mut Find) -> Self {
+        self.find = Some(find);
+        self
     }
 
     // keeps each session's scroll position, open steps and measured heights its own
@@ -392,6 +402,7 @@ impl<'a> ChatView<'a> {
         );
         list_ui.set_clip_rect(list.intersect(ui.clip_rect()));
         drop_overlay(ui, rect, self.dropping);
+        let target = self.find.as_ref().and_then(|f| f.target());
         if self.items.is_empty() {
             empty(&mut list_ui);
             ui.allocate_rect(rect, Sense::hover());
@@ -418,7 +429,10 @@ impl<'a> ChatView<'a> {
                         let running = self.running;
                         let reset = self.reset.as_ref();
                         let show_items = |ui: &mut Ui, indices: &[usize]| {
-                            show_items(ui, items, indices, running, turns, reset)
+                            show_items(ui, items, indices, running, turns, reset, target)
+                        };
+                        let holds = |from: usize, to: usize| {
+                            target.is_some_and(|(t, scroll)| scroll && (from..to).contains(&t))
                         };
                         // anything before the first message, then the turns, which are skipped whole
                         // and in runs while off screen so a long chat costs little per frame. the last
@@ -433,25 +447,29 @@ impl<'a> ChatView<'a> {
                         }
                         let last = starts.last().copied();
                         for run in starts.chunks(TURNS_PER_RUN) {
+                            let run_end = run
+                                .last()
+                                .map_or(items.len(), |&l| next_message(items, l + 1));
                             let mut draw_run = |ui: &mut Ui| {
                                 for &i in run {
                                     let mut draw = |ui: &mut Ui| {
                                         take(
                                             &mut action,
-                                            show_turn(ui, items, i, running, &show_items),
+                                            show_turn(ui, items, i, running, target, &show_items),
                                         );
                                     };
                                     if Some(i) == last {
                                         draw(ui);
                                     } else {
-                                        lazy(ui, ("whole-turn", i), draw);
+                                        let keep = holds(i, next_message(items, i + 1));
+                                        lazy(ui, ("whole-turn", i), keep, draw);
                                     }
                                 }
                             };
                             if last.is_some_and(|l| run.contains(&l)) {
                                 draw_run(ui);
                             } else {
-                                lazy(ui, ("turns", run[0]), draw_run);
+                                lazy(ui, ("turns", run[0]), holds(run[0], run_end), draw_run);
                             }
                         }
                         ui.add_space(space::SM);
@@ -459,6 +477,9 @@ impl<'a> ChatView<'a> {
                 });
             });
 
+        if let Some(find) = self.find {
+            find::bar(ui, list, find, self.items);
+        }
         ui.allocate_rect(rect, Sense::hover());
         action
     }
@@ -470,6 +491,7 @@ fn show_turn(
     items: &[ChatItem],
     i: usize,
     running: bool,
+    target: Option<(usize, bool)>,
     show_items: &dyn Fn(&mut Ui, &[usize]) -> Option<ChatAction>,
 ) -> Option<ChatAction> {
     let mut action = None;
@@ -478,10 +500,15 @@ fn show_turn(
         return show_items(ui, &(i..turn.end).collect::<Vec<_>>());
     }
     take(&mut action, show_items(ui, &[i]));
+    // a match being found among the folded steps opens them
+    let found = target.filter(|(t, scroll)| *scroll && turn.work.contains(t));
     // a turn's steps fold behind one line once it's done, open while it runs
-    lazy(ui, ("turn", i), |ui| {
+    lazy(ui, ("turn", i), found.is_some(), |ui| {
         ui.push_id(("turn", i), |ui| {
             let id = ui.make_persistent_id("fold");
+            if found.is_some() {
+                ui.data_mut(|d| d.insert_temp(id, true));
+            }
             let work: Vec<&ChatItem> = turn.work.iter().map(|&w| &items[w]).collect();
             let took = match &items[i] {
                 ChatItem::User { took, .. } => *took,
@@ -582,7 +609,12 @@ struct Measured {
 
 // draws a part of the chat only when it's near the screen and otherwise just keeps its room,
 // because a long chat would spend every frame on what nobody can see
-fn lazy(ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut Ui)) {
+fn lazy(
+    ui: &mut Ui,
+    key: impl std::hash::Hash + std::fmt::Debug,
+    keep: bool,
+    add: impl FnOnce(&mut Ui),
+) {
     let id = ui.scope_id().with(("lazy", key));
     let width = ui.available_width();
     let top = ui.cursor().top();
@@ -592,7 +624,9 @@ fn lazy(ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug, add: impl FnOn
         .data(|d| d.get_temp::<Measured>(id))
         .filter(|m| m.width == width);
     // the room kept is the block alone, with the usual gap after it either way, so blocks can nest
-    if let Some(known) = known.filter(|m| top + m.height < near.top() || top > near.bottom()) {
+    if let Some(known) =
+        known.filter(|m| !keep && (top + m.height < near.top() || top > near.bottom()))
+    {
         ui.allocate_exact_size(egui::vec2(0.0, known.height), Sense::hover());
         return;
     }
@@ -613,6 +647,7 @@ fn show_items(
     running: bool,
     turns: usize,
     reset: Option<&ResetOffer>,
+    target: Option<(usize, bool)>,
 ) -> Option<ChatAction> {
     let picked: Vec<&ChatItem> = indices.iter().map(|&i| &items[i]).collect();
     let mut action = None;
@@ -626,17 +661,31 @@ fn show_items(
             .count();
         let index = indices[k];
         if tools > 1 {
-            lazy(ui, index, |ui| {
+            lazy(ui, index, false, |ui| {
                 ui.push_id(index, |ui| cards::activity(ui, &steps));
             });
             k += steps.len();
             continue;
         }
-        lazy(ui, index, |ui| {
+        let found = target.filter(|(t, _)| *t == index);
+        lazy(ui, index, found.is_some_and(|(_, scroll)| scroll), |ui| {
             let shown = ui.push_id(index, |ui| {
                 show_item(ui, picked[k], index, running, turns, reset)
             });
             take(&mut action, shown.inner);
+            if let Some((_, scroll)) = found {
+                let rect = shown.response.rect;
+                let accent = theme::palette(ui).accent;
+                ui.painter().rect_stroke(
+                    rect.expand(space::XS),
+                    egui::CornerRadius::same(theme::radius::LG),
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
+                if scroll {
+                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                }
+            }
         });
         k += 1;
     }

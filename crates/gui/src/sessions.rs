@@ -58,6 +58,8 @@ pub struct Local {
     pub approvals: Vec<Option<u64>>,
     // files changed and lines added and removed across the chat, for the title bar
     pub changes: (usize, usize, usize),
+    // words being looked for in the chat
+    pub find: mux_ui::chat::Find,
 }
 
 impl Local {

@@ -227,6 +227,7 @@ pub(crate) fn agent_chat(
         .running(local.busy)
         .reset(reset)
         .context(local.context)
+        .find(&mut local.find)
         .controls(|ui| {
             if let Some(changed) = agent_controls(ui, &settings, started) {
                 configure.set(Some(changed));

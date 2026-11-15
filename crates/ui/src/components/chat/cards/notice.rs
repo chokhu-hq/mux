@@ -34,9 +34,7 @@ pub fn usage_limit(
                     .selectable(true),
             );
             if let Some(at) = retry_at {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
+                let now = mux_core::now_secs();
                 let left = at.saturating_sub(now);
                 let when = match left {
                     0..=90 => "shortly after the limit resets".to_owned(),

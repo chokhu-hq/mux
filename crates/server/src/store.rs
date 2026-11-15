@@ -274,10 +274,7 @@ impl Store {
 }
 
 pub fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    mux_core::now_secs()
 }
 
 #[cfg(test)]

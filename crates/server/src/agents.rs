@@ -9,9 +9,7 @@ impl Server {
 
     // the moment a limit resets is when it's lifted, so the agent waits a little longer to be sure
     pub(super) fn wake_at(&self, id: u64, reset: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = mux_core::now_secs();
         let wait = std::time::Duration::from_secs(reset.saturating_sub(now) + WAKE_SLACK);
         let events = self.events.clone();
         tokio::spawn(async move {

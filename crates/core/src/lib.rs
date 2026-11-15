@@ -178,6 +178,20 @@ pub fn login_shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_owned())
 }
 
+// seconds since 1970, or zero on a clock set before it
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+// milliseconds since 1970, or zero on a clock set before it
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 // runs git in a folder with nothing to read from, answering what it printed or the stderr line that says what went
 // wrong, which is its fatal or error line when there is one since progress lines can come first
 pub fn git(

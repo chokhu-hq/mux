@@ -500,10 +500,7 @@ pub(super) fn ago(updated: u64) -> String {
     if updated == 0 {
         return String::new();
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(updated);
+    let now = mux_core::now_secs();
     match now.saturating_sub(updated) {
         s if s < 60 => "now".to_owned(),
         s if s < 3600 => format!("{}m", s / 60),

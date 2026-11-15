@@ -293,10 +293,7 @@ pub(super) fn level_color(p: &Palette, used: f32) -> Color32 {
 }
 
 fn resets_in(at: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = mux_core::now_secs();
     let Some(left) = at.checked_sub(now).filter(|_| at > 0) else {
         return String::new();
     };

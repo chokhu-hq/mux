@@ -220,9 +220,7 @@ impl Fake {
             }
         }
         if text.contains("scenario:limit") {
-            let resets = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs())
+            let resets = mux_core::now_secs()
                 + std::env::var("FAKE_CODEX_LIMIT_SECS")
                     .ok()
                     .and_then(|s| s.parse::<u64>().ok())

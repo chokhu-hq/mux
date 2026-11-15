@@ -35,9 +35,7 @@ pub fn reasoning(ui: &mut Ui, text: &str, started: u64, ended: Option<u64>) {
         caret(ui, pos2(x + 6.0, y), turn, p.text_faint);
     }
     x += 12.0 + space::SM;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
+    let now = mux_core::now_ms();
     let label = match ended {
         Some(ended) => format!("Thought for {}", duration(ended.saturating_sub(started))),
         None => {

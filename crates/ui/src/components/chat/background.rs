@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use egui::{
     Align2, CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
 };
@@ -19,9 +17,7 @@ pub fn strip(ui: &mut Ui, tasks: &[Background], max_height: f32) -> Option<Strin
         return None;
     }
     let p = theme::palette(ui);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let now = mux_core::now_secs();
     let mut stop = None;
     Frame::new()
         .fill(p.elevated)

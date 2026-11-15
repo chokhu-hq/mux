@@ -297,10 +297,7 @@ pub fn take_pasted(ui: &mut Ui) -> Vec<String> {
 fn save_pasted(image: &egui::ColorImage) -> Option<String> {
     let dir = mux_core::protocol::data_dir().join("pastes");
     std::fs::create_dir_all(&dir).ok()?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis();
+    let stamp = mux_core::now_ms();
     let path = dir.join(format!("paste-{stamp}.png"));
     crate::capture::save(&path, image).ok()?;
     Some(path.to_string_lossy().into_owned())

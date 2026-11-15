@@ -240,9 +240,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    mux_core::now_secs() as i64
 }
 
 // the local calendar day a moment falls on, using the offset in force at that moment so summer time is right

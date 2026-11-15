@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use mux_core::protocol::{AgentItem, Background, BackgroundState, ItemStatus};
 use serde_json::{Value, json};
@@ -43,7 +43,7 @@ impl Agent {
         self.background.push(Tracked {
             id: id.to_owned(),
             label: String::new(),
-            started: now(),
+            started: mux_core::now_secs(),
             state: BackgroundState::Running,
             index: None,
             file: None,
@@ -353,12 +353,6 @@ impl Agent {
     pub fn take_background(&mut self) -> Option<Vec<Background>> {
         std::mem::take(&mut self.background_changed).then(|| self.background())
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 // "Command running in background with ID: b8knmzt35. Output is being written to: /tmp/…/b8knmzt35.output. …"

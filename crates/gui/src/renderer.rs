@@ -96,9 +96,7 @@ pub(crate) fn restart_when_gpu_lost(state: &eframe::egui_wgpu::RenderState) {
         log::error!("the gpu was lost ({reason:?}): {message}");
         #[cfg(windows)]
         let _ = std::fs::remove_file(renderer_marker());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = mux_core::now_secs();
         let last = std::env::var("MUX_GPU_LOST")
             .ok()
             .and_then(|v| v.parse::<u64>().ok());

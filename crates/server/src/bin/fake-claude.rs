@@ -202,7 +202,7 @@ impl Fake {
         }
         if text.contains("scenario:limit") {
             let weekly = text.contains("scenario:limit-week");
-            let resets = now() + if weekly { 122_820 } else { 1 };
+            let resets = mux_core::now_secs() + if weekly { 122_820 } else { 1 };
             let message = if weekly {
                 "You've hit your weekly limit · resets Nov 3, 2am (Asia/Dhaka)"
             } else {
@@ -364,12 +364,6 @@ impl Fake {
             "result": null, "terminal_reason": reason, "session_id": self.session }),
         );
     }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 fn text_of(message: &Value) -> String {

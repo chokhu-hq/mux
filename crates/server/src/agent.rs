@@ -657,7 +657,7 @@ impl Agent {
             took: None,
         });
         if starts {
-            self.turn_started = Some((index, now_ms()));
+            self.turn_started = Some((index, mux_core::now_ms()));
         }
         self.set_busy(true);
     }
@@ -1165,7 +1165,7 @@ impl Agent {
         }
         let index = self.push(AgentItem::Reasoning {
             text: chunk.to_owned(),
-            started: now_ms(),
+            started: mux_core::now_ms(),
             ended: None,
         });
         self.live_reasoning = Some(index);
@@ -1176,7 +1176,7 @@ impl Agent {
         if let Some(index) = self.live_reasoning.take()
             && let Some(AgentItem::Reasoning { ended, .. }) = self.items.get_mut(index)
         {
-            *ended = Some(now_ms());
+            *ended = Some(mux_core::now_ms());
             self.changed.insert(index);
         }
     }
@@ -1191,7 +1191,7 @@ impl Agent {
             && let Some((index, at)) = self.turn_started.take()
             && let Some(AgentItem::User { took, .. }) = self.items.get_mut(index)
         {
-            *took = Some(now_ms().saturating_sub(at));
+            *took = Some(mux_core::now_ms().saturating_sub(at));
             self.changed.insert(index);
         }
         if self.busy != busy {
@@ -1205,12 +1205,6 @@ impl Agent {
         self.changed.insert(index);
         self.items.get_mut(index)
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
 }
 
 // attached files and folders as paths in the message, which an agent can read or list itself

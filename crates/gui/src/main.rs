@@ -1304,12 +1304,7 @@ fn notice_row(ui: &mut egui::Ui, glyph: char, label: &str) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_ROW), egui::Sense::click());
-    let hover = motion::spring_bool(
-        ui.ctx(),
-        response.id.with("hover"),
-        response.hovered(),
-        Spring::QUICK,
-    );
+    let hover = mux_ui::hover_t(ui, &response);
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same(theme::radius::LG),
@@ -1347,12 +1342,7 @@ fn settings_row(
         ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_ROW), egui::Sense::click());
     // named for screen readers and test scripts, since the row is painted by hand
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Settings"));
-    let hover = motion::spring_bool(
-        ui.ctx(),
-        response.id.with("hover"),
-        response.hovered(),
-        Spring::QUICK,
-    );
+    let hover = mux_ui::hover_t(ui, &response);
     let shown = if open { 1.0 } else { 0.0 };
     let fill = egui::Color32::TRANSPARENT
         .lerp_to_gamma(theme::tint(p, theme::fill::HOVER), hover)
@@ -1415,12 +1405,7 @@ fn changes_button(ui: &mut egui::Ui, added: usize, removed: usize) -> egui::Resp
         space::SM + icon::SM + space::XS + plus.size().x + space::XS + minus.size().x + space::SM;
     let (rect, response) =
         ui.allocate_exact_size(vec2(width, theme::control::SM), egui::Sense::click());
-    let hover = motion::spring_bool(
-        ui.ctx(),
-        response.id.with("hover"),
-        response.hovered(),
-        Spring::QUICK,
-    );
+    let hover = mux_ui::hover_t(ui, &response);
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same(theme::radius::MD),

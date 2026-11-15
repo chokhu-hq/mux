@@ -150,12 +150,7 @@ fn nav_item(ui: &mut egui::Ui, tab: Tab, selected: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(NAV, 32.0), Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, tab.label()));
-    let t = mux_ui::motion::spring_bool(
-        ui.ctx(),
-        response.id.with("hover"),
-        response.hovered(),
-        mux_ui::motion::Spring::QUICK,
-    );
+    let t = mux_ui::hover_t(ui, &response);
     let fill = if selected {
         p.active
     } else {

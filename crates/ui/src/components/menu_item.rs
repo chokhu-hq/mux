@@ -167,15 +167,7 @@ impl<'a> MenuItem<'a> {
                 );
             }
             let line = |text: &str, font: egui::FontId, color: egui::Color32| {
-                let mut job =
-                    egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-                job.wrap = egui::text::TextWrapping {
-                    max_width: room.max(0.0),
-                    max_rows: 1,
-                    break_anywhere: true,
-                    overflow_character: Some('…'),
-                };
-                ui.painter().layout_job(job)
+                super::elided(ui, text, font, color, room)
             };
             let label = line(self.label, font::regular(text::MD), fg);
             if self.detail.is_empty() {

@@ -184,18 +184,13 @@ pub fn menu(
                                 );
                                 let room = rect.right() - space::SM - name.right() - space::MD;
                                 if room > 40.0 {
-                                    let mut job = egui::text::LayoutJob::simple_singleline(
+                                    let galley = crate::components::elided(
+                                        ui,
                                         row_data.detail.to_owned(),
                                         font::regular(text::SM + 1.0),
                                         p.text_faint,
+                                        room,
                                     );
-                                    job.wrap = egui::text::TextWrapping {
-                                        max_width: room,
-                                        max_rows: 1,
-                                        break_anywhere: true,
-                                        overflow_character: Some('…'),
-                                    };
-                                    let galley = ui.painter().layout_job(job);
                                     ui.painter().galley(
                                         egui::pos2(
                                             rect.right() - space::SM - galley.size().x,

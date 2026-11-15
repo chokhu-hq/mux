@@ -321,18 +321,13 @@ impl FileView {
         }
         let room = buttons_left - space::SM - name_right - space::SM;
         if room > 24.0 {
-            let mut job = egui::text::LayoutJob::simple_singleline(
+            let galley = crate::components::elided(
+                ui,
                 folder,
                 font::regular(text::SM + 1.0),
                 p.text_faint,
+                room,
             );
-            job.wrap = egui::text::TextWrapping {
-                max_width: room,
-                max_rows: 1,
-                break_anywhere: true,
-                overflow_character: Some('…'),
-            };
-            let galley = ui.painter().layout_job(job);
             ui.painter().galley(
                 pos2(
                     name_right + space::SM,

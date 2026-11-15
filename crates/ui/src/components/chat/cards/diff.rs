@@ -94,15 +94,13 @@ pub fn diff(ui: &mut Ui, diff: &FileDiff) -> bool {
         );
         let left = minus.right() + space::SM;
         if room.right() - left > 24.0 {
-            let mut job =
-                LayoutJob::simple_singleline(folder, font::regular(text::SM + 1.0), p.text_faint);
-            job.wrap = egui::text::TextWrapping {
-                max_width: room.right() - left,
-                max_rows: 1,
-                break_anywhere: true,
-                overflow_character: Some('…'),
-            };
-            let galley = ui.painter().layout_job(job);
+            let galley = crate::components::elided(
+                ui,
+                folder,
+                font::regular(text::SM + 1.0),
+                p.text_faint,
+                room.right() - left,
+            );
             ui.painter()
                 .galley(pos2(left, y - galley.size().y / 2.0), galley, p.text_faint);
         }

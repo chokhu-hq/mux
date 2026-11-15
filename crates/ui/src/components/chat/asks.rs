@@ -110,18 +110,13 @@ pub fn question(
         if !said.is_empty() {
             // a typed answer can run over several lines, which the row puts together
             let line = said.split_whitespace().collect::<Vec<_>>().join(" ");
-            let mut job = egui::text::LayoutJob::simple_singleline(
+            let galley = crate::components::elided(
+                ui,
                 line,
                 font::regular(text::MD),
                 p.text_faint,
+                rect.right() - verb.right() - space::SM * 2.0,
             );
-            job.wrap = egui::text::TextWrapping {
-                max_width: rect.right() - verb.right() - space::SM * 2.0,
-                max_rows: 1,
-                break_anywhere: true,
-                overflow_character: Some('…'),
-            };
-            let galley = ui.painter().layout_job(job);
             let cut = galley.elided;
             ui.painter().galley(
                 pos2(verb.right() + space::SM, y - galley.size().y / 2.0),
@@ -314,18 +309,13 @@ fn choice(ui: &mut Ui, index: usize, label: &str, detail: &str, on: bool, multip
         p.text,
     );
     if !detail.is_empty() {
-        let mut job = egui::text::LayoutJob::simple_singleline(
+        let galley = crate::components::elided(
+            ui,
             detail.to_owned(),
             font::regular(text::SM + 1.0),
             p.text_faint,
+            rect.right() - space::SM - x,
         );
-        job.wrap = egui::text::TextWrapping {
-            max_width: rect.right() - space::SM - x,
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
-        let galley = ui.painter().layout_job(job);
         ui.painter()
             .galley(pos2(x, rect.top() + 28.0), galley, p.text_faint);
     }
@@ -456,12 +446,9 @@ pub fn todos(ui: &mut Ui, steps: &[TodoStep]) {
                     font::regular(text::MD),
                     color,
                 );
-                job.wrap = egui::text::TextWrapping {
-                    max_width: rect.right() - rect.left() - icon::MD - space::SM,
-                    max_rows: 1,
-                    break_anywhere: true,
-                    overflow_character: Some('…'),
-                };
+                job.wrap = egui::text::TextWrapping::truncate_at_width(
+                    rect.right() - rect.left() - icon::MD - space::SM,
+                );
                 if step.status == TodoStatus::Done
                     && let Some(section) = job.sections.first_mut()
                 {

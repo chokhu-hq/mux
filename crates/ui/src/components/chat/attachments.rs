@@ -214,15 +214,13 @@ fn file(ui: &mut Ui, path: &str, height: f32) -> Response {
         .file_name()
         .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
     let left = icon_center.x + icon::LG / 2.0 + space::SM;
-    let mut job =
-        egui::text::LayoutJob::simple_singleline(name, font::medium(text::SM + 1.0), p.text);
-    job.wrap = egui::text::TextWrapping {
-        max_width: rect.right() - space::MD - left,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    let galley = ui.painter().layout_job(job);
+    let galley = crate::components::elided(
+        ui,
+        name,
+        font::medium(text::SM + 1.0),
+        p.text,
+        rect.right() - space::MD - left,
+    );
     ui.painter().galley(
         pos2(left, rect.center().y - galley.size().y / 2.0),
         galley,

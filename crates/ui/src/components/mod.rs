@@ -55,6 +55,19 @@ pub use usage_ring::{UsageRing, usage_rows};
 
 use crate::motion::{Spring, spring_bool};
 
+// one line that ends in an ellipsis instead of being cut through a letter
+pub fn elided(
+    ui: &egui::Ui,
+    text: impl Into<String>,
+    font: egui::FontId,
+    color: egui::Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.into(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
+    ui.painter().layout_job(job)
+}
+
 pub fn hover_t(ui: &egui::Ui, response: &egui::Response) -> f32 {
     spring_bool(
         ui.ctx(),

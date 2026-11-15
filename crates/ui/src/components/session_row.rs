@@ -1,13 +1,10 @@
-use std::sync::Arc;
-
-use egui::text::{LayoutJob, TextWrapping};
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Margin, Rect, Response, Sense,
-    TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, CursorIcon, Margin, Rect, Response, Sense, TextEdit, Ui, Vec2,
+    WidgetInfo, pos2, vec2,
 };
 use mux_core::{Provider, SessionKind, SessionStatus};
 
-use super::{TooltipExt, hover_t, provider_color, provider_mark};
+use super::{TooltipExt, elided, hover_t, provider_color, provider_mark};
 use crate::icons;
 use crate::motion::{Spring, spring_bool};
 use crate::theme::{self, Palette, font, icon, radius, space, text};
@@ -299,16 +296,4 @@ fn context_color(p: &Palette, status: SessionStatus, selected: bool) -> Color32 
         _ if selected => p.text_muted,
         _ => p.text_faint,
     }
-}
-
-// one line that ends in an ellipsis instead of being cut through a letter
-fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
-    let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping {
-        max_width: width.max(0.0),
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    ui.painter().layout_job(job)
 }

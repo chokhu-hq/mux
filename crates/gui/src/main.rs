@@ -908,6 +908,20 @@ fn agent_status(ui: &mut egui::Ui, provider: Provider, state: AgentState) {
     });
 }
 
+// work that would hold up a frame, run on its own thread with the window woken to pick up the answer
+pub(crate) fn in_background<T: Send + 'static>(
+    ctx: &egui::Context,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::sync::mpsc::Receiver<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+        ctx.request_repaint();
+    });
+    rx
+}
+
 // a terminal asked for a new text size, which every terminal then shares and keeps
 fn zoom_terminal(prefs: &mut Prefs, size: f32) {
     let default = (size - theme::text::MONO).abs() < 0.01;

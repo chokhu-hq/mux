@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use eframe::egui;
@@ -37,12 +37,8 @@ pub enum Link {
 impl Link {
     // connecting can mean starting a server and waiting on it, so it stays off the ui thread
     pub fn start(ctx: &egui::Context) -> Self {
-        let (tx, result) = mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Connection::open(&ctx));
-            ctx.request_repaint();
-        });
+        let opener = ctx.clone();
+        let result = crate::in_background(ctx, move || Connection::open(&opener));
         Link::Connecting { result, since: 0.0 }
     }
 

@@ -21,13 +21,7 @@ pub struct Distros {
 impl Distros {
     pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Option<Vec<String>> {
         if self.pending.is_none() && self.ready.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.pending = Some(rx);
-            let ctx = ctx.clone();
-            thread::spawn(move || {
-                let _ = tx.send(distros());
-                ctx.request_repaint();
-            });
+            self.pending = Some(crate::in_background(ctx, distros));
         }
         if let Some(rx) = &self.pending {
             match rx.try_recv() {

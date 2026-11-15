@@ -27,13 +27,7 @@ pub(crate) fn push(
     worktree: String,
     ctx: eframe::egui::Context,
 ) -> mpsc::Receiver<Result<Option<String>, String>> {
-    let (send, receive) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = push_now(&worktree);
-        let _ = send.send(result);
-        ctx.request_repaint();
-    });
-    receive
+    crate::in_background(&ctx, move || push_now(&worktree))
 }
 
 fn push_now(worktree: &str) -> Result<Option<String>, String> {

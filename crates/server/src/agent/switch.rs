@@ -296,10 +296,7 @@ fn entry(item: &AgentItem) -> Option<(bool, String)> {
 
 // the end of a long output, where results and errors usually are
 fn tail(output: &str) -> String {
-    let start = output.len().saturating_sub(OUTPUT);
-    let start = (start..=output.len())
-        .find(|i| output.is_char_boundary(*i))
-        .unwrap_or(output.len());
+    let start = output.ceil_char_boundary(output.len().saturating_sub(OUTPUT));
     let cut = if start > 0 { "…" } else { "" };
     format!("{cut}{}", &output[start..])
 }

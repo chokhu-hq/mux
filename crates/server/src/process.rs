@@ -62,7 +62,7 @@ impl Process {
                 ));
             }
             Some(folder) => Some(PathBuf::from(folder)),
-            None => home_dir(),
+            None => Some(mux_core::home_dir()).filter(|home| !home.as_os_str().is_empty()),
         };
         let (cols, rows) = (80, 24);
         let pair = native_pty_system()
@@ -253,8 +253,4 @@ fn shell_command(command: &str) -> CommandBuilder {
 // the agent cli to launch, overridable until there is a settings screen
 fn agent_command() -> String {
     std::env::var("MUX_AGENT").unwrap_or_else(|_| "claude".to_owned())
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }

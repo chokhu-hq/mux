@@ -1298,10 +1298,7 @@ fn item_status(item: &Value) -> ItemStatus {
 
 fn trim_front(output: &mut String) {
     if output.len() > OUTPUT_LIMIT {
-        let mut cut = output.len() - OUTPUT_LIMIT;
-        while !output.is_char_boundary(cut) {
-            cut += 1;
-        }
+        let cut = output.ceil_char_boundary(output.len() - OUTPUT_LIMIT);
         output.drain(..cut);
     }
 }

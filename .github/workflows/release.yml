@@ -11,6 +11,7 @@ on:
       - "AGENTS.md"
       - "docs/**"
       - "assets/screenshot.png"
+      - "Casks/**"
   workflow_dispatch:
 
 permissions:

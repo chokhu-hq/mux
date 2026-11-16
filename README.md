@@ -78,7 +78,14 @@ These are experimental builds, so expect rough edges.
 <details>
 <summary><strong>macOS</strong></summary>
 
-Unzip and move `Mux.app` to Applications. The app isn't notarised yet, so macOS will say it's damaged until you clear the download flag:
+With [Homebrew](https://brew.sh):
+
+```sh
+brew tap chokhu-hq/mux https://github.com/chokhu-hq/mux
+brew install --cask chokhu-hq/mux/mux
+```
+
+Or unzip and move `Mux.app` to Applications. The app isn't notarised yet, so macOS will say it's damaged until you clear the download flag:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Mux.app

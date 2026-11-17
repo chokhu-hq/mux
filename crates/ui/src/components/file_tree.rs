@@ -310,7 +310,7 @@ impl FileTree {
     }
 }
 
-fn git_color(p: &Palette, mark: char) -> Color32 {
+pub(super) fn git_color(p: &Palette, mark: char) -> Color32 {
     match mark {
         'A' | 'U' => p.success,
         'D' | '!' => p.danger,

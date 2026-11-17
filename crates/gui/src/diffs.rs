@@ -84,6 +84,11 @@ impl Diffs {
         self.select(ctx, at as usize);
     }
 
+    // the open file as the header names it, relative to the repository or the project
+    pub fn shown(&self) -> String {
+        self.relative(&self.path)
+    }
+
     // which of the listed files is open and how many there are, for the prev and next buttons
     pub fn step_shown(&self) -> Option<(usize, usize)> {
         self.files.current.map(|at| (at, self.files.files.len()))
@@ -188,8 +193,17 @@ fn agent_files(agent: &[(String, String)], dir: Option<&str>) -> Vec<ChangedFile
                     .filter(|l| l.starts_with(sign) && !l.starts_with("@@"))
                     .count()
             };
+            // a hunk starting from line 0 on one side is a whole file added or removed
+            let status = if hunks.contains("@@ -0,0 ") {
+                'A'
+            } else if hunks.contains(" +0,0 @@") {
+                'D'
+            } else {
+                'M'
+            };
             ChangedFile {
                 path: path.clone(),
+                status,
                 name: dir
                     .and_then(|d| path.strip_prefix(&format!("{}/", d.trim_end_matches('/'))))
                     .map_or_else(|| mux_core::paths::file_name(path), str::to_owned),
@@ -233,20 +247,40 @@ fn list(dir: Option<&str>, scope: DiffScope, agent: &[(String, String)]) -> List
                 &["diff", "--numstat", "-z", "--no-renames", &against, "--"],
             )
             .unwrap_or_default();
-            let mut files = parse_numstat(&numstat);
+            let statuses = git(
+                &root,
+                &[
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    "--no-renames",
+                    &against,
+                    "--",
+                ],
+            )
+            .unwrap_or_default();
+            let statuses = parse_name_status(&statuses);
+            let mut files: Vec<(String, char, usize, usize)> = parse_numstat(&numstat)
+                .into_iter()
+                .map(|(name, added, removed)| {
+                    let status = statuses.get(&name).copied().unwrap_or('M');
+                    (name, status, added, removed)
+                })
+                .collect();
             let untracked = git(&root, &["ls-files", "--others", "--exclude-standard", "-z"])
                 .unwrap_or_default();
             for name in untracked.split('\0').filter(|n| !n.is_empty()) {
                 let path = mux_core::paths::join(&root, name);
                 let added = line_count(&mux_core::paths::local(&path));
-                files.push((name.to_owned(), added, 0));
+                files.push((name.to_owned(), 'U', added, 0));
             }
             files.sort_by(|a, b| a.0.cmp(&b.0));
             files
                 .into_iter()
-                .map(|(name, added, removed)| ChangedFile {
+                .map(|(name, status, added, removed)| ChangedFile {
                     path: mux_core::paths::join(&root, &name),
                     name,
+                    status,
                     added,
                     removed,
                 })
@@ -303,9 +337,30 @@ fn parse_numstat(out: &str) -> Vec<(String, usize, usize)> {
         .collect()
 }
 
+// `git diff --name-status -z` without renames: each path with the letter for how it changed
+fn parse_name_status(out: &str) -> std::collections::HashMap<String, char> {
+    let mut parts = out.split('\0');
+    let mut statuses = std::collections::HashMap::new();
+    while let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+        if let Some(letter) = status.trim().chars().next() {
+            statuses.insert(path.to_owned(), letter);
+        }
+    }
+    statuses
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_numstat;
+    use super::{parse_name_status, parse_numstat};
+
+    #[test]
+    fn reads_name_status() {
+        let statuses = parse_name_status("M\0src/main.rs\0A\0new file.md\0D\0old.rs\0");
+        assert_eq!(statuses.get("src/main.rs"), Some(&'M'));
+        assert_eq!(statuses.get("new file.md"), Some(&'A'));
+        assert_eq!(statuses.get("old.rs"), Some(&'D'));
+        assert!(parse_name_status("").is_empty());
+    }
 
     #[test]
     fn reads_numstat_with_binaries_and_odd_names() {

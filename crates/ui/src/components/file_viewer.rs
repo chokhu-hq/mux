@@ -13,13 +13,17 @@ use crate::theme::{self, Palette, font, icon, radius, space, text};
 
 // big enough for any source file, small enough to highlight without a stall
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
-const HEADER: f32 = 44.0;
+const HEADER: f32 = theme::control::HEADER;
+// the strip under the header holding commit and push
+const GIT_BAR: f32 = 36.0;
 // the changed files column, and how wide the panel has to be before there's room for it
 const COLUMN: f32 = 220.0;
 const COLUMN_AT: f32 = 720.0;
 const FILE_ROW: f32 = 28.0;
-// room left under the last line for a comment field opened there
-const FIELD_ROOM: f32 = 140.0;
+// how wide a comment or its field gets under the lines it's on
+const NOTE_WIDTH: f32 = 640.0;
+// a guess at the comment field's height for its first frame, measured after that
+const FIELD_HEIGHT: f32 = 112.0;
 
 pub enum FileViewAction {
     Close,
@@ -65,6 +69,8 @@ pub struct ChangedFile {
     pub path: String,
     // the path as listed, relative to the repository
     pub name: String,
+    // the git mark for how it changed, like M, A, D or U for untracked
+    pub status: char,
     pub added: usize,
     pub removed: usize,
 }
@@ -86,11 +92,15 @@ struct Draft {
     end: usize,
     text: String,
     focus: bool,
+    // how tall the field was last frame, which is how much room the lines below make for it
+    height: f32,
 }
 
 // commit and push for a worktree chat's changes, shown above its diffs
 #[derive(Default)]
 pub struct GitBar {
+    // the worktree's branch, named on the left of the bar
+    pub branch: Option<String>,
     pub pushing: bool,
     pub error: Option<String>,
 }
@@ -120,6 +130,8 @@ struct Diff {
 // a read only look at one file, opened from a link in the chat
 pub struct FileView {
     pub path: String,
+    // the path as the header shows it, relative to the project or worktree when that's known
+    pub name: Option<String>,
     // the linked lines, counted from 1 and inclusive
     pub lines: Option<(usize, usize)>,
     content: Result<Arc<str>, String>,
@@ -192,6 +204,7 @@ impl FileView {
         let wrap = matches!(ext.as_str(), "md" | "markdown" | "txt" | "log" | "");
         Self {
             path,
+            name: None,
             lines,
             content: Err(String::new()),
             colored: Arc::default(),
@@ -293,7 +306,7 @@ impl FileView {
         }
 
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER));
-        let action = self
+        let mut action = self
             .header(ui, header.shrink2(vec2(space::MD, 0.0)), !column)
             .or(action);
         ui.painter().hline(
@@ -303,6 +316,11 @@ impl FileView {
         );
 
         let mut top = header.bottom();
+        if let Some(git) = &self.git {
+            let bar = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), GIT_BAR));
+            action = git_bar(ui, bar, git).or(action);
+            top = bar.bottom();
+        }
         if let Some(error) = self.git.as_ref().and_then(|g| g.error.as_deref()) {
             let galley = ui.painter().layout(
                 error.to_owned(),
@@ -360,7 +378,7 @@ impl FileView {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            action = scope_picker(&mut left, files).map(FileViewAction::Scope);
+            action = scope_picker(&mut left, files, false).map(FileViewAction::Scope);
             rect.min.x = left.min_rect().right() + space::SM;
         }
         let mut row = ui.new_child(
@@ -404,6 +422,7 @@ impl FileView {
             action = Some(FileViewAction::CopyPath);
         }
         if let Some((index, count)) = self.step.filter(|(_, count)| *count > 1) {
+            row.add_space(space::SM);
             if IconButton::new(icons::CARET_RIGHT, "Next file")
                 .show(&mut row)
                 .tip("Next changed file")
@@ -411,11 +430,14 @@ impl FileView {
             {
                 action = Some(FileViewAction::Step(1));
             }
-            row.label(
-                egui::RichText::new(format!("{} of {count}", index + 1))
-                    .font(font::regular(text::SM + 1.0))
-                    .color(p.text_faint),
-            );
+            // the files column already shows which file this is, so the count is only needed without it
+            if picker {
+                row.label(
+                    egui::RichText::new(format!("{} of {count}", index + 1))
+                        .font(font::regular(text::SM + 1.0))
+                        .color(p.text_faint),
+                );
+            }
             if IconButton::new(icons::CARET_LEFT, "Previous file")
                 .show(&mut row)
                 .tip("Previous changed file")
@@ -424,27 +446,26 @@ impl FileView {
                 action = Some(FileViewAction::Step(-1));
             }
         }
-        if let Some(git) = &self.git {
+        if let Some(diff) = &self.diff {
             row.add_space(space::SM);
-            let push = Button::new(if git.pushing { "Pushing…" } else { "Push" })
-                .size(Size::Sm)
-                .enabled(!git.pushing)
-                .show(&mut row)
-                .tip("Push this branch and open a pull request on GitHub");
-            if push.clicked() {
-                action = Some(FileViewAction::Push);
-            }
-            let commit = Button::new("Commit")
-                .size(Size::Sm)
-                .show(&mut row)
-                .tip("Ask the agent to commit its changes");
-            if commit.clicked() {
-                action = Some(FileViewAction::Commit);
-            }
+            let count = |text: String, color| {
+                egui::RichText::new(text)
+                    .font(font::medium(text::SM + 1.0))
+                    .color(color)
+            };
+            row.label(count(format!("−{}", diff.removed), p.danger));
+            row.label(count(format!("+{}", diff.added), p.success));
         }
-        let buttons_left = row.min_rect().left();
+        let buttons_left = row.min_rect().left() - space::MD;
 
-        let (name, folder) = mux_core::paths::name_and_folder(&self.path);
+        let shown = self.name.clone().unwrap_or_else(|| self.path.clone());
+        let (name, folder) = match &self.name {
+            Some(name) => match name.rsplit_once('/') {
+                Some((folder, file)) => (file.to_owned(), folder.to_owned()),
+                None => (name.clone(), String::new()),
+            },
+            None => mux_core::paths::name_and_folder(&self.path),
+        };
         let icon_center = pos2(rect.left() + icon::MD / 2.0, rect.center().y);
         ui.painter().text(
             icon_center,
@@ -453,50 +474,38 @@ impl FileView {
             font::icon(icon::MD),
             p.text_muted,
         );
-        let name_galley = ui
-            .painter()
-            .layout_no_wrap(name, font::medium(text::MD), p.text);
-        let name_pos = pos2(
-            icon_center.x + icon::MD / 2.0 + space::SM,
-            rect.center().y - name_galley.size().y / 2.0,
+        let name_x = icon_center.x + icon::MD / 2.0 + space::SM;
+        let name_galley = super::elided(
+            ui,
+            name,
+            font::medium(text::MD),
+            p.text,
+            buttons_left - name_x,
         );
-        let mut name_right = name_pos.x + name_galley.size().x;
-        ui.painter().galley(name_pos, name_galley, p.text);
-        if let Some(diff) = &self.diff {
-            let plus = ui.painter().text(
-                pos2(name_right + space::SM, rect.center().y),
-                Align2::LEFT_CENTER,
-                format!("+{}", diff.added),
-                font::medium(text::SM + 1.0),
-                p.success,
-            );
-            let minus = ui.painter().text(
-                pos2(plus.right() + space::XS, rect.center().y),
-                Align2::LEFT_CENTER,
-                format!("−{}", diff.removed),
-                font::medium(text::SM + 1.0),
-                p.danger,
-            );
-            name_right = minus.right();
-        }
-        let room = buttons_left - space::SM - name_right - space::SM;
-        if room > 24.0 {
-            let galley = crate::components::elided(
+        let name_rect = Rect::from_min_size(
+            pos2(name_x, rect.center().y - name_galley.size().y / 2.0),
+            name_galley.size(),
+        );
+        ui.painter().galley(name_rect.min, name_galley, p.text);
+        let room = buttons_left - name_rect.right() - space::SM;
+        let mut title = name_rect;
+        if !folder.is_empty() && room > 24.0 {
+            let galley = super::elided(
                 ui,
                 folder,
                 font::regular(text::SM + 1.0),
                 p.text_faint,
                 room,
             );
-            ui.painter().galley(
-                pos2(
-                    name_right + space::SM,
-                    rect.center().y - galley.size().y / 2.0,
-                ),
-                galley,
-                p.text_faint,
+            let at = pos2(
+                name_rect.right() + space::SM,
+                rect.center().y - galley.size().y / 2.0,
             );
+            title.max.x = at.x + galley.size().x;
+            ui.painter().galley(at, galley, p.text_faint);
         }
+        ui.interact(title, ui.scope_id().with("header-path"), Sense::hover())
+            .tip(shown);
         action
     }
 
@@ -580,6 +589,44 @@ impl FileView {
         };
         let line_rows = self.line_rows.clone();
         let row_of = |line: usize| line_rows.get(line.saturating_sub(1)).copied();
+        // the galley row a line of the diff ends on, wrapped rows and all
+        let last_row = |i: usize| {
+            line_rows
+                .get(i + 1)
+                .map_or(galley.rows.len(), |&r| r)
+                .saturating_sub(1)
+        };
+
+        // comments open a gap under their last line and push the code below down, like a review on github
+        let note_width = (ui.available_width() - gutter - space::LG).clamp(160.0, NOTE_WIDTH);
+        let mut notes: Vec<(usize, Option<Arc<Galley>>, f32)> = Vec::new();
+        if let Some(diff) = &self.diff {
+            for comment in &self.comments {
+                let last = diff
+                    .rows
+                    .iter()
+                    .rposition(|r| r.kind != RowKind::Hunk && comment.covers(r.old, r.new));
+                if let Some(i) = last {
+                    let text = ui.painter().layout(
+                        comment.text.clone(),
+                        font::regular(text::SM + 1.0),
+                        p.text,
+                        note_width - space::SM * 3.0 - icon::SM,
+                    );
+                    let height = text.size().y + space::SM * 2.0;
+                    notes.push((i, Some(text), height));
+                }
+            }
+        }
+        if let Some(draft) = &self.draft {
+            notes.push((draft.end, None, draft.height));
+        }
+        notes.sort_by_key(|(line, _, _)| *line);
+        let gaps: Vec<(usize, f32)> = notes
+            .iter()
+            .map(|(line, _, height)| (last_row(*line), height + space::SM * 2.0))
+            .collect();
+        let galley = spaced(&galley, &gaps);
 
         let target = self
             .lines
@@ -618,14 +665,9 @@ impl FileView {
         let mut submit = false;
         let mut cancel = false;
         area.show(ui, |ui| {
-            let room = if self.draft.is_some() {
-                FIELD_ROOM
-            } else {
-                0.0
-            };
             let total = vec2(
                 gutter + galley.size().x + space::LG,
-                galley.size().y + pad * 2.0 + room,
+                galley.size().y + pad * 2.0,
             );
             let (rect, _) = ui.allocate_exact_size(total.max(ui.available_size()), Sense::hover());
             let origin = pos2(rect.left() + gutter, rect.top() + pad);
@@ -805,22 +847,38 @@ impl FileView {
                 Rect::from_min_size(origin, galley.size()),
                 egui::Label::new(galley.clone()).selectable(true),
             );
-            // drawn after the code so it sits over the lines below the ones it's about
-            if let Some(draft) = &mut self.draft {
-                let rows = &galley.rows;
-                let last = line_rows
-                    .get(draft.end + 1)
-                    .map_or(rows.len(), |&r| r)
-                    .saturating_sub(1);
-                let y = rows.get(last).map_or(origin.y, |r| origin.y + r.max_y()) + space::XS;
-                let x = visible.left().max(rect.left()) + gutter;
-                let width = (visible.right() - x - space::LG).clamp(160.0, 520.0);
-                let mut field_ui = ui.new_child(
-                    UiBuilder::new()
-                        .id_salt("comment")
-                        .max_rect(Rect::from_min_size(pos2(x, y), vec2(width, FIELD_ROOM))),
-                );
-                (submit, cancel) = comment_field(&mut field_ui, field_id, draft);
+            // each note sits in the gap left under its lines, stacked when several end on the same line
+            let x = visible.left().max(rect.left()) + gutter;
+            let mut stacked: Option<(usize, f32)> = None;
+            for (line, text, height) in notes {
+                let y = match stacked {
+                    Some((at, y)) if at == line => y,
+                    _ => {
+                        galley
+                            .rows
+                            .get(last_row(line))
+                            .map_or(origin.y, |r| origin.y + r.max_y())
+                            + space::SM
+                    }
+                };
+                stacked = Some((line, y + height + space::SM * 2.0));
+                let place = Rect::from_min_size(pos2(x, y), vec2(note_width, height));
+                match text {
+                    Some(text) => note(ui, place, text),
+                    None => {
+                        let Some(draft) = &mut self.draft else {
+                            continue;
+                        };
+                        let mut field_ui =
+                            ui.new_child(UiBuilder::new().id_salt("comment").max_rect(place));
+                        (submit, cancel) = comment_field(&mut field_ui, field_id, draft);
+                        let measured = field_ui.min_rect().height();
+                        if (measured - draft.height).abs() > 0.5 {
+                            draft.height = measured;
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
             }
         });
         // a drag down the gutter covers every line the pointer passes over
@@ -848,6 +906,7 @@ impl FileView {
                 end: start.max(i),
                 text,
                 focus: true,
+                height: FIELD_HEIGHT,
             });
         } else if !ui.input(|i| i.pointer.primary_down())
             && let Some((a, b)) = self.selecting.take()
@@ -858,6 +917,7 @@ impl FileView {
                 end: a.max(b),
                 text,
                 focus: true,
+                height: FIELD_HEIGHT,
             });
         }
         if cancel || (self.draft.is_some() && ui.input(|i| i.key_pressed(Key::Escape))) {
@@ -869,6 +929,114 @@ impl FileView {
         }
         None
     }
+}
+
+// the code with room opened under some of its rows, each gap given as the row it follows and its height
+fn spaced(galley: &Arc<Galley>, gaps: &[(usize, f32)]) -> Arc<Galley> {
+    if gaps.is_empty() {
+        return galley.clone();
+    }
+    let mut spaced = (**galley).clone();
+    let mut shift = 0.0;
+    for (i, row) in spaced.rows.iter_mut().enumerate() {
+        row.pos.y += shift;
+        shift += gaps
+            .iter()
+            .filter(|(after, _)| *after == i)
+            .map(|(_, height)| height)
+            .sum::<f32>();
+    }
+    spaced.rect.max.y += shift;
+    spaced.mesh_bounds.max.y += shift;
+    Arc::new(spaced)
+}
+
+// a comment already left on the lines above it, waiting to go out with the next message
+fn note(ui: &Ui, rect: Rect, text: Arc<Galley>) {
+    let p = theme::palette(ui);
+    let corner = CornerRadius::same(radius::MD);
+    ui.painter().rect_filled(rect, corner, p.surface);
+    ui.painter().rect_stroke(
+        rect,
+        corner,
+        Stroke::new(1.0, p.border_strong),
+        egui::StrokeKind::Inside,
+    );
+    let first = text.rows.first().map_or(text.size().y, |r| r.height());
+    ui.painter().text(
+        pos2(
+            rect.left() + space::SM + icon::SM / 2.0,
+            rect.top() + space::SM + first / 2.0,
+        ),
+        Align2::CENTER_CENTER,
+        icons::CHAT_CIRCLE,
+        font::icon(icon::SM),
+        p.accent,
+    );
+    ui.painter().galley(
+        pos2(
+            rect.left() + space::SM * 2.0 + icon::SM,
+            rect.top() + space::SM,
+        ),
+        text,
+        p.text,
+    );
+}
+
+// the worktree's branch on the left, and commit and push for it on the right
+fn git_bar(ui: &mut Ui, rect: Rect, git: &GitBar) -> Option<FileViewAction> {
+    let p = theme::palette(ui);
+    ui.painter()
+        .rect_filled(rect, 0.0, theme::tint(p, theme::fill::CARD));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    let inner = rect.shrink2(vec2(space::MD, 0.0));
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .id_salt("git-bar")
+            .max_rect(inner)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = space::SM;
+    let mut action = None;
+    let push = Button::new(if git.pushing { "Pushing…" } else { "Push" })
+        .size(Size::Sm)
+        .enabled(!git.pushing)
+        .show(&mut row)
+        .tip("Push this branch and open a pull request on GitHub");
+    if push.clicked() {
+        action = Some(FileViewAction::Push);
+    }
+    let commit = Button::new("Commit")
+        .size(Size::Sm)
+        .show(&mut row)
+        .tip("Ask the agent to commit its changes");
+    if commit.clicked() {
+        action = Some(FileViewAction::Commit);
+    }
+    let right = row.min_rect().left() - space::SM;
+    let y = rect.center().y;
+    ui.painter().text(
+        pos2(inner.left() + icon::MD / 2.0, y),
+        Align2::CENTER_CENTER,
+        icons::GIT_BRANCH,
+        font::icon(icon::MD),
+        p.text_faint,
+    );
+    let x = inner.left() + icon::MD + space::SM;
+    let branch = super::elided(
+        ui,
+        git.branch.as_deref().unwrap_or("This worktree"),
+        font::medium(text::SM + 1.0),
+        p.text_muted,
+        right - x,
+    );
+    ui.painter()
+        .galley(pos2(x, y - branch.size().y / 2.0), branch, p.text_muted);
+    action
 }
 
 // the small field under commented lines, returning whether it was added or cancelled this frame
@@ -886,31 +1054,42 @@ fn comment_field(ui: &mut Ui, id: egui::Id, draft: &mut Draft) -> (bool, bool) {
             i.events.len() != before
         });
     let mut cancel = false;
-    theme::floating(ui)
+    theme::card(ui)
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.border_strong))
         .inner_margin(Margin::same(space::SM as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let border = if focused { p.accent } else { p.border_strong };
             let field = ui.add(
                 TextEdit::multiline(&mut draft.text)
                     .id(id)
-                    .frame(Frame::NONE)
-                    .hint_text("Comment for the agent")
+                    .frame(
+                        Frame::new()
+                            .fill(p.bg)
+                            .stroke(Stroke::new(1.0, border))
+                            .corner_radius(CornerRadius::same(radius::MD))
+                            .inner_margin(Margin::symmetric(10, 6)),
+                    )
+                    .hint_text(
+                        egui::RichText::new("Leave a comment for the agent").color(p.text_faint),
+                    )
                     .font(font::regular(text::MD))
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY)
-                    .margin(Margin::ZERO),
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
             );
             if std::mem::take(&mut draft.focus) {
                 field.request_focus();
             }
-            ui.add_space(space::XS);
+            ui.add_space(space::SM);
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Enter to add, Esc to cancel")
+                    egui::RichText::new("Shift+Enter for a new line")
                         .font(font::regular(text::SM))
                         .color(p.text_faint),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = space::SM;
                     let ready = !draft.text.trim().is_empty();
                     submit |= Button::new("Comment")
                         .primary()
@@ -918,11 +1097,7 @@ fn comment_field(ui: &mut Ui, id: egui::Id, draft: &mut Draft) -> (bool, bool) {
                         .enabled(ready)
                         .show(ui)
                         .clicked();
-                    cancel = Button::new("Cancel")
-                        .ghost()
-                        .size(Size::Sm)
-                        .show(ui)
-                        .clicked();
+                    cancel = Button::new("Cancel").size(Size::Sm).show(ui).clicked();
                 });
             });
         });
@@ -930,10 +1105,17 @@ fn comment_field(ui: &mut Ui, id: egui::Id, draft: &mut Draft) -> (bool, bool) {
 }
 
 // which changes to show, as a chip that opens a menu
-fn scope_picker(ui: &mut Ui, files: &DiffFiles) -> Option<DiffScope> {
+fn scope_picker(ui: &mut Ui, files: &DiffFiles, counted: bool) -> Option<DiffScope> {
     let mut picked = None;
+    let count = match files.files.len() {
+        _ if !counted => String::new(),
+        0 => String::new(),
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
     let chip = Chip::new(files.scope.label())
         .icon(icons::GIT_DIFF)
+        .detail(&count)
         .show(ui)
         .tip("Which changes to show");
     let branch = files
@@ -976,16 +1158,7 @@ fn files_column(ui: &mut Ui, rect: Rect, files: &DiffFiles) -> Option<FileViewAc
             .max_rect(header.shrink2(vec2(space::SM, 0.0)))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    let mut action = scope_picker(&mut head, files).map(FileViewAction::Scope);
-    if !files.files.is_empty() {
-        head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(files.files.len().to_string())
-                    .font(font::regular(text::SM + 1.0))
-                    .color(p.text_faint),
-            );
-        });
-    }
+    let mut action = scope_picker(&mut head, files, true).map(FileViewAction::Scope);
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
@@ -1009,6 +1182,24 @@ fn files_column(ui: &mut Ui, rect: Rect, files: &DiffFiles) -> Option<FileViewAc
         );
         return action;
     }
+    // the counts of every row line up in two columns at the right, as wide as the widest of each
+    let small = font::medium(text::SM);
+    let widest = |text: &dyn Fn(&ChangedFile) -> String| {
+        files
+            .files
+            .iter()
+            .map(|f| {
+                list.painter()
+                    .layout_no_wrap(text(f), small.clone(), p.text)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max)
+    };
+    let columns = (
+        widest(&|f| format!("+{}", f.added)),
+        widest(&|f| format!("−{}", f.removed)),
+    );
     ScrollArea::vertical()
         .id_salt("changed-files")
         .auto_shrink(false)
@@ -1016,7 +1207,7 @@ fn files_column(ui: &mut Ui, rect: Rect, files: &DiffFiles) -> Option<FileViewAc
             ui.add_space(space::XS);
             ui.spacing_mut().item_spacing.y = 0.0;
             for (i, file) in files.files.iter().enumerate() {
-                if file_row(ui, file, files.current == Some(i)) {
+                if file_row(ui, file, files.current == Some(i), columns) {
                     action = Some(FileViewAction::Open(i));
                 }
             }
@@ -1025,8 +1216,8 @@ fn files_column(ui: &mut Ui, rect: Rect, files: &DiffFiles) -> Option<FileViewAc
     action
 }
 
-// one changed file: its name, its folder faint after it, and the lines added and removed
-fn file_row(ui: &mut Ui, file: &ChangedFile, current: bool) -> bool {
+// one changed file: how it changed, its name with its folder faint after it, and the lines added and removed
+fn file_row(ui: &mut Ui, file: &ChangedFile, current: bool, columns: (f32, f32)) -> bool {
     let p = theme::palette(ui);
     let (outer, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), FILE_ROW), Sense::click());
@@ -1037,43 +1228,57 @@ fn file_row(ui: &mut Ui, file: &ChangedFile, current: bool) -> bool {
     let fill = if current {
         theme::tint(p, theme::fill::SELECTED)
     } else {
-        p.hover.gamma_multiply(t)
+        theme::tint(p, theme::fill::HOVER * t)
     };
     ui.painter()
         .rect_filled(rect, CornerRadius::same(radius::MD), fill);
     let y = rect.center().y;
     let small = font::medium(text::SM);
-    let minus = ui
-        .painter()
-        .layout_no_wrap(format!("−{}", file.removed), small.clone(), p.danger);
-    let plus = ui
-        .painter()
-        .layout_no_wrap(format!("+{}", file.added), small, p.success);
-    let mut right = rect.right() - space::SM;
-    right -= minus.size().x;
-    let minus_x = right;
-    right -= space::XS + plus.size().x;
-    let plus_x = right;
-    ui.painter()
-        .galley(pos2(minus_x, y - minus.size().y / 2.0), minus, p.danger);
-    ui.painter()
-        .galley(pos2(plus_x, y - plus.size().y / 2.0), plus, p.success);
+    let minus_x = rect.right() - space::SM;
+    let plus_x = minus_x - columns.1 - space::SM;
+    ui.painter().text(
+        pos2(minus_x, y),
+        Align2::RIGHT_CENTER,
+        format!("−{}", file.removed),
+        small.clone(),
+        if file.removed == 0 {
+            p.text_faint
+        } else {
+            p.danger
+        },
+    );
+    ui.painter().text(
+        pos2(plus_x, y),
+        Align2::RIGHT_CENTER,
+        format!("+{}", file.added),
+        small.clone(),
+        if file.added == 0 {
+            p.text_faint
+        } else {
+            p.success
+        },
+    );
+    let mark_x = rect.left() + space::SM;
+    ui.painter().text(
+        pos2(mark_x + icon::SM / 2.0, y),
+        Align2::CENTER_CENTER,
+        file.status,
+        small,
+        super::file_tree::git_color(p, file.status),
+    );
     let (name, folder) = match file.name.rsplit_once('/') {
         Some((folder, name)) => (name, folder),
         None => (file.name.as_str(), ""),
     };
-    let left = rect.left() + space::SM;
-    let room = plus_x - space::SM - left;
-    let name = super::elided(
-        ui,
-        name,
-        font::regular(text::SM + 1.0),
-        if current { p.text } else { p.text_muted },
-        room,
-    );
+    let left = mark_x + icon::SM + space::SM;
+    let room = plus_x - columns.0 - space::SM - left;
+    let name_color = if current { p.text } else { p.text_muted };
+    let name = super::elided(ui, name, font::regular(text::SM + 1.0), name_color, room);
     let name_width = name.size().x;
+    // the whole path shows on hover only when the row had to cut it short
+    let mut cut = name.elided || (!folder.is_empty() && room - name_width - space::XS <= 24.0);
     ui.painter()
-        .galley(pos2(left, y - name.size().y / 2.0), name, p.text);
+        .galley(pos2(left, y - name.size().y / 2.0), name, name_color);
     let folder_room = room - name_width - space::XS;
     if !folder.is_empty() && folder_room > 24.0 {
         let folder = super::elided(
@@ -1083,13 +1288,17 @@ fn file_row(ui: &mut Ui, file: &ChangedFile, current: bool) -> bool {
             p.text_faint,
             folder_room,
         );
+        cut |= folder.elided;
         ui.painter().galley(
             pos2(left + name_width + space::XS, y - folder.size().y / 2.0),
             folder,
             p.text_faint,
         );
     }
-    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let mut response = response.on_hover_cursor(CursorIcon::PointingHand);
+    if cut {
+        response = response.tip(&file.name);
+    }
     response.clicked()
 }
 

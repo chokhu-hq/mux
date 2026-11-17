@@ -94,6 +94,8 @@ pub mod font {
 pub mod control {
     pub const SM: f32 = 24.0;
     pub const MD: f32 = 28.0;
+    // the strip along the top of every side panel, so their titles and close buttons line up
+    pub const HEADER: f32 = 40.0;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

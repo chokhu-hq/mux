@@ -671,6 +671,8 @@ impl App {
                     Some((root, rest)) => {
                         let req = files_panel::next_req();
                         self.viewer_read = Some(req);
+                        let mut view = FileView::loading(local, lines);
+                        view.name = Some(rest.clone());
                         self.sessions.outbox.push(ClientMsg::ReadFile {
                             req,
                             root,
@@ -678,7 +680,7 @@ impl App {
                             offset: 0,
                             len: files_panel::CHUNK,
                         });
-                        FileView::loading(local, lines)
+                        view
                     }
                     // anywhere else, like the agent's own config, is read here as before
                     None => FileView::open(local, lines),
@@ -1544,6 +1546,7 @@ impl App {
         self.viewer_width = self.viewer_width.max(820.0);
         let diffs = diffs::Diffs::open(ctx, session, dir, agent, path.clone());
         let mut view = FileView::pending(mux_core::paths::local(&path));
+        view.name = Some(diffs.shown());
         view.files = Some(diffs.files.clone());
         self.diffs = Some(diffs);
         self.viewer = Some(view);
@@ -1560,7 +1563,11 @@ impl App {
         let (listed, diff) = diffs.poll();
         if let Some(unified) = &diff {
             let mut view = FileView::diff(mux_core::paths::local(&diffs.path), unified);
-            view.git = self.ship.as_ref().map(|_| mux_ui::GitBar::default());
+            view.name = Some(diffs.shown());
+            view.git = self.ship.as_ref().map(|ship| mux_ui::GitBar {
+                branch: self.sessions.info(ship.id).and_then(|s| s.branch.clone()),
+                ..mux_ui::GitBar::default()
+            });
             self.viewer = Some(view);
         }
         if (listed || diff.is_some())

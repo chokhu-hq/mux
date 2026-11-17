@@ -155,6 +155,28 @@ impl FileView {
         }
     }
 
+    // a file the server is reading, filled in with `set_text` once it arrives
+    pub fn loading(path: String, lines: Option<(usize, usize)>) -> Self {
+        Self {
+            content: Err("Loading…".to_owned()),
+            ..Self::blank(path, lines)
+        }
+    }
+
+    pub fn text(path: String, text: &str) -> Self {
+        Self {
+            content: Ok(Arc::from(mux_core::clip_lines(text).as_ref())),
+            ..Self::blank(path, None)
+        }
+    }
+
+    pub fn set_text(&mut self, text: Result<&str, String>) {
+        self.content = text.map(|t| Arc::from(mux_core::clip_lines(t).as_ref()));
+        self.coloring = None;
+        self.galley = None;
+        self.colored = Arc::default();
+    }
+
     // a diff still being read, shown until it arrives
     pub fn pending(path: String) -> Self {
         Self {
@@ -304,23 +326,28 @@ impl FileView {
         let body = Rect::from_min_max(pos2(rect.left() + 1.0, top), rect.max);
         let mut body_ui = ui.new_child(UiBuilder::new().id_salt("body").max_rect(body));
         body_ui.set_clip_rect(body.intersect(ui.clip_rect()));
+        if let Some(comment) = self.body(&mut body_ui) {
+            return Some(FileViewAction::Comment(comment));
+        }
+        action
+    }
+
+    // just the file's lines, or why they can't be shown, filling `ui`
+    pub fn body(&mut self, ui: &mut Ui) -> Option<DiffComment> {
         match &self.content {
-            Ok(_) => {
-                if let Some(comment) = self.code(&mut body_ui) {
-                    return Some(FileViewAction::Comment(comment));
-                }
-            }
+            Ok(_) => self.code(ui),
             Err(reason) => {
-                body_ui.painter().text(
-                    body.center(),
+                let p = theme::palette(ui);
+                ui.painter().text(
+                    ui.max_rect().center(),
                     Align2::CENTER_CENTER,
                     reason,
                     font::regular(text::MD),
                     p.text_muted,
                 );
+                None
             }
         }
-        action
     }
 
     fn header(&self, ui: &mut Ui, mut rect: Rect, picker: bool) -> Option<FileViewAction> {

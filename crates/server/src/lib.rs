@@ -71,6 +71,8 @@ pub enum Event {
     ResetUsed(Provider, ResetResult),
     // a pull request's branch was checked out in a session's new worktree, or why it couldn't be
     PrCheckedOut(u64, mux_core::protocol::PrLink, Result<(), String>),
+    // an answer worked out off the event loop, for the client that asked
+    Reply(u64, ServerMsg),
     // more output from a command an agent left running in the background
     BackgroundOutput {
         session: u64,
@@ -441,6 +443,7 @@ impl Server {
                 }
             }
             Event::Client(client, msg) => self.message(client, msg),
+            Event::Reply(client, msg) => self.send(client, msg),
             Event::Wake(id, reset) => self.wake(id, reset),
             Event::ResetUsed(provider, result) => self.reset_used(provider, result),
             Event::Output {

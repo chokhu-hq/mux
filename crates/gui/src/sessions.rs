@@ -251,6 +251,8 @@ pub struct Sessions {
     // what to tell the person, with when a finish was first seen so it can settle before it's announced
     alerts: Vec<(Alert, Option<f64>)>,
     pub outbox: Vec<ClientMsg>,
+    // answers about the project's files, for the files panel and the file viewer to pick up
+    pub file_replies: Vec<ServerMsg>,
     // what each session asked for should start with, in the order the server confirms them
     creating: std::collections::VecDeque<Creating>,
     // the terminal shown on the right beside the selected session
@@ -605,6 +607,10 @@ impl Sessions {
                     local.rebuild_latest();
                 }
             }
+            msg @ (ServerMsg::DirEntries { .. }
+            | ServerMsg::FileChunk { .. }
+            | ServerMsg::PathMatches { .. }
+            | ServerMsg::FileError { .. }) => self.file_replies.push(msg),
         }
     }
 

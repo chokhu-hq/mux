@@ -7,6 +7,9 @@ pub(crate) mod context_menu;
 mod context_ring;
 mod diff_comment;
 mod empty_state;
+mod file_formats;
+mod file_preview;
+mod file_tree;
 mod file_viewer;
 mod group_header;
 mod icon;
@@ -35,6 +38,8 @@ pub use context_menu::{area_menu, copy_item, edit_menu};
 pub use context_ring::{ContextRing, tokens as short_tokens};
 pub use diff_comment::{DiffComment, strip as comment_strip, with_comments};
 pub use empty_state::EmptyState;
+pub use file_preview::{FilePreview, PreviewAction};
+pub use file_tree::{DirState, FileTree, TreeAction};
 pub use file_viewer::{
     ChangedFile, DiffFiles, DiffScope, FileView, FileViewAction, GitBar, link_target,
     open_in_editor,

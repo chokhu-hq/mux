@@ -79,6 +79,15 @@ impl App {
             *run = Some("toggle-terminal");
         }
         if info.git
+            && IconButton::new(icons::FOLDER_OPEN, "Files")
+                .selected(self.files_open)
+                .show(&mut actions)
+                .tip("Files")
+                .clicked()
+        {
+            *run = Some("files");
+        }
+        if info.git
             && IconButton::new(icons::GIT_PULL_REQUEST, "Pull requests")
                 .selected(self.pr_open)
                 .show(&mut actions)

@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 39;
+pub const PROTOCOL: u32 = 40;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -473,6 +473,27 @@ pub struct UsageWindow {
     pub model: Option<String>,
 }
 
+// one file or folder in a project, as the file tree lists it
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub dir: bool,
+    pub size: u64,
+    // left out of git by .gitignore
+    pub ignored: bool,
+    // the git status letter, like M, A, D or U for untracked
+    pub git: Option<char>,
+}
+
+// what a file holds, found from its first bytes, so a preview can be picked before it's all read
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileKind {
+    Text,
+    Image,
+    Pdf,
+    Binary,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
     Allow,
@@ -616,6 +637,27 @@ pub enum ClientMsg {
         pr: PrLink,
         title: String,
     },
+    // the entries of `dir`, relative to `root`, answered with DirEntries or FileError
+    ListDir {
+        req: u64,
+        root: String,
+        dir: String,
+    },
+    // up to `len` bytes of `path` from `offset`, answered with FileChunk or FileError
+    ReadFile {
+        req: u64,
+        root: String,
+        path: String,
+        offset: u64,
+        len: u64,
+    },
+    // the project's files that best match `query`, answered with PathMatches
+    SearchPaths {
+        req: u64,
+        root: String,
+        query: String,
+        limit: u32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -733,6 +775,33 @@ pub enum ServerMsg {
     // the latest state of each of mux's mcp servers in each cli that has started it
     McpStatus {
         statuses: Vec<(String, Provider, McpState)>,
+    },
+    DirEntries {
+        req: u64,
+        dir: String,
+        entries: Vec<DirEntry>,
+        // the folder had more entries than are sent
+        truncated: bool,
+    },
+    FileChunk {
+        req: u64,
+        path: String,
+        // the whole file's size
+        total: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+        kind: FileKind,
+    },
+    // paths relative to the root, best match first
+    PathMatches {
+        req: u64,
+        query: String,
+        paths: Vec<String>,
+    },
+    // a listing or read that couldn't be done, with why
+    FileError {
+        req: u64,
+        error: String,
     },
 }
 

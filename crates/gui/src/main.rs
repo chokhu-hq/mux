@@ -35,6 +35,7 @@ mod crash;
 mod diffs;
 #[cfg(target_os = "linux")]
 mod drop;
+mod files_panel;
 mod install;
 mod link;
 mod logs;
@@ -185,7 +186,7 @@ const NUMBER_KEYS: [Key; 9] = [
     Key::Num9,
 ];
 
-const COMMANDS: [Command; 8] = [
+const COMMANDS: [Command; 9] = [
     Command::new("new-agent", "New agent session")
         .icon(icons::ROBOT)
         .shortcut(NEW_AGENT),
@@ -200,6 +201,7 @@ const COMMANDS: [Command; 8] = [
         .icon(icons::TERMINAL_WINDOW)
         .shortcut(TERMINAL),
     Command::new("pull-requests", "Pull requests").icon(icons::GIT_PULL_REQUEST),
+    Command::new("files", "Files").icon(icons::FOLDER_OPEN),
     Command::new("compact", "Compact conversation").icon(icons::ARROWS_IN_LINE_VERTICAL),
     Command::new("settings", "Open settings")
         .icon(icons::GEAR)
@@ -247,6 +249,12 @@ struct App {
     signins: Option<std::sync::mpsc::Receiver<(Provider, bool)>>,
     // the file opened from a chat link, kept while the panel slides shut
     viewer: Option<FileView>,
+    // the read the viewer is waiting on, when the server is reading its file
+    viewer_read: Option<u64>,
+    // the files panel, kept while it slides shut
+    files: Option<files_panel::FilesPanel>,
+    files_open: bool,
+    files_width: f32,
     viewer_open: bool,
     viewer_width: f32,
     // the terminal pane on the right, and which session last took focus in it
@@ -326,6 +334,10 @@ impl App {
             installed: None,
             signins: None,
             viewer: None,
+            viewer_read: None,
+            files: None,
+            files_open: false,
+            files_width: 900.0,
             viewer_open: false,
             viewer_width: 560.0,
             split_width: 520.0,
@@ -354,6 +366,7 @@ impl App {
     fn run(&mut self, ctx: &egui::Context, command: &str) {
         match command {
             "pull-requests" => self.toggle_prs(ctx),
+            "files" => self.toggle_files(),
             "new-agent" => self.sessions.create("New agent", SessionKind::Agent),
             "new-shell" => self.sessions.create("Shell", SessionKind::Shell),
             "new-group" => self.sessions.create_group_from_folder(),
@@ -636,11 +649,43 @@ impl App {
                 ImageViewer::open(ctx, vec![mux_core::paths::local(&path)], 0);
             }
             Some((path, lines)) => {
-                let path = mux_core::paths::local(&path);
+                // a file in the session's folder is read by the server, which may be in wsl
+                let checkout = self
+                    .sessions
+                    .selected_id()
+                    .and_then(|id| self.sessions.checkout(id))
+                    .and_then(|(_, dir)| dir);
+                let inside = checkout
+                    .iter()
+                    .map(String::as_str)
+                    .chain(folder)
+                    .find_map(|root| {
+                        let rest =
+                            path.strip_prefix(&format!("{}/", root.trim_end_matches('/')))?;
+                        Some((root.to_owned(), rest.to_owned()))
+                    });
+                let local = mux_core::paths::local(&path);
                 self.diffs = None;
-                self.viewer = Some(FileView::open(path, lines));
+                self.viewer_read = None;
+                self.viewer = Some(match inside {
+                    Some((root, rest)) => {
+                        let req = files_panel::next_req();
+                        self.viewer_read = Some(req);
+                        self.sessions.outbox.push(ClientMsg::ReadFile {
+                            req,
+                            root,
+                            path: rest,
+                            offset: 0,
+                            len: files_panel::CHUNK,
+                        });
+                        FileView::loading(local, lines)
+                    }
+                    // anywhere else, like the agent's own config, is read here as before
+                    None => FileView::open(local, lines),
+                });
                 self.viewer_open = true;
                 self.pr_open = false;
+                self.files_open = false;
             }
             None => {}
         }
@@ -1504,6 +1549,7 @@ impl App {
         self.viewer = Some(view);
         self.viewer_open = true;
         self.pr_open = false;
+        self.files_open = false;
     }
 
     // a diff or list that finished reading goes into the panel
@@ -1692,8 +1738,10 @@ impl eframe::App for App {
                         let mut sidebar = std::mem::take(&mut self.sidebar);
                         let main = sidebar.show(ui, |ui| self.sidebar_contents(ui));
                         self.sidebar = sidebar;
+                        self.file_replies();
                         let main = self.file_panel(ui, main);
                         let main = self.pr_panel(ui, main);
+                        let main = self.files_panel(ui, main);
                         let main = self.split_panel(ui, main);
                         let mut ui = ui.new_child(UiBuilder::new().max_rect(main));
                         ui.set_clip_rect(main.intersect(ui.clip_rect()));

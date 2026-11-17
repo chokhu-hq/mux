@@ -1,6 +1,14 @@
 use super::*;
 
 impl Server {
+    // files and git are read on a blocking thread, so a big folder never holds up the other sessions
+    fn reply(&self, client: u64, answer: impl FnOnce() -> ServerMsg + Send + 'static) {
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = events.send(Event::Reply(client, answer()));
+        });
+    }
+
     pub(super) fn message(&mut self, client: u64, msg: ClientMsg) {
         match msg {
             ClientMsg::Hello { .. } => {}
@@ -311,6 +319,46 @@ impl Server {
                 }
                 self.changed();
             }
+            ClientMsg::ListDir { req, root, dir } => self.reply(client, move || {
+                match files::list_dir(Path::new(&root), &dir) {
+                    Ok((entries, truncated)) => ServerMsg::DirEntries {
+                        req,
+                        dir,
+                        entries,
+                        truncated,
+                    },
+                    Err(error) => ServerMsg::FileError { req, error },
+                }
+            }),
+            ClientMsg::ReadFile {
+                req,
+                root,
+                path,
+                offset,
+                len,
+            } => self.reply(client, move || {
+                match files::read_file(Path::new(&root), &path, offset, len) {
+                    Ok(chunk) => ServerMsg::FileChunk {
+                        req,
+                        path,
+                        total: chunk.total,
+                        offset,
+                        bytes: chunk.bytes,
+                        kind: chunk.kind,
+                    },
+                    Err(error) => ServerMsg::FileError { req, error },
+                }
+            }),
+            ClientMsg::SearchPaths {
+                req,
+                root,
+                query,
+                limit,
+            } => self.reply(client, move || ServerMsg::PathMatches {
+                req,
+                paths: files::search(Path::new(&root), &query, limit.min(500) as usize),
+                query,
+            }),
             ClientMsg::RenameSession { id, title } => {
                 // a name given by hand stays, since only an agent still called "New agent" is named automatically
                 if let Some(info) = self.store.session_mut(id)

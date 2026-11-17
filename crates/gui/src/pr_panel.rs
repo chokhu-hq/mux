@@ -140,6 +140,7 @@ impl App {
         self.pr = Some(panel);
         self.pr_open = true;
         self.viewer_open = false;
+        self.files_open = false;
     }
 
     pub(crate) fn show_pr(&mut self, ctx: &egui::Context, session: u64, number: u64) {
@@ -152,6 +153,7 @@ impl App {
         self.pr = Some(panel);
         self.pr_open = true;
         self.viewer_open = false;
+        self.files_open = false;
     }
 
     // the pull requests panel, returning what's left of `main` for the session

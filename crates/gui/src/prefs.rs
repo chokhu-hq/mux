@@ -69,6 +69,9 @@ pub struct Prefs {
     // new builds download and go in place by themselves unless this is set, leaving only a restart
     #[serde(default)]
     pub manual_updates: bool,
+    // the folders left open in the files panel, by project folder
+    #[serde(default)]
+    pub expanded: std::collections::HashMap<String, Vec<String>>,
 }
 
 // what a new agent starts with, before anything is picked in its composer

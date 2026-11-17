@@ -60,6 +60,8 @@ pub struct Local {
     pub changes: (usize, usize, usize),
     // words being looked for in the chat
     pub find: mux_ui::chat::Find,
+    // comments left on the diff, sent with the next message
+    pub comments: Vec<mux_ui::DiffComment>,
 }
 
 impl Local {
@@ -383,6 +385,10 @@ impl Sessions {
         };
         let local = self.locals.entry(id).or_default();
         Some((info, local, &mut self.outbox, &self.models, folder))
+    }
+
+    pub fn local(&mut self, id: u64) -> &mut Local {
+        self.locals.entry(id).or_default()
     }
 
     pub fn selected_id(&self) -> Option<u64> {

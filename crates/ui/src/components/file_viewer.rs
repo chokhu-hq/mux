@@ -3,17 +3,23 @@ use std::sync::{Arc, Mutex};
 
 use egui::text::LayoutJob;
 use egui::{
-    Align2, Color32, CornerRadius, Galley, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2,
-    vec2,
+    Align2, Color32, CornerRadius, CursorIcon, Event, Frame, Galley, Key, Margin, Modifiers, Rect,
+    ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, pos2, vec2,
 };
 
-use super::{Button, IconButton, Size, TooltipExt};
+use super::{Button, Chip, DiffComment, IconButton, MenuItem, Size, TooltipExt, hover_t};
 use crate::icons;
-use crate::theme::{self, Palette, font, icon, space, text};
+use crate::theme::{self, Palette, font, icon, radius, space, text};
 
 // big enough for any source file, small enough to highlight without a stall
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const HEADER: f32 = 44.0;
+// the changed files column, and how wide the panel has to be before there's room for it
+const COLUMN: f32 = 220.0;
+const COLUMN_AT: f32 = 720.0;
+const FILE_ROW: f32 = 28.0;
+// room left under the last line for a comment field opened there
+const FIELD_ROOM: f32 = 140.0;
 
 pub enum FileViewAction {
     Close,
@@ -26,6 +32,60 @@ pub enum FileViewAction {
     Commit,
     // push the worktree's branch and open a pull request for it
     Push,
+    // open this one of the changed files
+    Open(usize),
+    Scope(DiffScope),
+    Comment(DiffComment),
+}
+
+// which changes the diff view compares against
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffScope {
+    // the working tree against the last commit
+    #[default]
+    Uncommitted,
+    // the working tree against where the branch left the default branch
+    Branch,
+    // only the hunks the agent showed in the chat
+    Agent,
+}
+
+impl DiffScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Uncommitted => "Uncommitted",
+            Self::Branch => "Branch",
+            Self::Agent => "Agent",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangedFile {
+    pub path: String,
+    // the path as listed, relative to the repository
+    pub name: String,
+    pub added: usize,
+    pub removed: usize,
+}
+
+// every changed file in the scope shown, listed beside the diff
+#[derive(Clone, Debug, Default)]
+pub struct DiffFiles {
+    pub files: Vec<ChangedFile>,
+    pub current: Option<usize>,
+    pub scope: DiffScope,
+    // what Branch compares against, offered only when there's one
+    pub base: Option<String>,
+    pub loading: bool,
+}
+
+// a comment being written on some lines of the diff, as rows of it
+struct Draft {
+    start: usize,
+    end: usize,
+    text: String,
+    focus: bool,
 }
 
 // commit and push for a worktree chat's changes, shown above its diffs
@@ -79,18 +139,39 @@ pub struct FileView {
     // which of the changed files this is, and how many there are
     pub step: Option<(usize, usize)>,
     pub git: Option<GitBar>,
+    pub files: Option<DiffFiles>,
+    // comments already left on this file, whose lines are marked
+    pub comments: Vec<DiffComment>,
+    // the rows a drag down the gutter has covered so far, where it started first
+    selecting: Option<(usize, usize)>,
+    draft: Option<Draft>,
 }
 
 impl FileView {
     pub fn open(path: String, lines: Option<(usize, usize)>) -> Self {
-        let content = read(&path).map(Arc::from);
+        Self {
+            content: read(&path).map(Arc::from),
+            ..Self::blank(path, lines)
+        }
+    }
+
+    // a diff still being read, shown until it arrives
+    pub fn pending(path: String) -> Self {
+        Self {
+            content: Err("Loading the diff…".to_owned()),
+            diff: Some(parse_diff("").1),
+            ..Self::blank(path, None)
+        }
+    }
+
+    fn blank(path: String, lines: Option<(usize, usize)>) -> Self {
         // prose reads better wrapped, code keeps its own line breaks
         let ext = extension(&path);
         let wrap = matches!(ext.as_str(), "md" | "markdown" | "txt" | "log" | "");
         Self {
             path,
             lines,
-            content,
+            content: Err(String::new()),
             colored: Arc::default(),
             coloring: None,
             wrap,
@@ -100,6 +181,10 @@ impl FileView {
             diff: None,
             step: None,
             git: None,
+            files: None,
+            comments: Vec::new(),
+            selecting: None,
+            draft: None,
         }
     }
 
@@ -120,8 +205,34 @@ impl FileView {
             content,
             lines: first.map(|line| (line, line)),
             diff: Some(diff),
-            ..Self::open(path, None)
+            ..Self::blank(path, None)
         }
+    }
+
+    // a comment is being written, so escape cancels it rather than closing the panel
+    pub fn commenting(&self) -> bool {
+        self.draft.is_some()
+    }
+
+    // the rows from `start` to `end` as a comment on this file
+    fn comment(&self, start: usize, end: usize, text: &str) -> Option<DiffComment> {
+        let (diff, Ok(content)) = (self.diff.as_ref()?, &self.content) else {
+            return None;
+        };
+        let lines: Vec<&str> = content.split('\n').collect();
+        let rows: Vec<(&DiffRow, &str)> = (start..=end)
+            .filter_map(|i| Some((diff.rows.get(i)?, *lines.get(i)?)))
+            .collect();
+        let (range, old, new, hunk) = review_hunk(&rows)?;
+        Some(DiffComment {
+            path: self.path.clone(),
+            file: self.path.clone(),
+            range,
+            old,
+            new,
+            text: text.trim().to_owned(),
+            diff: hunk,
+        })
     }
 
     // the line in the file itself to open an editor at
@@ -138,16 +249,31 @@ impl FileView {
 
     pub fn show(&mut self, ui: &mut Ui) -> Option<FileViewAction> {
         let p = theme::palette(ui);
-        let rect = ui.max_rect();
+        let mut rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0.0, p.bg);
         ui.painter().vline(
             rect.left() + 0.5,
             rect.y_range(),
             Stroke::new(1.0, p.border),
         );
+        // a narrow panel leaves the whole width to the diff, and the scope picker moves into its header
+        let mut action = None;
+        let column = self.files.is_some() && rect.width() >= COLUMN_AT;
+        if let Some(files) = self.files.as_ref().filter(|_| column) {
+            let list = Rect::from_min_size(rect.min, vec2(COLUMN, rect.height()));
+            action = files_column(ui, list, files);
+            rect.min.x = list.right();
+            ui.painter().vline(
+                rect.left() + 0.5,
+                rect.y_range(),
+                Stroke::new(1.0, p.border),
+            );
+        }
 
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER));
-        let action = self.header(ui, header.shrink2(vec2(space::MD, 0.0)));
+        let action = self
+            .header(ui, header.shrink2(vec2(space::MD, 0.0)), !column)
+            .or(action);
         ui.painter().hline(
             header.x_range(),
             header.bottom() - 0.5,
@@ -179,7 +305,11 @@ impl FileView {
         let mut body_ui = ui.new_child(UiBuilder::new().id_salt("body").max_rect(body));
         body_ui.set_clip_rect(body.intersect(ui.clip_rect()));
         match &self.content {
-            Ok(_) => self.code(&mut body_ui),
+            Ok(_) => {
+                if let Some(comment) = self.code(&mut body_ui) {
+                    return Some(FileViewAction::Comment(comment));
+                }
+            }
             Err(reason) => {
                 body_ui.painter().text(
                     body.center(),
@@ -193,9 +323,19 @@ impl FileView {
         action
     }
 
-    fn header(&self, ui: &mut Ui, rect: Rect) -> Option<FileViewAction> {
+    fn header(&self, ui: &mut Ui, mut rect: Rect, picker: bool) -> Option<FileViewAction> {
         let p = theme::palette(ui);
         let mut action = None;
+        if let Some(files) = self.files.as_ref().filter(|_| picker) {
+            let mut left = ui.new_child(
+                UiBuilder::new()
+                    .id_salt("header-scope")
+                    .max_rect(rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            action = scope_picker(&mut left, files).map(FileViewAction::Scope);
+            rect.min.x = left.min_rect().right() + space::SM;
+        }
         let mut row = ui.new_child(
             UiBuilder::new()
                 .id_salt("header")
@@ -333,13 +473,13 @@ impl FileView {
         action
     }
 
-    fn code(&mut self, ui: &mut Ui) {
+    fn code(&mut self, ui: &mut Ui) -> Option<DiffComment> {
         let p = theme::palette(ui);
         let size = text::MONO_SM;
         let dark = ui.visuals().dark_mode;
         let palette = *p;
         let Ok(content) = &self.content else {
-            return;
+            return None;
         };
         let content = content.clone();
         if self.coloring != Some(palette) {
@@ -444,10 +584,21 @@ impl FileView {
                     .horizontal_scroll_offset(0.0);
             }
         }
+        let field_id = ui.scope_id().with("comment-field");
+        // a click, the end of a drag, and the rows on screen with where each sits, read inside the scroll area
+        let mut clicked = None;
+        let mut spans: Vec<(usize, f32, f32)> = Vec::new();
+        let mut submit = false;
+        let mut cancel = false;
         area.show(ui, |ui| {
+            let room = if self.draft.is_some() {
+                FIELD_ROOM
+            } else {
+                0.0
+            };
             let total = vec2(
                 gutter + galley.size().x + space::LG,
-                galley.size().y + pad * 2.0,
+                galley.size().y + pad * 2.0 + room,
             );
             let (rect, _) = ui.allocate_exact_size(total.max(ui.available_size()), Sense::hover());
             let origin = pos2(rect.left() + gutter, rect.top() + pad);
@@ -455,6 +606,29 @@ impl FileView {
 
             if let Some(diff) = &self.diff {
                 paint_diff_rows(ui, &galley, &line_rows, diff, origin.y, visible);
+                let chosen = self
+                    .selecting
+                    .or(self.draft.as_ref().map(|d| (d.start, d.end)));
+                if let Some((a, b)) = chosen {
+                    let (a, b) = (a.min(b), a.max(b));
+                    let rows = &galley.rows;
+                    let first = line_rows.get(a).and_then(|&r| rows.get(r));
+                    let last = line_rows
+                        .get(b + 1)
+                        .map_or(rows.len(), |&r| r)
+                        .saturating_sub(1);
+                    if let (Some(first), Some(last)) = (first, rows.get(last)) {
+                        let band = Rect::from_min_max(
+                            pos2(visible.left(), origin.y + first.min_y()),
+                            pos2(visible.right(), origin.y + last.max_y()),
+                        );
+                        ui.painter().rect_filled(
+                            band,
+                            CornerRadius::ZERO,
+                            p.accent.gamma_multiply(0.16),
+                        );
+                    }
+                }
             } else if let Some((start, end)) = self.lines {
                 let rows = &galley.rows;
                 // the band runs to the row before the line after the range, so wrapped lines are covered whole
@@ -500,6 +674,61 @@ impl FileView {
                     let Some(row) = diff.rows.get(i) else {
                         continue;
                     };
+                    // the line's whole height, wrapped rows and all, picks it for a comment
+                    let next = line_rows
+                        .get(i + 1)
+                        .map_or(galley.rows.len(), |&r| r)
+                        .saturating_sub(1);
+                    let line_bottom = galley
+                        .rows
+                        .get(next)
+                        .map_or(bottom, |r| origin.y + r.max_y());
+                    let numbers =
+                        Rect::from_min_max(pos2(left, top), pos2(left + gutter, line_bottom));
+                    if self.comments.iter().any(|c| c.covers(row.old, row.new)) {
+                        ui.painter().rect_filled(
+                            numbers,
+                            CornerRadius::ZERO,
+                            p.accent.gamma_multiply(0.14),
+                        );
+                        ui.painter().vline(
+                            left + 1.5,
+                            numbers.y_range(),
+                            Stroke::new(3.0, p.accent),
+                        );
+                    }
+                    if row.kind != RowKind::Hunk {
+                        spans.push((i, top, line_bottom));
+                        let line = row.new.or(row.old).unwrap_or_default();
+                        let label = match row.kind {
+                            RowKind::Add => format!("Added line {line}"),
+                            RowKind::Remove => format!("Removed line {line}"),
+                            _ => format!("Line {line}"),
+                        };
+                        let response = ui
+                            .interact(
+                                numbers,
+                                ui.scope_id().with(("gutter", i)),
+                                Sense::click_and_drag(),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+                        });
+                        if response.hovered() && self.selecting.is_none() {
+                            ui.painter().rect_filled(
+                                numbers,
+                                CornerRadius::ZERO,
+                                theme::tint(p, theme::fill::HOVER),
+                            );
+                        }
+                        if response.drag_started() {
+                            self.selecting = Some((i, i));
+                        }
+                        if response.clicked() {
+                            clicked = Some(i);
+                        }
+                    }
                     let number = |n: Option<usize>| n.map(|n| n.to_string()).unwrap_or_default();
                     let mono = font::mono(size);
                     ui.painter().text(
@@ -549,8 +778,344 @@ impl FileView {
                 Rect::from_min_size(origin, galley.size()),
                 egui::Label::new(galley.clone()).selectable(true),
             );
+            // drawn after the code so it sits over the lines below the ones it's about
+            if let Some(draft) = &mut self.draft {
+                let rows = &galley.rows;
+                let last = line_rows
+                    .get(draft.end + 1)
+                    .map_or(rows.len(), |&r| r)
+                    .saturating_sub(1);
+                let y = rows.get(last).map_or(origin.y, |r| origin.y + r.max_y()) + space::XS;
+                let x = visible.left().max(rect.left()) + gutter;
+                let width = (visible.right() - x - space::LG).clamp(160.0, 520.0);
+                let mut field_ui = ui.new_child(
+                    UiBuilder::new()
+                        .id_salt("comment")
+                        .max_rect(Rect::from_min_size(pos2(x, y), vec2(width, FIELD_ROOM))),
+                );
+                (submit, cancel) = comment_field(&mut field_ui, field_id, draft);
+            }
+        });
+        // a drag down the gutter covers every line the pointer passes over
+        if let Some((_, end)) = &mut self.selecting
+            && let Some(y) = ui.input(|i| i.pointer.interact_pos()).map(|p| p.y)
+            && let Some(&(i, _, _)) = spans
+                .iter()
+                .find(|(_, top, bottom)| (*top..*bottom).contains(&y))
+                .or_else(|| spans.first().filter(|(_, top, _)| y < *top))
+                .or_else(|| spans.last().filter(|(_, _, bottom)| y >= *bottom))
+        {
+            *end = i;
+        }
+        let shift = ui.input(|i| i.modifiers.shift);
+        if let Some(i) = clicked {
+            self.selecting = None;
+            // shift extends from where the open comment starts, the way a shift click extends a selection
+            let start = match &self.draft {
+                Some(draft) if shift => draft.start,
+                _ => i,
+            };
+            let text = self.draft.take().map(|d| d.text).unwrap_or_default();
+            self.draft = Some(Draft {
+                start: start.min(i),
+                end: start.max(i),
+                text,
+                focus: true,
+            });
+        } else if !ui.input(|i| i.pointer.primary_down())
+            && let Some((a, b)) = self.selecting.take()
+        {
+            let text = self.draft.take().map(|d| d.text).unwrap_or_default();
+            self.draft = Some(Draft {
+                start: a.min(b),
+                end: a.max(b),
+                text,
+                focus: true,
+            });
+        }
+        if cancel || (self.draft.is_some() && ui.input(|i| i.key_pressed(Key::Escape))) {
+            self.draft = None;
+            return None;
+        }
+        if submit && let Some(draft) = self.draft.take() {
+            return self.comment(draft.start, draft.end, &draft.text);
+        }
+        None
+    }
+}
+
+// the small field under commented lines, returning whether it was added or cancelled this frame
+fn comment_field(ui: &mut Ui, id: egui::Id, draft: &mut Draft) -> (bool, bool) {
+    let p = theme::palette(ui);
+    let focused = ui.memory(|m| m.has_focus(id));
+    // enter adds the comment and shift+enter starts a new line, as in the composer
+    let mut submit = focused
+        && ui.input_mut(|i| {
+            let before = i.events.len();
+            i.events.retain(|e| {
+                !matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. }
+                    if !modifiers.shift && modifiers.matches_logically(Modifiers::NONE))
+            });
+            i.events.len() != before
+        });
+    let mut cancel = false;
+    theme::floating(ui)
+        .inner_margin(Margin::same(space::SM as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let field = ui.add(
+                TextEdit::multiline(&mut draft.text)
+                    .id(id)
+                    .frame(Frame::NONE)
+                    .hint_text("Comment for the agent")
+                    .font(font::regular(text::MD))
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .margin(Margin::ZERO),
+            );
+            if std::mem::take(&mut draft.focus) {
+                field.request_focus();
+            }
+            ui.add_space(space::XS);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Enter to add, Esc to cancel")
+                        .font(font::regular(text::SM))
+                        .color(p.text_faint),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ready = !draft.text.trim().is_empty();
+                    submit |= Button::new("Comment")
+                        .primary()
+                        .size(Size::Sm)
+                        .enabled(ready)
+                        .show(ui)
+                        .clicked();
+                    cancel = Button::new("Cancel")
+                        .ghost()
+                        .size(Size::Sm)
+                        .show(ui)
+                        .clicked();
+                });
+            });
+        });
+    (submit && !draft.text.trim().is_empty(), cancel)
+}
+
+// which changes to show, as a chip that opens a menu
+fn scope_picker(ui: &mut Ui, files: &DiffFiles) -> Option<DiffScope> {
+    let mut picked = None;
+    let chip = Chip::new(files.scope.label())
+        .icon(icons::GIT_DIFF)
+        .show(ui)
+        .tip("Which changes to show");
+    let branch = files
+        .base
+        .as_ref()
+        .map(|base| format!("Everything since {base}"));
+    egui::Popup::menu(&chip).gap(space::XS).show(|ui| {
+        ui.set_width(260.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let scopes = [
+            (DiffScope::Uncommitted, "Changes since the last commit"),
+            (DiffScope::Branch, branch.as_deref().unwrap_or_default()),
+            (DiffScope::Agent, "What the agent showed in this chat"),
+        ];
+        for (scope, detail) in scopes {
+            if scope == DiffScope::Branch && branch.is_none() {
+                continue;
+            }
+            if MenuItem::new(scope.label())
+                .detail(detail)
+                .checked(files.scope == scope)
+                .show(ui)
+                .clicked()
+            {
+                picked = Some(scope).filter(|s| *s != files.scope);
+                ui.close();
+            }
+        }
+    });
+    picked
+}
+
+// the changed files down the left of the diff, the open one lit, with the scope picker above them
+fn files_column(ui: &mut Ui, rect: Rect, files: &DiffFiles) -> Option<FileViewAction> {
+    let p = theme::palette(ui);
+    let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER));
+    let mut head = ui.new_child(
+        UiBuilder::new()
+            .id_salt("files-header")
+            .max_rect(header.shrink2(vec2(space::SM, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let mut action = scope_picker(&mut head, files).map(FileViewAction::Scope);
+    if !files.files.is_empty() {
+        head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(files.files.len().to_string())
+                    .font(font::regular(text::SM + 1.0))
+                    .color(p.text_faint),
+            );
         });
     }
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
+    let mut list = ui.new_child(UiBuilder::new().id_salt("files-list").max_rect(body));
+    list.set_clip_rect(body.intersect(ui.clip_rect()));
+    if files.files.is_empty() {
+        let note = if files.loading {
+            "Loading…"
+        } else {
+            "No changes"
+        };
+        list.painter().text(
+            pos2(body.center().x, body.top() + space::XL),
+            Align2::CENTER_TOP,
+            note,
+            font::regular(text::SM + 1.0),
+            p.text_faint,
+        );
+        return action;
+    }
+    ScrollArea::vertical()
+        .id_salt("changed-files")
+        .auto_shrink(false)
+        .show(&mut list, |ui| {
+            ui.add_space(space::XS);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (i, file) in files.files.iter().enumerate() {
+                if file_row(ui, file, files.current == Some(i)) {
+                    action = Some(FileViewAction::Open(i));
+                }
+            }
+            ui.add_space(space::XS);
+        });
+    action
+}
+
+// one changed file: its name, its folder faint after it, and the lines added and removed
+fn file_row(ui: &mut Ui, file: &ChangedFile, current: bool) -> bool {
+    let p = theme::palette(ui);
+    let (outer, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), FILE_ROW), Sense::click());
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, current, &file.name));
+    let rect = outer.shrink2(vec2(space::XS, 1.0));
+    let t = hover_t(ui, &response);
+    let fill = if current {
+        theme::tint(p, theme::fill::SELECTED)
+    } else {
+        p.hover.gamma_multiply(t)
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(radius::MD), fill);
+    let y = rect.center().y;
+    let small = font::medium(text::SM);
+    let minus = ui
+        .painter()
+        .layout_no_wrap(format!("−{}", file.removed), small.clone(), p.danger);
+    let plus = ui
+        .painter()
+        .layout_no_wrap(format!("+{}", file.added), small, p.success);
+    let mut right = rect.right() - space::SM;
+    right -= minus.size().x;
+    let minus_x = right;
+    right -= space::XS + plus.size().x;
+    let plus_x = right;
+    ui.painter()
+        .galley(pos2(minus_x, y - minus.size().y / 2.0), minus, p.danger);
+    ui.painter()
+        .galley(pos2(plus_x, y - plus.size().y / 2.0), plus, p.success);
+    let (name, folder) = match file.name.rsplit_once('/') {
+        Some((folder, name)) => (name, folder),
+        None => (file.name.as_str(), ""),
+    };
+    let left = rect.left() + space::SM;
+    let room = plus_x - space::SM - left;
+    let name = super::elided(
+        ui,
+        name,
+        font::regular(text::SM + 1.0),
+        if current { p.text } else { p.text_muted },
+        room,
+    );
+    let name_width = name.size().x;
+    ui.painter()
+        .galley(pos2(left, y - name.size().y / 2.0), name, p.text);
+    let folder_room = room - name_width - space::XS;
+    if !folder.is_empty() && folder_room > 24.0 {
+        let folder = super::elided(
+            ui,
+            folder,
+            font::regular(text::SM),
+            p.text_faint,
+            folder_room,
+        );
+        ui.painter().galley(
+            pos2(left + name_width + space::XS, y - folder.size().y / 2.0),
+            folder,
+            p.text_faint,
+        );
+    }
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    response.clicked()
+}
+
+// the commented rows as a hunk of their own, with the range people read and the old and new lines it spans
+#[allow(clippy::type_complexity)]
+fn review_hunk(
+    rows: &[(&DiffRow, &str)],
+) -> Option<(
+    String,
+    Option<(usize, usize)>,
+    Option<(usize, usize)>,
+    String,
+)> {
+    let rows: Vec<&(&DiffRow, &str)> = rows
+        .iter()
+        .filter(|(r, _)| r.kind != RowKind::Hunk)
+        .collect();
+    let (first, last) = (rows.first()?.0, rows.last()?.0);
+    let span = |side: fn(&DiffRow) -> Option<usize>| {
+        let numbers: Vec<usize> = rows.iter().filter_map(|(r, _)| side(r)).collect();
+        Some((*numbers.first()?, *numbers.last()?))
+    };
+    let (old, new) = (span(|r| r.old), span(|r| r.new));
+    let count = |range: Option<(usize, usize)>| range.map_or(0, |(a, b)| b + 1 - a);
+    let start = |range: Option<(usize, usize)>| range.map_or(0, |(a, _)| a);
+    let mut hunk = format!(
+        "@@ -{},{} +{},{} @@",
+        start(old),
+        count(old),
+        start(new),
+        count(new)
+    );
+    for (row, text) in &rows {
+        hunk.push('\n');
+        hunk.push(match row.kind {
+            RowKind::Add => '+',
+            RowKind::Remove => '-',
+            _ => ' ',
+        });
+        hunk.push_str(text);
+    }
+    let marker = match first.kind {
+        RowKind::Add if rows.iter().all(|(r, _)| r.kind == RowKind::Add) => "+",
+        RowKind::Remove if rows.iter().all(|(r, _)| r.kind == RowKind::Remove) => "-",
+        _ => "",
+    };
+    let (a, b) = (first.new.or(first.old)?, last.new.or(last.old)?);
+    let range = if rows.len() == 1 || a == b {
+        format!("{marker}{a}")
+    } else {
+        format!("{marker}{a} to {marker}{b}")
+    };
+    Some((range, old, new, hunk))
 }
 
 // added and removed lines get a wash of green or red across the whole row, hunk starts a quiet grey
@@ -783,7 +1348,7 @@ pub fn open_in_editor(path: &str, line: Option<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowKind, link_target, parse_diff, split_lines};
+    use super::{RowKind, link_target, parse_diff, review_hunk, split_lines};
 
     #[test]
     fn reads_a_unified_diff_into_numbered_rows() {
@@ -818,6 +1383,24 @@ mod tests {
             ]
         );
         assert_eq!((diff.added, diff.removed), (2, 1));
+    }
+
+    #[test]
+    fn turns_commented_rows_into_a_hunk_of_their_own() {
+        let unified = "@@ -10,3 +10,4 @@ pub fn auth()\n let a = 1;\n-let b = 2;\n+let b = 3;\n+let c = 4;\n let d = 5;\n";
+        let (text, diff) = parse_diff(unified);
+        let lines: Vec<&str> = text.split('\n').collect();
+        let rows: Vec<_> = diff.rows.iter().zip(lines).collect();
+        let (range, old, new, hunk) = review_hunk(&rows[3..5]).unwrap();
+        assert_eq!(range, "+11 to +12");
+        assert_eq!((old, new), (None, Some((11, 12))));
+        assert_eq!(hunk, "@@ -0,0 +11,2 @@\n+let b = 3;\n+let c = 4;");
+        // the hunk's own @@ row is left out, and mixed lines carry no sign in their range
+        let (range, old, new, hunk) = review_hunk(&rows[0..3]).unwrap();
+        assert_eq!(range, "10 to 11");
+        assert_eq!((old, new), (Some((10, 11)), Some((10, 10))));
+        assert_eq!(hunk, "@@ -10,2 +10,1 @@\n let a = 1;\n-let b = 2;");
+        assert_eq!(review_hunk(&rows[2..3]).unwrap().0, "-11");
     }
 
     #[test]

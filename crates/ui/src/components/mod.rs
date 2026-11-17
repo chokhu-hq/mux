@@ -5,6 +5,7 @@ mod chip;
 mod command_palette;
 pub(crate) mod context_menu;
 mod context_ring;
+mod diff_comment;
 mod empty_state;
 mod file_viewer;
 mod group_header;
@@ -32,8 +33,12 @@ pub use command_palette::{
 };
 pub use context_menu::{area_menu, copy_item, edit_menu};
 pub use context_ring::{ContextRing, tokens as short_tokens};
+pub use diff_comment::{DiffComment, strip as comment_strip, with_comments};
 pub use empty_state::EmptyState;
-pub use file_viewer::{FileView, FileViewAction, GitBar, link_target, open_in_editor};
+pub use file_viewer::{
+    ChangedFile, DiffFiles, DiffScope, FileView, FileViewAction, GitBar, link_target,
+    open_in_editor,
+};
 pub use group_header::{GroupHeader, GroupHeaderResponse};
 pub use icon::Icon;
 pub use icon_button::IconButton;

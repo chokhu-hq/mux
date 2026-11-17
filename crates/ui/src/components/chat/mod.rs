@@ -216,6 +216,7 @@ pub struct ChatView<'a> {
     trailing: Option<Controls<'a>>,
     context: Option<ContextUsage>,
     attachments: Option<&'a mut Vec<String>>,
+    comments: Option<&'a mut Vec<crate::components::DiffComment>>,
     dropping: bool,
     commands: &'a [SlashCommand],
     files: Option<&'a Arc<[String]>>,
@@ -237,6 +238,7 @@ impl<'a> ChatView<'a> {
             trailing: None,
             context: None,
             attachments: None,
+            comments: None,
             dropping: false,
             commands: &[],
             files: None,
@@ -284,6 +286,12 @@ impl<'a> ChatView<'a> {
 
     pub fn attachments(mut self, attachments: &'a mut Vec<String>) -> Self {
         self.attachments = Some(attachments);
+        self
+    }
+
+    // comments left on the diff, shown above the composer until they go with the next message
+    pub fn comments(mut self, comments: &'a mut Vec<crate::components::DiffComment>) -> Self {
+        self.comments = Some(comments);
         self
     }
 
@@ -360,7 +368,15 @@ impl<'a> ChatView<'a> {
                 _ => None,
             })
             .collect();
+        let commented = match self.comments {
+            Some(comments) => {
+                crate::components::comment_strip(&mut bottom, comments);
+                !comments.is_empty()
+            }
+            None => false,
+        };
         let mut input = Composer::new(self.draft)
+            .extras(commented)
             .running(self.running)
             .context(self.context)
             .commands(self.commands)

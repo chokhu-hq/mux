@@ -223,6 +223,7 @@ pub(crate) fn agent_chat(
         .queue(&local.queue, local.held)
         .background(&local.background)
         .attachments(&mut local.attachments)
+        .comments(&mut local.comments)
         .dropping(dropping)
         .running(local.busy)
         .reset(reset)
@@ -264,6 +265,7 @@ pub(crate) fn agent_chat(
     }
     match action {
         Some(ChatAction::Send(text)) => {
+            let text = mux_ui::with_comments(&text, &std::mem::take(&mut local.comments));
             // a file moved or deleted since it was attached is left out rather than failing the turn
             let mut attachments = std::mem::take(&mut local.attachments);
             attachments.retain(|path| std::path::Path::new(path).exists());

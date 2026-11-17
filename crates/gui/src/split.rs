@@ -66,6 +66,7 @@ impl App {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         let agent = info.kind == SessionKind::Agent;
+        let worktree = info.worktree.clone();
         if agent {
             let (mark, _) =
                 head.allocate_exact_size(vec2(icon::MD, icon::MD), egui::Sense::hover());
@@ -142,17 +143,16 @@ impl App {
                 Some(ChatAction::OpenDiff(index)) => {
                     let chat = self.sessions.split_session(id).map(|s| &s.1.chat);
                     if let Some(chat) = chat {
-                        self.diffs = changed_files(chat, folder.as_deref());
+                        let agent = changed_files(chat, folder.as_deref());
                         let clicked = match chat.get(index) {
                             Some(ChatItem::Diff(diff)) => {
                                 Some(resolve(&diff.path, folder.as_deref()))
                             }
                             _ => None,
                         };
-                        if let Some(at) =
-                            clicked.and_then(|p| self.diffs.iter().position(|d| d.0 == p))
-                        {
-                            self.show_diff(at);
+                        if let Some(path) = clicked {
+                            let dir = worktree.or(folder.clone());
+                            self.open_diffs(&ctx, id, dir, agent, path);
                         }
                     }
                 }
@@ -195,7 +195,8 @@ impl App {
     // the file viewer on the right, returning what's left of `main` for the session
     pub(crate) fn file_panel(&mut self, ui: &mut egui::Ui, main: Rect) -> Rect {
         let ctx = ui.ctx().clone();
-        if self.viewer_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let commenting = self.viewer.as_ref().is_some_and(FileView::commenting);
+        if self.viewer_open && !commenting && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.viewer_open = false;
         }
         let open = self.viewer_open && self.viewer.is_some();
@@ -204,6 +205,7 @@ impl App {
         if t <= 0.001 {
             if !open {
                 self.viewer = None;
+                self.diffs = None;
             }
             return main;
         }
@@ -233,6 +235,18 @@ impl App {
         let mut panel_ui = ui.new_child(UiBuilder::new().id_salt("file-panel").max_rect(panel));
         panel_ui.set_clip_rect(panel.intersect(main).intersect(ui.clip_rect()));
         self.poll_push(&ctx);
+        self.poll_diffs();
+        // the lines already commented on in this file are marked
+        if let (Some(view), Some(diffs)) = (&mut self.viewer, &self.diffs) {
+            view.comments = self
+                .sessions
+                .local(diffs.session)
+                .comments
+                .iter()
+                .filter(|c| c.path == view.path)
+                .cloned()
+                .collect();
+        }
         if let (Some(view), Some(ship)) = (&mut self.viewer, &self.ship)
             && let Some(git) = &mut view.git
         {
@@ -269,12 +283,31 @@ impl App {
                     }
                 }
                 FileViewAction::Step(by) => {
-                    let count = self.diffs.len() as isize;
-                    if count > 0 {
-                        let at = (self.diff_index as isize + by).rem_euclid(count);
-                        self.show_diff(at as usize);
+                    if let Some(diffs) = &mut self.diffs {
+                        diffs.step(&ctx, by);
                     }
                 }
+                FileViewAction::Open(index) => {
+                    if let Some(diffs) = &mut self.diffs {
+                        diffs.select(&ctx, index);
+                    }
+                }
+                FileViewAction::Scope(scope) => {
+                    if let Some(diffs) = &mut self.diffs {
+                        diffs.set_scope(&ctx, scope);
+                    }
+                }
+                FileViewAction::Comment(mut comment) => {
+                    if let Some(diffs) = &self.diffs {
+                        comment.file = diffs.relative(&comment.path);
+                        self.sessions.local(diffs.session).comments.push(comment);
+                    }
+                }
+            }
+            // a new file or scope is lit in the list at once, while its diff is still being read
+            if let (Some(view), Some(diffs)) = (&mut self.viewer, &self.diffs) {
+                view.files = Some(diffs.files.clone());
+                view.step = diffs.step_shown();
             }
         }
         Rect::from_min_max(main.min, pos2(edge, main.bottom()))

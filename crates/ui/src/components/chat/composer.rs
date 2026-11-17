@@ -40,6 +40,7 @@ pub struct Composer<'a> {
     files: Option<&'a Arc<[String]>>,
     history: &'a [&'a str],
     queued: bool,
+    extras: bool,
 }
 
 impl<'a> Composer<'a> {
@@ -56,6 +57,7 @@ impl<'a> Composer<'a> {
             files: None,
             history: &[],
             queued: false,
+            extras: false,
         }
     }
 
@@ -79,6 +81,12 @@ impl<'a> Composer<'a> {
     // whether messages are waiting, which up takes back before reaching the history
     pub fn queued(mut self, queued: bool) -> Self {
         self.queued = queued;
+        self
+    }
+
+    // something besides the text goes with the message, so it can be sent with nothing typed
+    pub fn extras(mut self, extras: bool) -> Self {
+        self.extras = extras;
         self
     }
 
@@ -146,7 +154,7 @@ impl<'a> Composer<'a> {
             }
         }
         // a message can be just the files, with nothing typed
-        let has_files = self.attachments.as_ref().is_some_and(|a| !a.is_empty());
+        let has_files = self.extras || self.attachments.as_ref().is_some_and(|a| !a.is_empty());
         // the slash menu reads its keys first, so enter picks a command rather than sending
         let mut picked = None;
         if !self.commands.is_empty() || self.files.is_some_and(|f| !f.is_empty()) {

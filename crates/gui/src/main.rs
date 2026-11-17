@@ -32,6 +32,7 @@ mod blur;
 mod chat;
 mod connection;
 mod crash;
+mod diffs;
 #[cfg(target_os = "linux")]
 mod drop;
 mod install;
@@ -250,9 +251,8 @@ struct App {
     split_focused: Option<u64>,
     // what the pane last showed, kept while it fades out after closing
     split_shown: Option<u64>,
-    // every file changed in the open chat, with the agent's own hunks for when git can't say, and the one shown
-    diffs: Vec<(String, String)>,
-    diff_index: usize,
+    // the changes open in the file panel, listed by scope with the one shown
+    diffs: Option<diffs::Diffs>,
     // the worktree chat whose diffs are open, which can commit and push from the viewer
     ship: Option<ship::Ship>,
     // the title bar's changes were clicked, so the next frame opens the diff panel
@@ -321,8 +321,7 @@ impl App {
             split_width: 520.0,
             split_focused: None,
             split_shown: None,
-            diffs: Vec::new(),
-            diff_index: 0,
+            diffs: None,
             ship: None,
             review: false,
             opened: std::sync::mpsc::channel(),
@@ -561,16 +560,16 @@ impl App {
                 }
                 Some(ChatAction::UseReset) => self.sessions.use_reset(Provider::Codex),
                 Some(ChatAction::OpenDiff(index)) => {
-                    self.diffs = changed_files(&local.chat, folder.as_deref());
-                    // only a chat's own worktree is safe to commit and push from, never the project's checkout
-                    self.ship = worktree.map(|w| ship::Ship::new(id, w));
+                    let agent = changed_files(&local.chat, folder.as_deref());
                     let clicked = match local.chat.get(index) {
                         Some(ChatItem::Diff(diff)) => Some(resolve(&diff.path, folder.as_deref())),
                         _ => None,
                     };
-                    if let Some(at) = clicked.and_then(|p| self.diffs.iter().position(|d| d.0 == p))
-                    {
-                        self.show_diff(at);
+                    let dir = worktree.clone().or(folder.clone());
+                    // only a chat's own worktree is safe to commit and push from, never the project's checkout
+                    self.ship = worktree.map(|w| ship::Ship::new(id, w));
+                    if let Some(path) = clicked {
+                        self.open_diffs(ui.ctx(), id, dir, agent, path);
                     }
                 }
                 Some(ChatAction::Command(name)) if name == "mcp" => *run = Some("mcp"),
@@ -622,6 +621,7 @@ impl App {
             }
             Some((path, lines)) => {
                 let path = mux_core::paths::local(&path);
+                self.diffs = None;
                 self.viewer = Some(FileView::open(path, lines));
                 self.viewer_open = true;
             }
@@ -966,14 +966,14 @@ fn changed_files(chat: &[ChatItem], folder: Option<&str>) -> Vec<(String, String
 
 // the file's changes since the last commit, falling back to the agent's own hunks outside a repository
 // git runs where the server does, so it reads the same repository the agent changed
-fn file_diff(path: &str, fallback: &str) -> String {
+fn file_diff(path: &str, against: &str, fallback: &str) -> String {
     let dir = mux_core::paths::parent(path);
     let git = |args: &[&str]| mux_core::git(mux_core::paths::command("git"), &dir, args);
     let text = |out: Vec<u8>| String::from_utf8_lossy(&out).into_owned();
     if git(&["rev-parse", "--is-inside-work-tree"]).is_err() {
         return fallback.to_owned();
     }
-    if let Ok(out) = git(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path])
+    if let Ok(out) = git(&["diff", "--no-color", "--no-ext-diff", against, "--", path])
         && !out.is_empty()
     {
         return text(out);
@@ -1469,16 +1469,42 @@ impl App {
         }
     }
 
-    fn show_diff(&mut self, index: usize) {
-        let Some((path, fallback)) = self.diffs.get(index) else {
-            return;
-        };
-        let mut view = FileView::diff(mux_core::paths::local(path), &file_diff(path, fallback));
-        view.step = Some((index, self.diffs.len()));
-        view.git = self.ship.as_ref().map(|_| mux_ui::GitBar::default());
+    // opens the diff panel on a file the chat changed, with git read in the background
+    fn open_diffs(
+        &mut self,
+        ctx: &egui::Context,
+        session: u64,
+        dir: Option<String>,
+        agent: Vec<(String, String)>,
+        path: String,
+    ) {
+        // wide enough for the changed files beside the diff, where the window has room
+        self.viewer_width = self.viewer_width.max(820.0);
+        let diffs = diffs::Diffs::open(ctx, session, dir, agent, path.clone());
+        let mut view = FileView::pending(mux_core::paths::local(&path));
+        view.files = Some(diffs.files.clone());
+        self.diffs = Some(diffs);
         self.viewer = Some(view);
         self.viewer_open = true;
-        self.diff_index = index;
+    }
+
+    // a diff or list that finished reading goes into the panel
+    fn poll_diffs(&mut self) {
+        let Some(diffs) = &mut self.diffs else {
+            return;
+        };
+        let (listed, diff) = diffs.poll();
+        if let Some(unified) = &diff {
+            let mut view = FileView::diff(mux_core::paths::local(&diffs.path), unified);
+            view.git = self.ship.as_ref().map(|_| mux_ui::GitBar::default());
+            self.viewer = Some(view);
+        }
+        if (listed || diff.is_some())
+            && let Some(view) = &mut self.viewer
+        {
+            view.files = Some(diffs.files.clone());
+            view.step = diffs.step_shown();
+        }
     }
 
     fn take_drops(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {

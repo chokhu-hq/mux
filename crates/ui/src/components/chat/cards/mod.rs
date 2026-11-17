@@ -68,7 +68,7 @@ fn rotated(ui: &Ui, center: Pos2, icon: char, size: f32, angle: f32, color: Colo
     );
 }
 
-pub(super) fn spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
+pub fn spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
     if motion::reduced(ui.ctx()) {
         glyph(ui, center, icons::SPINNER, size, color);
         return;

@@ -14,7 +14,7 @@ use egui::{Rect, ScrollArea, Sense, Ui, UiBuilder, pos2};
 use mux_core::protocol::ContextUsage;
 
 pub use attachments::open_externally;
-pub use cards::thinking;
+pub use cards::{spinner, thinking};
 pub use composer::{Composer, ComposerAction, Controls};
 pub use find::{Find, SHORTCUT as FIND_SHORTCUT};
 pub use markdown::markdown;

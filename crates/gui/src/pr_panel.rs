@@ -1,7 +1,7 @@
 use std::sync::mpsc::Receiver;
 
 use mux_core::protocol::PrLink;
-use mux_ui::{Badge, Button, DiffComment, Segmented, Size, TextInput, Tone};
+use mux_ui::{Badge, Button, DiffComment, EmptyState, Segmented, TextInput, Tone};
 
 use super::*;
 use crate::pr::{self, Check, CheckState, Filter, Inline, Merge, Note, Pr, Summary, Write};
@@ -213,6 +213,7 @@ impl App {
             },
             Some(PanelAction::Filter(filter)) => {
                 state.filter = filter;
+                state.list = None;
                 state.fetch_list(&ctx);
             }
             Some(PanelAction::Open(number, url)) => {
@@ -255,13 +256,8 @@ fn draw(ui: &mut egui::Ui, state: &mut PrPanel) -> Option<PanelAction> {
         panel.y_range(),
         egui::Stroke::new(1.0, p.border),
     );
-    let header = Rect::from_min_size(panel.min, vec2(panel.width(), FOOTER_ROW + space::SM));
+    let header = Rect::from_min_size(panel.min, vec2(panel.width(), theme::control::HEADER));
     let mut action = header_row(ui, header, state);
-    ui.painter().hline(
-        header.x_range(),
-        header.bottom() - 0.5,
-        egui::Stroke::new(1.0, p.border),
-    );
     let body = Rect::from_min_max(pos2(panel.left() + 1.0, header.bottom()), panel.max);
     let mut body_ui = ui.new_child(UiBuilder::new().id_salt("pr-body").max_rect(body));
     body_ui.set_clip_rect(body.intersect(ui.clip_rect()));
@@ -276,39 +272,12 @@ fn draw(ui: &mut egui::Ui, state: &mut PrPanel) -> Option<PanelAction> {
 fn header_row(ui: &mut egui::Ui, rect: Rect, state: &PrPanel) -> Option<PanelAction> {
     let p = theme::palette(ui);
     let mut action = None;
-    let mut row = ui.new_child(
-        UiBuilder::new()
-            .id_salt("pr-header")
-            .max_rect(rect.shrink2(vec2(space::MD, 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    row.spacing_mut().item_spacing.x = space::SM;
-    if state.number.is_some() {
-        if IconButton::new(icons::CARET_LEFT, "All pull requests")
-            .show(&mut row)
-            .tip("All pull requests")
-            .clicked()
-        {
-            action = Some(PanelAction::Back);
-        }
-    } else {
-        row.label(
-            egui::RichText::new(icons::GIT_PULL_REQUEST.to_string())
-                .font(font::icon(icon::MD))
-                .color(p.text_faint),
-        );
-    }
-    let title = match state.number {
-        Some(number) => format!("Pull request #{number}"),
-        None => "Pull requests".to_owned(),
+    let url = match &state.pr {
+        Some(Ok(pr)) => Some(pr.url.clone()),
+        _ => None,
     };
-    row.label(
-        egui::RichText::new(title)
-            .font(font::medium(text::MD))
-            .color(p.text_muted),
-    );
-    row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = space::XS;
+    let loading = state.loading.is_some() || state.listing.is_some();
+    let mut row = panel_header(ui, rect, "pr-header", |ui| {
         if IconButton::new(icons::X, "Close")
             .show(ui)
             .tip("Close")
@@ -316,10 +285,6 @@ fn header_row(ui: &mut egui::Ui, rect: Rect, state: &PrPanel) -> Option<PanelAct
         {
             action = Some(PanelAction::Close);
         }
-        let url = match &state.pr {
-            Some(Ok(pr)) => Some(pr.url.clone()),
-            _ => None,
-        };
         if let Some(url) = url
             && IconButton::new(icons::ARROW_SQUARE_OUT, "Open on GitHub")
                 .show(ui)
@@ -328,7 +293,6 @@ fn header_row(ui: &mut egui::Ui, rect: Rect, state: &PrPanel) -> Option<PanelAct
         {
             action = Some(PanelAction::Url(url));
         }
-        let loading = state.loading.is_some() || state.listing.is_some();
         if IconButton::new(icons::ARROW_CLOCKWISE, "Refresh")
             .show(ui)
             .tip(if loading {
@@ -342,17 +306,39 @@ fn header_row(ui: &mut egui::Ui, rect: Rect, state: &PrPanel) -> Option<PanelAct
             action = Some(PanelAction::Refresh);
         }
     });
+    match state.number {
+        Some(number) => {
+            if IconButton::new(icons::CARET_LEFT, "All pull requests")
+                .show(&mut row)
+                .tip("All pull requests")
+                .clicked()
+            {
+                action = Some(PanelAction::Back);
+            }
+            row.label(
+                egui::RichText::new(format!("Pull request #{number}"))
+                    .font(font::medium(text::MD))
+                    .color(p.text),
+            );
+        }
+        None => panel_title(&mut row, icons::GIT_PULL_REQUEST, "Pull requests"),
+    }
     action
 }
 
-// a quiet line in the middle of the panel, for loading and empty lists
-fn notice(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
-    ui.add_space(space::XL);
+// a spinner over a quiet line in the middle of the panel, while gh answers
+fn loading(ui: &mut egui::Ui, label: &str) {
+    let p = theme::palette(ui);
+    ui.add_space(space::XL * 2.0);
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), icon::LG), egui::Sense::hover());
+    mux_ui::chat::spinner(ui, rect.center(), icon::LG, p.text_muted);
+    ui.add_space(space::SM);
     ui.vertical_centered(|ui| {
         ui.label(
-            egui::RichText::new(text)
+            egui::RichText::new(label)
                 .font(font::regular(text::MD))
-                .color(color),
+                .color(p.text_faint),
         );
     });
 }
@@ -374,45 +360,65 @@ fn error_strip(ui: &mut egui::Ui, reason: &str) {
 }
 
 fn list(ui: &mut egui::Ui, state: &mut PrPanel) -> Option<PanelAction> {
-    let p = theme::palette(ui);
     let mut action = None;
-    let rect = ui.max_rect().shrink2(vec2(space::MD, 0.0));
+    let rect = ui.max_rect().shrink2(vec2(space::SM, 0.0));
     let mut inner = ui.new_child(UiBuilder::new().id_salt("pr-list").max_rect(rect));
-    inner.add_space(space::SM);
+    inner.add_space(space::MD);
     let mut filter = state.filter;
-    Segmented::new(&mut filter, &FILTERS).show(&mut inner);
+    inner.horizontal(|ui| {
+        ui.add_space(space::XS);
+        Segmented::new(&mut filter, &FILTERS).fit().show(ui);
+    });
     if filter != state.filter {
         action = Some(PanelAction::Filter(filter));
     }
     inner.add_space(space::SM);
-    egui::ScrollArea::vertical()
-        .auto_shrink(false)
-        .show(&mut inner, |ui| match &state.list {
-            None => notice(ui, "Reading pull requests…", p.text_faint),
-            Some(Err(reason)) => error_strip(ui, reason),
-            Some(Ok(list)) if list.is_empty() => {
-                let empty = match state.filter {
-                    Filter::All => "No open pull requests",
-                    Filter::Mine => "You have no open pull requests",
-                    Filter::Review => "Nobody is waiting on your review",
-                };
-                notice(ui, empty, p.text_faint);
-            }
-            Some(Ok(list)) => {
-                for summary in list {
-                    if list_row(ui, summary).clicked() {
-                        action = Some(PanelAction::Open(summary.number, summary.url.clone()));
+    match &state.list {
+        None => loading(&mut inner, "Reading pull requests…"),
+        Some(Err(reason)) => {
+            inner.add_space(space::XS);
+            error_strip(&mut inner, reason);
+        }
+        Some(Ok(list)) if list.is_empty() => {
+            let (title, detail) = match state.filter {
+                Filter::All => (
+                    "No open pull requests",
+                    "Push a worktree's branch to open one.",
+                ),
+                Filter::Mine => (
+                    "Nothing of yours is open",
+                    "Pull requests you open show up here.",
+                ),
+                Filter::Review => (
+                    "Nobody is waiting on you",
+                    "Pull requests that ask for your review show up here.",
+                ),
+            };
+            EmptyState::new(icons::GIT_PULL_REQUEST, title)
+                .detail(detail)
+                .show(&mut inner);
+        }
+        Some(Ok(list)) => {
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(&mut inner, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for summary in list {
+                        if list_row(ui, summary).clicked() {
+                            action = Some(PanelAction::Open(summary.number, summary.url.clone()));
+                        }
                     }
-                }
-            }
-        });
+                });
+        }
+    }
     action
 }
 
+// a pull request as two lines: its title with its review status, then who, where and when with its checks
 fn list_row(ui: &mut egui::Ui, pr: &Summary) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), 50.0), egui::Sense::click());
+        ui.allocate_exact_size(vec2(ui.available_width(), 54.0), egui::Sense::click());
     let label = format!("#{} {}", pr.number, pr.title);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
     let hover = mux_ui::hover_t(ui, &response);
@@ -421,61 +427,40 @@ fn list_row(ui: &mut egui::Ui, pr: &Summary) -> egui::Response {
         egui::CornerRadius::same(theme::radius::LG),
         theme::tint(p, theme::fill::HOVER * hover),
     );
-    let inner = rect.shrink2(vec2(space::SM, space::SM));
-    // the checks and the review sit at the right, and the title is cut short before them
-    let (glyph, color) = checks_mark(p, &pr.checks);
+    let inner = rect.shrink2(vec2(space::MD, space::SM));
+    let (top, bottom) = (inner.top() + 9.0, inner.bottom() - 8.0);
     let mut right = inner.right();
-    if let Some(glyph) = glyph {
-        ui.painter().text(
-            pos2(right - icon::MD / 2.0, inner.top() + 8.0),
-            egui::Align2::CENTER_CENTER,
-            glyph,
-            font::icon(icon::MD),
-            color,
-        );
-        right -= icon::MD + space::SM;
+    if let Some((word, tone)) = status(pr) {
+        let badge = Badge::new(word).tone(tone).paint(ui, pos2(right, top));
+        right = badge.left() - space::SM;
     }
-    let (word, tone) = decision(&pr.decision);
-    let tag = if pr.draft { Some("Draft") } else { word };
-    if let Some(tag) = tag {
-        let color = if pr.draft {
-            p.text_faint
-        } else {
-            tone_color(p, tone)
-        };
-        let galley = ui.painter().text(
-            pos2(right, inner.top() + 8.0),
-            egui::Align2::RIGHT_CENTER,
-            tag,
-            font::medium(text::SM),
-            color,
-        );
-        right = galley.left() - space::SM;
-    }
-    let number = ui.painter().text(
-        pos2(inner.left(), inner.top() + 8.0),
-        egui::Align2::LEFT_CENTER,
-        format!("#{}", pr.number),
-        font::medium(text::MD),
-        p.text_faint,
-    );
     let title = mux_ui::elided(
         ui,
         pr.title.clone(),
         font::medium(text::MD),
         p.text,
-        (right - number.right() - space::SM).max(0.0),
+        (right - inner.left()).max(0.0),
     );
     ui.painter().galley(
-        pos2(
-            number.right() + space::XS,
-            inner.top() + 8.0 - title.size().y / 2.0,
-        ),
+        pos2(inner.left(), top - title.size().y / 2.0),
         title,
         p.text,
     );
+    let mut meta_right = inner.right();
+    if let Some((color, summary)) = checks_mark(p, &pr.checks) {
+        let dot = pos2(inner.right() - 4.0, bottom);
+        ui.painter().circle_filled(dot, 3.5, color);
+        ui.interact(
+            egui::Rect::from_center_size(dot, vec2(14.0, 14.0)),
+            response.id.with("checks"),
+            egui::Sense::hover(),
+        )
+        .tip(summary);
+        meta_right = dot.x - space::MD;
+    }
     let meta = format!(
-        "{} · {} · {}",
+        "#{} · {} · {} · {}",
+        pr.number,
         pr.author,
         pr.head,
         crate::sessions::sidebar::ago(pr.updated)
@@ -485,27 +470,38 @@ fn list_row(ui: &mut egui::Ui, pr: &Summary) -> egui::Response {
         meta,
         font::regular(text::SM + 1.0),
         p.text_faint,
-        inner.width(),
+        (meta_right - inner.left()).max(0.0),
     );
     ui.painter().galley(
-        pos2(inner.left(), inner.bottom() - 7.0 - meta.size().y / 2.0),
+        pos2(inner.left(), bottom - meta.size().y / 2.0),
         meta,
         p.text_faint,
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-// one mark for all of a pull request's checks: failed if any failed, else pending if any are, else passed
-fn checks_mark(p: &theme::Palette, checks: &[Check]) -> (Option<char>, egui::Color32) {
+// the one status a row shows: a draft says so, otherwise where its review stands
+fn status(pr: &Summary) -> Option<(&'static str, Tone)> {
+    if pr.draft {
+        return Some(("Draft", Tone::Neutral));
+    }
+    match decision(&pr.decision) {
+        (Some(word), tone) => Some((word, tone)),
+        (None, _) => None,
+    }
+}
+
+// one colour for all of a pull request's checks: failed if any failed, else running if any are, else passed
+fn checks_mark(p: &theme::Palette, checks: &[Check]) -> Option<(egui::Color32, &'static str)> {
     let any = |state| checks.iter().any(|c| c.state == state);
     if checks.is_empty() {
-        (None, p.text_faint)
+        None
     } else if any(CheckState::Failed) {
-        (Some(icons::X_CIRCLE), p.danger)
+        Some((p.danger, "Some checks failed"))
     } else if any(CheckState::Pending) {
-        (Some(icons::CIRCLE), p.warning)
+        Some((p.warning, "Checks are running"))
     } else {
-        (Some(icons::CHECK_CIRCLE), p.success)
+        Some((p.success, "All checks passed"))
     }
 }
 
@@ -515,16 +511,6 @@ fn check_mark(p: &theme::Palette, state: CheckState) -> (char, egui::Color32) {
         CheckState::Failed => (icons::X_CIRCLE, p.danger),
         CheckState::Pending => (icons::CIRCLE, p.warning),
         CheckState::Skipped => (icons::CIRCLE, p.text_faint),
-    }
-}
-
-fn tone_color(p: &theme::Palette, tone: Tone) -> egui::Color32 {
-    match tone {
-        Tone::Success => p.success,
-        Tone::Danger => p.danger,
-        Tone::Warning => p.warning,
-        Tone::Accent => p.accent,
-        _ => p.text_muted,
     }
 }
 
@@ -570,12 +556,12 @@ fn detail(ui: &mut egui::Ui, state: &mut PrPanel) -> Option<PanelAction> {
         }
         None => {
             let mut inner = ui.new_child(UiBuilder::new().max_rect(rect));
-            notice(&mut inner, "Reading the pull request…", p.text_faint);
+            loading(&mut inner, "Reading the pull request…");
             return None;
         }
     };
     // the review box stays at the bottom while the rest scrolls
-    let composer_height = 128.0;
+    let composer_height = 140.0;
     let split = rect.bottom() - composer_height;
     let top = Rect::from_min_max(rect.min, pos2(rect.right(), split));
     let bottom = Rect::from_min_max(pos2(rect.left(), split), rect.max);
@@ -606,54 +592,56 @@ fn detail(ui: &mut egui::Ui, state: &mut PrPanel) -> Option<PanelAction> {
 fn overview(ui: &mut egui::Ui, state: &PrPanel, pr: &Pr) -> Option<PanelAction> {
     let p = theme::palette(ui);
     let mut action = None;
-    ui.label(
-        egui::RichText::new(&pr.title)
-            .font(font::semibold(text::LG))
-            .color(p.text),
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(&pr.title)
+                .font(font::semibold(text::LG))
+                .color(p.text),
+        )
+        .wrap(),
     );
     ui.add_space(space::SM);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = space::SM;
         state_badge(pr).show(ui);
-        if let (Some(word), tone) = decision(&pr.decision) {
-            Badge::new(word).tone(tone).show(ui);
-        }
-        if pr.mergeable == "CONFLICTING" {
-            Badge::new("Conflicts").tone(Tone::Warning).show(ui);
-        }
-        for label in &pr.labels {
-            Badge::new(label).show(ui);
-        }
-    });
-    ui.add_space(space::XS);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = space::SM;
-        ui.label(
-            egui::RichText::new(format!("{} → {}", pr.head, pr.base))
+        let quiet = |text: String, color| {
+            egui::RichText::new(text)
                 .font(font::regular(text::SM + 1.0))
-                .color(p.text_muted),
-        );
-        ui.label(
-            egui::RichText::new(format!("+{}", pr.additions))
-                .font(font::medium(text::SM + 1.0))
-                .color(p.success),
-        );
-        ui.label(
-            egui::RichText::new(format!("−{}", pr.deletions))
-                .font(font::medium(text::SM + 1.0))
-                .color(p.danger),
-        );
-        ui.label(
-            egui::RichText::new(format!(
-                "{} {}",
-                pr.files,
-                if pr.files == 1 { "file" } else { "files" }
-            ))
-            .font(font::regular(text::SM + 1.0))
-            .color(p.text_faint),
-        );
+                .color(color)
+        };
+        ui.label(quiet(format!("#{}", pr.number), p.text_faint));
+        ui.label(quiet(format!("{} → {}", pr.head, pr.base), p.text_muted));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = space::XS;
+            let count = |text: String, color| {
+                egui::RichText::new(text)
+                    .font(font::medium(text::SM + 1.0))
+                    .color(color)
+            };
+            ui.label(count(format!("+{}", pr.additions), p.success));
+            ui.label(count(format!("−{}", pr.deletions), p.danger));
+        });
+        let files = if pr.files == 1 { "file" } else { "files" };
+        ui.label(quiet(format!("{} {files}", pr.files), p.text_faint));
     });
-    ui.add_space(space::SM);
+    let decided = decision(&pr.decision).0.is_some();
+    let conflicts = pr.mergeable == "CONFLICTING";
+    if decided || conflicts || !pr.labels.is_empty() {
+        ui.add_space(space::SM);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = space::XS;
+            if let (Some(word), tone) = decision(&pr.decision) {
+                Badge::new(word).tone(tone).show(ui);
+            }
+            if conflicts {
+                Badge::new("Conflicts").tone(Tone::Warning).show(ui);
+            }
+            for label in &pr.labels {
+                Badge::new(label).show(ui);
+            }
+        });
+    }
+    ui.add_space(space::MD);
     let open = pr.state == "OPEN";
     let busy = state.writing.is_some();
     ui.horizontal(|ui| {
@@ -661,7 +649,7 @@ fn overview(ui: &mut egui::Ui, state: &PrPanel, pr: &Pr) -> Option<PanelAction> 
         if open
             && pr.draft
             && Button::new("Mark ready")
-                .size(Size::Sm)
+                .primary()
                 .enabled(!busy)
                 .show(ui)
                 .tip("Mark it ready for review")
@@ -671,7 +659,6 @@ fn overview(ui: &mut egui::Ui, state: &PrPanel, pr: &Pr) -> Option<PanelAction> 
         }
         if open && !pr.draft {
             let merge = Button::new("Merge")
-                .size(Size::Sm)
                 .primary()
                 .menu()
                 .enabled(!busy)
@@ -692,7 +679,6 @@ fn overview(ui: &mut egui::Ui, state: &PrPanel, pr: &Pr) -> Option<PanelAction> 
         }
         if open
             && Button::new("Check out")
-                .size(Size::Sm)
                 .show(ui)
                 .tip("Start an agent in a new worktree on this branch")
                 .clicked()
@@ -716,11 +702,9 @@ fn overview(ui: &mut egui::Ui, state: &PrPanel, pr: &Pr) -> Option<PanelAction> 
         mux_ui::chat::markdown(ui, &pr.body);
     }
     if !pr.checks.is_empty() {
-        caption(ui, "Checks");
-        for check in &pr.checks {
-            if let Some(url) = check_row(ui, check) {
-                action = Some(PanelAction::Url(url));
-            }
+        ui.add_space(space::MD);
+        if let Some(url) = checks_card(ui, &pr.checks) {
+            action = Some(PanelAction::Url(url));
         }
     }
     let mut notes: Vec<(&Note, bool)> = pr
@@ -757,6 +741,117 @@ fn overview(ui: &mut egui::Ui, state: &PrPanel, pr: &Pr) -> Option<PanelAction> 
         }
     }
     action
+}
+
+// the checks in one card: a summary line, then the ones that failed or are still running,
+// and the passed ones folded into a single row that opens to list them
+fn checks_card(ui: &mut egui::Ui, checks: &[Check]) -> Option<String> {
+    let p = theme::palette(ui);
+    let mut clicked = None;
+    let count = |state| checks.iter().filter(|c| c.state == state).count();
+    let (failed, running, passed) = (
+        count(CheckState::Failed),
+        count(CheckState::Pending),
+        count(CheckState::Passed),
+    );
+    let mut summary = Vec::new();
+    if failed > 0 {
+        summary.push(format!("{failed} failed"));
+    }
+    if running > 0 {
+        summary.push(format!("{running} running"));
+    }
+    if passed > 0 {
+        summary.push(format!("{passed} passed"));
+    }
+    let mut rest: Vec<&Check> = checks
+        .iter()
+        .filter(|c| c.state != CheckState::Passed)
+        .collect();
+    rest.sort_by_key(|c| match c.state {
+        CheckState::Failed => 0,
+        CheckState::Pending => 1,
+        _ => 2,
+    });
+    let open_id = ui.make_persistent_id("passed-checks");
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    theme::card(ui)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = space::XS;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Checks")
+                        .font(font::medium(text::MD))
+                        .color(p.text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(summary.join(" · "))
+                            .font(font::regular(text::SM + 1.0))
+                            .color(p.text_faint),
+                    );
+                });
+            });
+            ui.add_space(space::XS);
+            for check in rest {
+                if let Some(url) = check_row(ui, check) {
+                    clicked = Some(url);
+                }
+            }
+            if passed > 0 {
+                let row = ui
+                    .horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = space::SM;
+                        ui.label(
+                            egui::RichText::new(icons::CHECK_CIRCLE.to_string())
+                                .font(font::icon(icon::MD))
+                                .color(p.success),
+                        );
+                        let word = if passed == 1 { "check" } else { "checks" };
+                        ui.label(
+                            egui::RichText::new(format!("{passed} {word} passed"))
+                                .font(font::medium(text::SM + 1.0))
+                                .color(p.text_muted),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                if open {
+                                    icons::CARET_DOWN
+                                } else {
+                                    icons::CARET_RIGHT
+                                }
+                                .to_string(),
+                            )
+                            .font(font::icon(icon::SM))
+                            .color(p.text_faint),
+                        );
+                    })
+                    .response;
+                let row = ui
+                    .interact(row.rect, open_id.with("row"), egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                row.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, "Passed checks")
+                });
+                if row.clicked() {
+                    open = !open;
+                }
+                if open {
+                    for check in checks.iter().filter(|c| c.state == CheckState::Passed) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(icon::MD + space::SM);
+                            if let Some(url) = check_row(ui, check) {
+                                clicked = Some(url);
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    clicked
 }
 
 // returns the check's page when its name is clicked
@@ -837,6 +932,7 @@ fn note_card(
                 }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = space::SM;
+                    avatar(ui, &note.author);
                     ui.label(
                         egui::RichText::new(&note.author)
                             .font(font::medium(text::MD))
@@ -855,11 +951,9 @@ fn note_card(
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        send = Button::new("Send to agent")
-                            .size(Size::Sm)
-                            .ghost()
+                        send = IconButton::new(icons::PAPER_PLANE_RIGHT, "Send to agent")
                             .show(ui)
-                            .tip("Add it to the next message, the way diff comments go")
+                            .tip("Send to the agent with the next message")
                             .clicked();
                     });
                 });
@@ -871,6 +965,29 @@ fn note_card(
     });
     ui.add_space(space::SM);
     send
+}
+
+// a circle with the first letter of someone's name, coloured by the name so each person keeps one
+fn avatar(ui: &mut egui::Ui, name: &str) {
+    let p = theme::palette(ui);
+    let colors = [p.accent, p.agent, p.shell, p.task, p.warning, p.success];
+    let pick = name.bytes().map(usize::from).sum::<usize>() % colors.len();
+    let color = colors[pick];
+    let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 11.0, color.gamma_multiply(0.2));
+    let initial = name
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initial,
+        font::semibold(text::SM),
+        color,
+    );
 }
 
 fn note_comment(number: u64, note: &Note, review: bool) -> DiffComment {
@@ -926,10 +1043,10 @@ fn review_box(ui: &mut egui::Ui, state: &mut PrPanel, pr: &Pr) -> Option<PanelAc
         .show(ui);
     ui.add_space(space::SM);
     let body = state.draft.trim().to_owned();
-    ui.horizontal(|ui| {
+    let open = pr.state == "OPEN";
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = space::SM;
         if Button::new("Comment")
-            .size(Size::Sm)
             .primary()
             .enabled(!busy && !body.is_empty())
             .show(ui)
@@ -937,9 +1054,7 @@ fn review_box(ui: &mut egui::Ui, state: &mut PrPanel, pr: &Pr) -> Option<PanelAc
         {
             action = Some(PanelAction::Write(Write::Comment(body.clone())));
         }
-        let open = pr.state == "OPEN";
         if Button::new("Approve")
-            .size(Size::Sm)
             .enabled(!busy && open)
             .show(ui)
             .clicked()
@@ -947,7 +1062,6 @@ fn review_box(ui: &mut egui::Ui, state: &mut PrPanel, pr: &Pr) -> Option<PanelAc
             action = Some(PanelAction::Write(Write::Approve(body.clone())));
         }
         if Button::new("Request changes")
-            .size(Size::Sm)
             .enabled(!busy && open && !body.is_empty())
             .show(ui)
             .tip("Ask for changes, with what's written above")

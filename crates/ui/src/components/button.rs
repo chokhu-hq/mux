@@ -138,7 +138,7 @@ impl Button {
                     Align2::CENTER_CENTER,
                     icons::CARET_DOWN,
                     font::icon(icon::SM),
-                    p.text_faint,
+                    fg.gamma_multiply(0.7),
                 );
             }
         }

@@ -249,7 +249,7 @@ impl Server {
                 self.agent(id).answer(question, answers);
                 self.agent_changed(id);
             }
-            ClientMsg::SetMcpServers { servers } => {
+            ClientMsg::SetMcpServers { mut servers } => {
                 let running: Vec<u64> = self
                     .agents
                     .iter()
@@ -257,6 +257,7 @@ impl Server {
                     .map(|(id, _)| *id)
                     .collect();
                 mcp::forget_idle_claude(&running);
+                crate::secrets::replace(&mut servers, &self.store.mcp);
                 self.store.mcp = servers;
                 let names: Vec<&str> = self.store.mcp.iter().map(|s| s.name.as_str()).collect();
                 self.mcp_status

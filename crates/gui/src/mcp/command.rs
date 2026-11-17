@@ -1,4 +1,4 @@
-use mux_core::protocol::{McpServer, McpTransport};
+use mux_core::protocol::{McpServer, McpTransport, McpValue};
 use serde_json::Value;
 
 pub(super) fn command_line(command: &str, args: &[String], windows: bool) -> String {
@@ -105,21 +105,25 @@ pub(super) fn split_for(line: &str, windows: bool) -> Vec<String> {
 }
 
 // the rows filled in, skipping blank ones, and saying which one is missing its name
-pub(super) fn pairs(rows: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
+pub(super) fn pairs(rows: &[(String, McpValue)]) -> Result<Vec<(String, McpValue)>, String> {
     rows.iter()
-        .map(|(k, v)| (k.trim(), v.trim()))
-        .filter(|(k, v)| !k.is_empty() || !v.is_empty())
         .map(|(k, v)| {
-            if k.is_empty() {
-                Err(format!("Give the value \"{v}\" a name."))
-            } else {
-                Ok((k.to_owned(), v.to_owned()))
-            }
+            let v = match v {
+                McpValue::Plain(text) => McpValue::Plain(text.trim().to_owned()),
+                saved => saved.clone(),
+            };
+            (k.trim(), v)
+        })
+        .filter(|(k, v)| !k.is_empty() || *v != McpValue::Plain(String::new()))
+        .map(|(k, v)| match (k.is_empty(), &v) {
+            (false, _) => Ok((k.to_owned(), v)),
+            (true, McpValue::Plain(text)) => Err(format!("Give the value \"{text}\" a name.")),
+            (true, McpValue::Saved(_)) => Err("Give the saved value a name.".to_owned()),
         })
         .collect()
 }
 
-pub(super) fn object_pairs(value: &Value) -> Vec<(String, String)> {
+pub(super) fn object_pairs(value: &Value) -> Vec<(String, McpValue)> {
     value
         .as_object()
         .into_iter()
@@ -127,7 +131,7 @@ pub(super) fn object_pairs(value: &Value) -> Vec<(String, String)> {
         .map(|(k, v)| {
             (
                 k.clone(),
-                v.as_str().map_or_else(|| v.to_string(), str::to_owned),
+                McpValue::Plain(v.as_str().map_or_else(|| v.to_string(), str::to_owned)),
             )
         })
         .collect()

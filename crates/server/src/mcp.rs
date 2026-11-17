@@ -1,7 +1,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mux_core::protocol::{McpServer, McpTransport, Question, QuestionOption};
+use mux_core::protocol::{McpServer, McpTransport, McpValue, Question, QuestionOption};
+
+use crate::secrets::reveal;
 use serde_json::{Map, Value, json};
 
 // claude's servers go in a file rather than on its command line, where any process could read the secrets
@@ -131,10 +133,10 @@ fn forget_idle_in(dir: &Path, running: &[u64]) {
     }
 }
 
-fn pairs(list: &[(String, String)]) -> Value {
+fn pairs(list: &[(String, McpValue)]) -> Value {
     Value::Object(
         list.iter()
-            .map(|(k, v)| (k.clone(), json!(v)))
+            .map(|(k, v)| (k.clone(), json!(reveal(v))))
             .collect::<Map<_, _>>(),
     )
 }
@@ -180,9 +182,9 @@ fn by_name(servers: &[McpServer], http: impl Fn(&str, Value) -> Value) -> Map<St
 
 // the acp session's `mcpServers` list, for opencode
 pub fn acp(servers: &[McpServer]) -> Value {
-    let named = |list: &[(String, String)]| -> Vec<Value> {
+    let named = |list: &[(String, McpValue)]| -> Vec<Value> {
         list.iter()
-            .map(|(k, v)| json!({ "name": k, "value": v }))
+            .map(|(k, v)| json!({ "name": k, "value": reveal(v) }))
             .collect()
     };
     enabled(servers)
@@ -332,7 +334,7 @@ mod tests {
             transport: McpTransport::Stdio {
                 command: "python3".to_owned(),
                 args: vec!["server.py".to_owned()],
-                env: vec![("KEY".to_owned(), "1".to_owned())],
+                env: vec![("KEY".to_owned(), McpValue::Plain("1".to_owned()))],
             },
         }
     }
@@ -344,7 +346,10 @@ mod tests {
             enabled: true,
             transport: McpTransport::Http {
                 url: "https://x.dev/mcp".to_owned(),
-                headers: vec![("Authorization".to_owned(), "Bearer t".to_owned())],
+                headers: vec![(
+                    "Authorization".to_owned(),
+                    McpValue::Plain("Bearer t".to_owned()),
+                )],
             },
         };
         let mut off = stdio("off");

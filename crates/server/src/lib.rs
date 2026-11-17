@@ -7,6 +7,7 @@ mod mcp;
 mod messages;
 mod models;
 mod process;
+mod secrets;
 mod skills;
 mod store;
 #[cfg(windows)]

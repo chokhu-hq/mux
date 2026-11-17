@@ -19,8 +19,31 @@ pub struct Store {
     // agents a usage limit stopped, and when to carry on with each, in unix seconds
     #[serde(default)]
     pub wake: std::collections::HashMap<u64, u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "older_mcp")]
     pub mcp: Vec<McpServer>,
+}
+
+// older versions saved env and header values as bare strings, which load then moves into the secret store
+fn older_mcp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<McpServer>, D::Error> {
+    let mut value = serde_json::Value::deserialize(d)?;
+    for server in value.as_array_mut().into_iter().flatten() {
+        let transports = server
+            .get_mut("transport")
+            .and_then(|t| t.as_object_mut())
+            .into_iter()
+            .flat_map(|t| t.values_mut());
+        for transport in transports {
+            for list in ["env", "headers"] {
+                let pairs = transport.get_mut(list).and_then(|l| l.as_array_mut());
+                for pair in pairs.into_iter().flatten() {
+                    if let Some(text) = pair.get_mut(1).filter(|v| v.is_string()) {
+                        *text = serde_json::json!({ "Plain": text.take() });
+                    }
+                }
+            }
+        }
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 impl Store {
@@ -58,6 +81,7 @@ impl Store {
             }
         }
         store.cut_off = cut_off;
+        crate::secrets::store_in(&path.with_file_name("secrets"), &mut store.mcp);
         // ids are never reused, even when the state was lost, since an old chat saved under one would come back
         let saved = fs::read_dir(path.with_file_name("agents"))
             .into_iter()
@@ -84,7 +108,6 @@ impl Store {
         }
         // write then rename so a crash mid-write never leaves a half written file
         let tmp: PathBuf = path.with_extension("json.tmp");
-        // private, because it holds the mcp servers' keys and tokens
         mux_core::write_private(
             &tmp,
             &serde_json::to_vec_pretty(self).map_err(io::Error::other)?,
@@ -384,6 +407,34 @@ mod tests {
                 .starts_with("state.json.bad-")
         }));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn plain_mcp_values_move_out_of_the_state_on_load() {
+        let dir = std::env::temp_dir().join(format!("mux-store-secrets-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let old = r#"{ "next_id": 0, "groups": [], "mcp": [
+            { "name": "fs", "enabled": true, "transport": { "Stdio": {
+                "command": "x", "args": [], "env": [["KEY", "hunter2"]] } } },
+            { "name": "web", "enabled": true, "transport": { "Http": {
+                "url": "https://x.dev", "headers": [["Authorization", "Bearer t"]] } } }
+        ] }"#;
+        std::fs::write(&path, old).unwrap();
+        Store::load(&path).save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("hunter2") && !saved.contains("Bearer t"));
+        let store = Store::load(&path);
+        let secrets: Vec<String> = fs::read_dir(dir.join("secrets"))
+            .unwrap()
+            .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(secrets.len(), 2, "loading again doesn't store them twice");
+        assert!(secrets.contains(&"hunter2".to_owned()));
+        assert!(matches!(&store.mcp[1].transport,
+            mux_core::protocol::McpTransport::Http { headers, .. }
+            if matches!(&headers[0].1, mux_core::protocol::McpValue::Saved(_))));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use eframe::egui::{self, Align2, RichText, Sense, pos2, vec2};
 use mux_core::Provider;
-use mux_core::protocol::{McpServer, McpState, McpTransport};
+use mux_core::protocol::{McpServer, McpState, McpTransport, McpValue};
 use mux_ui::theme::{self, font, space, text};
 use mux_ui::{Button, IconButton, Switch, TooltipExt, icons};
 
@@ -36,12 +36,12 @@ struct Draft {
     name: String,
     kind: Kind,
     command: String,
-    env: Vec<(String, String)>,
+    env: Vec<(String, McpValue)>,
     url: String,
-    headers: Vec<(String, String)>,
+    headers: Vec<(String, McpValue)>,
     paste: String,
     error: String,
-    // env and header values show as dots until asked for, since they're usually keys
+    // values typed in show as dots until asked for, since they're usually keys. saved ones never show
     reveal: bool,
 }
 
@@ -137,12 +137,12 @@ impl Preset {
         draft.env = self
             .env
             .iter()
-            .map(|k| ((*k).to_owned(), String::new()))
+            .map(|k| ((*k).to_owned(), McpValue::Plain(String::new())))
             .collect();
         draft.headers = self
             .headers
             .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .map(|(k, v)| ((*k).to_owned(), McpValue::Plain((*v).to_owned())))
             .collect();
         // a value to fill in is easier with it showing
         draft.reveal = !draft.headers.is_empty() || !draft.env.is_empty();

@@ -693,25 +693,14 @@ impl Sessions {
         group.sessions[i].branch.clone().or(group.branch.clone())
     }
 
-    // what a shared log shouldn't show: every project folder and worktree, and the values saved for mcp servers
+    // what a shared log shouldn't show: every project folder and worktree. mcp values stay on the server
     pub fn private(&self) -> crate::redact::Redactor {
         let mut folders = Vec::new();
         for group in &self.groups {
             folders.extend(group.path.clone());
             folders.extend(group.sessions.iter().filter_map(|s| s.worktree.clone()));
         }
-        let mut secrets = Vec::new();
-        for server in self.mcp.iter().flatten() {
-            match &server.transport {
-                mux_core::protocol::McpTransport::Stdio { env, .. } => {
-                    secrets.extend(env.iter().map(|(_, v)| v.clone()));
-                }
-                mux_core::protocol::McpTransport::Http { headers, .. } => {
-                    secrets.extend(headers.iter().map(|(_, v)| v.clone()));
-                }
-            }
-        }
-        crate::redact::Redactor::here(&folders, &secrets)
+        crate::redact::Redactor::here(&folders, &[])
     }
 
     pub fn selected_group(&self) -> Option<(u64, Option<String>, String)> {

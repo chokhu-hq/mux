@@ -64,7 +64,7 @@ fn readme_json_imports_in_any_of_its_usual_shapes() {
     assert_eq!(servers.len(), 2);
     assert!(
         matches!(&servers[0].transport, McpTransport::Stdio { args, env, .. }
-        if args.len() == 3 && env[0] == ("K".into(), "v".into()))
+        if args.len() == 3 && env[0] == ("K".into(), McpValue::Plain("v".into())))
     );
     assert!(
         matches!(&servers[1].transport, McpTransport::Http { url, .. } if url == "https://x.dev/mcp")
@@ -80,7 +80,7 @@ fn readme_json_imports_in_any_of_its_usual_shapes() {
 
 #[test]
 fn drafts_check_what_was_typed() {
-    let row = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+    let row = |k: &str, v: &str| (k.to_owned(), McpValue::Plain(v.to_owned()));
     let draft = Draft {
         name: "fs".into(),
         command: "npx -y server".into(),
@@ -93,9 +93,21 @@ fn drafts_check_what_was_typed() {
     };
     assert_eq!((command.as_str(), args.len()), ("npx", 2));
     assert_eq!(env.len(), 2, "the blank row is skipped");
-    assert_eq!(env[1], ("B".into(), "two".into()));
+    assert_eq!(env[1], ("B".into(), McpValue::Plain("two".into())));
     let again = Draft::from(&server, false).server(true).unwrap();
     assert_eq!(again, server);
+    let saved = Draft {
+        env: vec![("KEY".into(), McpValue::Saved("id".into()))],
+        ..draft.clone()
+    };
+    let McpTransport::Stdio { env, .. } = saved.server(true).unwrap().transport else {
+        panic!("expected a command");
+    };
+    assert_eq!(
+        env[0].1,
+        McpValue::Saved("id".into()),
+        "a saved value is sent back as is"
+    );
     let nameless = Draft {
         name: "x".into(),
         env: vec![row("", "secret")],

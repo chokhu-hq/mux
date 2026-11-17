@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 36;
+pub const PROTOCOL: u32 = 37;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -253,12 +253,21 @@ pub enum McpTransport {
     Stdio {
         command: String,
         args: Vec<String>,
-        env: Vec<(String, String)>,
+        env: Vec<(String, McpValue)>,
     },
     Http {
         url: String,
-        headers: Vec<(String, String)>,
+        headers: Vec<(String, McpValue)>,
     },
+}
+
+// an env or header value, which the server keeps in its own file once saved and never sends back
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpValue {
+    // typed in and not saved yet
+    Plain(String),
+    // the id it's saved under, which is all a client ever gets
+    Saved(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

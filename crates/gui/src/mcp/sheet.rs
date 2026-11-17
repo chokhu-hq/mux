@@ -1,5 +1,5 @@
 use eframe::egui::{self, CornerRadius, RichText, Sense, vec2};
-use mux_core::protocol::McpServer;
+use mux_core::protocol::{McpServer, McpValue};
 use mux_ui::theme::{self, font, radius, space, text};
 use mux_ui::{Button, IconButton, Segmented, Size, TextInput, TooltipExt, icons};
 
@@ -201,7 +201,7 @@ pub(super) fn form(ui: &mut egui::Ui, draft: &mut Draft) {
 pub(super) fn values(
     ui: &mut egui::Ui,
     label: &str,
-    rows: &mut Vec<(String, String)>,
+    rows: &mut Vec<(String, McpValue)>,
     placeholder: &str,
     reveal: &mut bool,
 ) {
@@ -241,11 +241,28 @@ pub(super) fn values(
                     .placeholder(placeholder)
                     .width(width * 0.4)
                     .show(ui);
-                TextInput::new(value)
-                    .placeholder("value")
-                    .password(!*reveal)
-                    .width(width * 0.6)
-                    .show(ui);
+                match value {
+                    McpValue::Plain(text) => {
+                        TextInput::new(text)
+                            .placeholder("value")
+                            .password(!*reveal)
+                            .width(width * 0.6)
+                            .show(ui);
+                    }
+                    // the server keeps saved values to itself, so one can only be typed over
+                    McpValue::Saved(_) => {
+                        let mut typed = String::new();
+                        TextInput::new(&mut typed)
+                            .placeholder("•••••••• saved")
+                            .password(true)
+                            .width(width * 0.6)
+                            .show(ui)
+                            .tip("Saved. Type to replace it");
+                        if !typed.is_empty() {
+                            *value = McpValue::Plain(typed);
+                        }
+                    }
+                }
                 if IconButton::new(icons::X, "Remove")
                     .show(ui)
                     .tip("Remove")
@@ -271,7 +288,7 @@ pub(super) fn values(
         .show(ui)
         .clicked()
     {
-        rows.push((String::new(), String::new()));
+        rows.push((String::new(), McpValue::Plain(String::new())));
         *reveal = true;
     }
     ui.add_space(space::MD);

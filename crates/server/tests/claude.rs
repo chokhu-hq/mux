@@ -606,3 +606,30 @@ fn files_made_during_a_turn_show_up_for_mentions() {
     let after = server.wait_for("the files after the turn", files);
     assert!(after.contains(&"made.txt".to_string()), "{after:?}");
 }
+
+#[test]
+fn claude_reports_its_plan_limits_before_the_first_turn() {
+    let mut server = Server::start();
+    server.send(ClientMsg::RefreshUsage);
+    let windows = server.wait_for("claude's plan limits", |msg| match msg {
+        ServerMsg::AgentUsage {
+            provider: mux_core::Provider::Claude,
+            windows,
+        } => Some(windows.clone()),
+        _ => None,
+    });
+    let labels: Vec<_> = windows
+        .iter()
+        .map(|w| (w.label.as_str(), w.model.as_deref()))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("5h", None),
+            ("7d", None),
+            ("7d", Some("Fake 2")),
+            ("spend", None)
+        ]
+    );
+    assert!(windows[0].resets_at > 0 && windows[0].minutes == 300);
+}

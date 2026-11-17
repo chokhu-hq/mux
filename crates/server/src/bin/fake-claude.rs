@@ -13,7 +13,8 @@
 //   scenario:flood    streams a 300 KB reply as fast as it can
 //   scenario:helper   starts a long-running process of its own, like an mcp server
 // anything else gets a short reply. FAKE_CLAUDE_FAIL lists control request subtypes to refuse, like set_model,
-// and FAKE_CLAUDE_FORGET makes a resume fail the way it does for a conversation claude no longer has.
+// FAKE_CLAUDE_USAGE is the get_usage answer to give, and FAKE_CLAUDE_FORGET makes a resume fail the way it
+// does for a conversation claude no longer has.
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -155,6 +156,18 @@ impl Fake {
                     { "value": "fake-2", "displayName": "Fake 2", "description": "The other one" }
                 ],
             }),
+            // FAKE_CLAUDE_USAGE replaces the plan limits it reports, as get_usage's json
+            "get_usage" => std::env::var("FAKE_CLAUDE_USAGE")
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_else(|| {
+                    json!({ "rate_limits_available": true, "rate_limits": {
+                        "five_hour": { "utilization": 20.0, "resets_at": "2099-01-01T00:00:00Z" },
+                        "seven_day": { "utilization": 45.0, "resets_at": null },
+                        "model_scoped": [{ "display_name": "Fake 2", "utilization": 60.0, "resets_at": null }],
+                        "extra_usage": { "is_enabled": true, "monthly_limit": 1000, "used_credits": 100 }
+                    } })
+                }),
             "interrupt" => {
                 self.interrupted = true;
                 json!({})

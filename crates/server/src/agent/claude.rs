@@ -254,7 +254,8 @@ impl Agent {
             Some("rate_limit_event") => {
                 let info = &msg["rate_limit_info"];
                 self.usage = Some(usage::claude(info));
-                self.limit_reset = usage::claude_blocked_until(info);
+                self.limit_reset =
+                    usage::claude_blocked_until(info, self.settings.model.as_deref());
             }
             // a resumed claude that can't find its conversation says so straight away, then exits
             Some("result") if self.session_id.is_some() && !self.claude_turn && lost(msg) => {

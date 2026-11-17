@@ -218,12 +218,30 @@ fn codex_line(line: &str, model: &mut String) -> Option<Record> {
     })
 }
 
-// reads `2026-10-21T14:48:19.434Z` as unix seconds
-fn timestamp(text: &str) -> Option<i64> {
+// reads `2026-10-21T14:48:19.434Z` or one ending in an offset like `+06:00` as unix seconds
+pub(crate) fn timestamp(text: &str) -> Option<i64> {
     let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
     let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
     let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+    let local = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second;
+    let zone = text
+        .get(19..)?
+        .trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match zone.split_at_checked(1) {
+        Some((sign @ ("+" | "-"), rest)) => {
+            let (h, m) = rest
+                .split_once(':')
+                .unwrap_or((rest.get(..2)?, rest.get(2..)?));
+            let minutes = h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?;
+            if sign == "+" {
+                minutes * 60
+            } else {
+                -minutes * 60
+            }
+        }
+        _ => 0,
+    };
+    Some(local - offset)
 }
 
 // days since 1970-01-01 for a gregorian date, after Howard Hinnant's algorithm
@@ -279,6 +297,10 @@ mod tests {
     fn reads_timestamps() {
         assert_eq!(timestamp("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(timestamp("2026-10-21T14:48:19.434Z"), Some(1_792_594_099));
+        assert_eq!(
+            timestamp("2026-10-21T20:48:19.5+06:00"),
+            Some(1_792_594_099)
+        );
     }
 
     #[test]

@@ -188,7 +188,10 @@ impl Agent {
                         .as_str()
                         .unwrap_or("The turn failed.");
                     if turn["error"]["codexErrorInfo"] == "usageLimitExceeded" {
-                        match usage::blocked_until(&self.windows) {
+                        match usage::blocked_until(
+                            &usage::codex(&self.limits),
+                            self.settings.model.as_deref(),
+                        ) {
                             Some(reset) => self.pause_until(reset, message.to_owned()),
                             None => self.usage_limit(message.to_owned(), None),
                         }
@@ -232,8 +235,8 @@ impl Agent {
             }
             "turn/plan/updated" => self.codex_todos(params),
             "account/rateLimits/updated" => {
-                self.windows = usage::codex(&params["rateLimits"]);
-                self.usage = Some(self.windows.clone());
+                usage::merge_codex(&mut self.limits, &params["rateLimits"]);
+                self.usage = Some(usage::codex(&self.limits));
             }
             "item/started" => {
                 self.retried(ItemStatus::Done);

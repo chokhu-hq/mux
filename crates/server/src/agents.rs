@@ -289,7 +289,11 @@ impl Server {
                 self.fetch_files(id, true);
             }
         }
-        if let Some(windows) = usage {
+        if let Some(mut windows) = usage {
+            if provider == Provider::Claude {
+                let known = self.usage.get(&provider).map_or(&[][..], Vec::as_slice);
+                windows = crate::usage::merge_claude(known, windows);
+            }
             self.set_usage(provider, windows);
         }
         if let Some(context) = context {

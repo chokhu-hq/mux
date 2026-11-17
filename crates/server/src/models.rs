@@ -15,7 +15,7 @@ const FAST_TIER: &str = "priority";
 
 pub struct Catalog {
     pub models: Vec<ModelOption>,
-    // codex can report its limits up front, claude only reports them during a turn
+    // the plan limits, which both can report up front
     pub usage: Option<Vec<UsageWindow>>,
     // the limit resets the account has banked, which only codex has
     pub resets: Option<Vec<LimitReset>>,
@@ -113,7 +113,12 @@ async fn list() -> io::Result<Catalog> {
                 }
                 // limits are a bonus, so a failure here just leaves them unknown
                 Some(2) => {
-                    usage = Some(usage::codex(&msg["result"]["rateLimits"]));
+                    let result = &msg["result"];
+                    // the plan's own limits, rather than one model's, when codex splits them up
+                    let limits = Some(&result["rateLimitsByLimitId"]["codex"])
+                        .filter(|l| l.is_object())
+                        .unwrap_or(&result["rateLimits"]);
+                    usage = Some(usage::codex(limits));
                     resets = Some(parse_resets(&msg["result"]["rateLimitResetCredits"]));
                 }
                 _ => {}
@@ -287,11 +292,14 @@ async fn claude_models(child: &mut tokio::process::Child) -> io::Result<Catalog>
     stdin.write_all(format!("{init}\n").as_bytes()).await?;
 
     let mut lines = BufReader::new(stdout).lines();
-    while let Some(line) = lines.next_line().await? {
+    let models = loop {
+        let Some(line) = lines.next_line().await? else {
+            return Err(io::Error::other("claude exited before listing models"));
+        };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if msg["type"] != "control_response" {
+        if msg["type"] != "control_response" || msg["response"]["request_id"] != "mux-models" {
             continue;
         }
         let response = &msg["response"];
@@ -307,13 +315,36 @@ async fn claude_models(child: &mut tokio::process::Child) -> io::Result<Catalog>
             .as_array()
             .cloned()
             .unwrap_or_default();
-        return Ok(Catalog {
-            models: models.iter().filter_map(parse_claude).collect(),
-            usage: None,
-            resets: None,
-        });
-    }
-    Err(io::Error::other("claude exited before listing models"))
+        break models.iter().filter_map(parse_claude).collect();
+    };
+
+    // the plan limits are a bonus with their own deadline, so a slow answer never loses the models
+    let usage = json!({ "type": "control_request", "request_id": "mux-usage",
+        "request": { "subtype": "get_usage", "skip_behaviors": true } });
+    let limits = async {
+        stdin
+            .write_all(format!("{usage}\n").as_bytes())
+            .await
+            .ok()?;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if msg["type"] == "control_response" && msg["response"]["request_id"] == "mux-usage" {
+                return usage::claude_usage(&msg["response"]["response"]).filter(|u| !u.is_empty());
+            }
+        }
+        None
+    };
+    let usage = tokio::time::timeout(Duration::from_secs(10), limits)
+        .await
+        .ok()
+        .flatten();
+    Ok(Catalog {
+        models,
+        usage,
+        resets: None,
+    })
 }
 
 fn parse_claude(model: &Value) -> Option<ModelOption> {

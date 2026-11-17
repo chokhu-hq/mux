@@ -331,7 +331,7 @@ fn usage(ui: &mut egui::Ui, usage: &[(Provider, Vec<UsageWindow>)]) {
             if windows.is_empty() {
                 let detail = match provider {
                     Provider::Claude => {
-                        "Claude reports its limits as it replies, so they show after your next message"
+                        "Claude only reports limits when it's signed in to a Claude plan"
                     }
                     Provider::Codex | Provider::OpenCode => "Asking Codex for its limits…",
                 };

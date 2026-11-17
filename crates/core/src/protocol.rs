@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 37;
+pub const PROTOCOL: u32 = 38;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -458,6 +458,10 @@ pub struct UsageWindow {
     pub used: f32,
     // unix seconds when the window resets, 0 when unknown
     pub resets_at: u64,
+    // how long the window lasts in minutes, 0 when unknown
+    pub minutes: u64,
+    // the model a weekly window only covers, like claude's "Opus" allowance, none when it covers them all
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

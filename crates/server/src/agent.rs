@@ -220,8 +220,8 @@ pub struct Agent {
     pub resumes: u32,
     // when the usage limit that blocked the turn in progress resets, in unix seconds
     limit_reset: Option<u64>,
-    // the agent's latest limit windows, which say when a blocked codex can go again
-    windows: Vec<UsageWindow>,
+    // codex's latest rate limits as it sent them, which say when a blocked codex can go again
+    limits: Value,
     // a turn a usage limit stopped, to carry on at this time, taken by the server to wake it then
     pause: Option<u64>,
     // the agent's own conversation ids as last saved, so a new one is saved straight away
@@ -340,7 +340,7 @@ impl Agent {
             resumes: saved.resumes,
             handover: saved.handover,
             limit_reset: None,
-            windows: Vec::new(),
+            limits: Value::Null,
             pause: None,
             saved_ids: ids,
             queue_changed: false,

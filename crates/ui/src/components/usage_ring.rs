@@ -121,7 +121,7 @@ fn details(ui: &mut Ui, provider: Option<Provider>, windows: &[UsageWindow]) {
     for (i, window) in windows.iter().enumerate() {
         ui.add_space(if i == 0 { space::MD } else { space::LG });
         let used = window.used.clamp(0.0, 1.0);
-        let (glyph, name) = limit_name(&window.label);
+        let (glyph, name) = limit_name(window);
         ui.horizontal(|ui| {
             let (slot, _) = ui.allocate_exact_size(Vec2::splat(icon::SM), Sense::hover());
             let name = ui.label(
@@ -157,11 +157,9 @@ fn details(ui: &mut Ui, provider: Option<Provider>, windows: &[UsageWindow]) {
             );
             let label_w = 30.0;
             let (row, _) = ui.allocate_exact_size(Vec2::new(WIDTH, BAR), Sense::hover());
-            bar(
-                ui,
-                Rect::from_min_max(row.min, pos2(row.right() - label_w, row.bottom())),
-                used,
-            );
+            let track = Rect::from_min_max(row.min, pos2(row.right() - label_w, row.bottom()));
+            bar(ui, track, used);
+            pace_tick(ui, track, window);
             ui.painter().galley(
                 pos2(
                     row.right() - percent.size().x,
@@ -184,7 +182,7 @@ pub fn usage_rows(ui: &mut Ui, windows: &[UsageWindow]) {
                 .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
         }
         let used = window.used.clamp(0.0, 1.0);
-        let (glyph, name) = limit_name(&window.label);
+        let (glyph, name) = limit_name(window);
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 76.0), Sense::hover());
         let painter = ui.painter();
@@ -229,15 +227,40 @@ pub fn usage_rows(ui: &mut Ui, windows: &[UsageWindow]) {
             pos2(rect.right(), rect.bottom() - 16.0),
         );
         bar(ui, track, used);
+        pace_tick(ui, track, window);
     }
 }
 
-fn limit_name(label: &str) -> (char, String) {
-    match label {
-        "5h" => (icons::CLOCK, "5-hour limit".to_owned()),
-        "7d" => (icons::CALENDAR_BLANK, "Weekly limit".to_owned()),
-        other => (icons::CLOCK, format!("{other} limit")),
+fn limit_name(window: &UsageWindow) -> (char, String) {
+    match (window.label.as_str(), &window.model) {
+        ("5h", _) => (icons::CLOCK, "5-hour limit".to_owned()),
+        ("7d", Some(model)) => (icons::CALENDAR_BLANK, format!("Weekly · {model}")),
+        ("7d", None) => (icons::CALENDAR_BLANK, "Weekly limit".to_owned()),
+        ("30d", _) => (icons::CALENDAR_BLANK, "Monthly limit".to_owned()),
+        ("spend", _) => (icons::CALENDAR_BLANK, "Monthly spend".to_owned()),
+        ("credit", _) => (icons::CALENDAR_BLANK, "Monthly credit limit".to_owned()),
+        (other, _) => (icons::CLOCK, format!("{other} limit")),
     }
+}
+
+// how far through its window the time is, so a bar past the tick is spending ahead of pace
+fn pace(window: &UsageWindow) -> Option<f32> {
+    let length = window.minutes * 60;
+    let left = window.resets_at.checked_sub(mux_core::now_secs())?;
+    (length > 0 && left <= length).then(|| 1.0 - left as f32 / length as f32)
+}
+
+fn pace_tick(ui: &Ui, track: Rect, window: &UsageWindow) {
+    let Some(pace) = pace(window) else {
+        return;
+    };
+    let p = theme::palette(ui);
+    let x = track.left() + track.width() * pace;
+    ui.painter().vline(
+        x,
+        (track.top() - 2.0)..=(track.bottom() + 2.0),
+        Stroke::new(2.0, p.text),
+    );
 }
 
 // a thin ring that fills clockwise from the top as `used` goes from 0 to 1

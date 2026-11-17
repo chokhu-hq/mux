@@ -111,6 +111,8 @@ async fn serve(socket: PathBuf, state: PathBuf) -> io::Result<()> {
         log::warn!("couldn't make {} private: {err}", dir.display());
     }
     let mut store = Store::load(&state);
+    // nothing runs yet, so every claude config left by a crash goes
+    mcp::forget_idle_claude(&[]);
     let seen = store.sessions_mut().map(|s| (s.id, s.status)).collect();
     store.save(&state)?;
     let server = Server {

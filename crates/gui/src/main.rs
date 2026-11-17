@@ -42,6 +42,8 @@ mod mcp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod notify;
 mod picker;
+mod pr;
+mod pr_panel;
 mod prefs;
 mod redact;
 mod renderer;
@@ -183,7 +185,7 @@ const NUMBER_KEYS: [Key; 9] = [
     Key::Num9,
 ];
 
-const COMMANDS: [Command; 7] = [
+const COMMANDS: [Command; 8] = [
     Command::new("new-agent", "New agent session")
         .icon(icons::ROBOT)
         .shortcut(NEW_AGENT),
@@ -197,6 +199,7 @@ const COMMANDS: [Command; 7] = [
     Command::new("toggle-terminal", "Toggle terminal on the right")
         .icon(icons::TERMINAL_WINDOW)
         .shortcut(TERMINAL),
+    Command::new("pull-requests", "Pull requests").icon(icons::GIT_PULL_REQUEST),
     Command::new("compact", "Compact conversation").icon(icons::ARROWS_IN_LINE_VERTICAL),
     Command::new("settings", "Open settings")
         .icon(icons::GEAR)
@@ -257,6 +260,10 @@ struct App {
     ship: Option<ship::Ship>,
     // the title bar's changes were clicked, so the next frame opens the diff panel
     review: bool,
+    // the pull requests panel, kept while it slides shut
+    pr: Option<pr_panel::PrPanel>,
+    pr_open: bool,
+    pr_width: f32,
     // sessions whose desktop notification was clicked, sent from the threads waiting on them
     opened: (std::sync::mpsc::Sender<u64>, std::sync::mpsc::Receiver<u64>),
     // a newer release, once the check at launch finds one
@@ -281,6 +288,9 @@ struct TitleBar {
     // files changed in the chat and lines added and removed, which open the diff panel
     changes: Option<(usize, usize, usize)>,
     restartable: bool,
+    // the session is in a project folder, where gh can look for pull requests
+    git: bool,
+    pr: Option<u64>,
 }
 
 impl App {
@@ -324,6 +334,9 @@ impl App {
             diffs: None,
             ship: None,
             review: false,
+            pr: None,
+            pr_open: false,
+            pr_width: 520.0,
             opened: std::sync::mpsc::channel(),
             update: None,
             crash: crash::take(),
@@ -338,8 +351,9 @@ impl App {
         app
     }
 
-    fn run(&mut self, command: &str) {
+    fn run(&mut self, ctx: &egui::Context, command: &str) {
         match command {
+            "pull-requests" => self.toggle_prs(ctx),
             "new-agent" => self.sessions.create("New agent", SessionKind::Agent),
             "new-shell" => self.sessions.create("Shell", SessionKind::Shell),
             "new-group" => self.sessions.create_group_from_folder(),
@@ -519,6 +533,8 @@ impl App {
             status: format!("{} · {meta}", session.status.label()),
             changes: (agent && files > 0).then_some((files, added, removed)),
             restartable: ended && !agent,
+            git: group.as_ref().is_some_and(|g| g.1.is_some()),
+            pr: session.pr.as_ref().map(|pr| pr.number),
         });
         let id = session.id;
         let worktree = session.worktree.clone();
@@ -624,6 +640,7 @@ impl App {
                 self.diffs = None;
                 self.viewer = Some(FileView::open(path, lines));
                 self.viewer_open = true;
+                self.pr_open = false;
             }
             None => {}
         }
@@ -1486,6 +1503,7 @@ impl App {
         self.diffs = Some(diffs);
         self.viewer = Some(view);
         self.viewer_open = true;
+        self.pr_open = false;
     }
 
     // a diff or list that finished reading goes into the panel
@@ -1675,6 +1693,7 @@ impl eframe::App for App {
                         let main = sidebar.show(ui, |ui| self.sidebar_contents(ui));
                         self.sidebar = sidebar;
                         let main = self.file_panel(ui, main);
+                        let main = self.pr_panel(ui, main);
                         let main = self.split_panel(ui, main);
                         let mut ui = ui.new_child(UiBuilder::new().max_rect(main));
                         ui.set_clip_rect(main.intersect(ui.clip_rect()));
@@ -1683,7 +1702,7 @@ impl eframe::App for App {
                 self.titlebar_contents(ui, window, sidebar_width, &mut run);
             });
         if let Some(command) = run {
-            self.run(command);
+            self.run(&ctx, command);
         }
         self.link.tick(&ctx, &mut self.sessions);
     }

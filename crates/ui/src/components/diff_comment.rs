@@ -59,6 +59,10 @@ pub fn with_comments(text: &str, comments: &[DiffComment]) -> String {
             out.push('\n');
         }
         let diff = comment.diff.trim_end_matches('\n');
+        // a comment on the whole pull request has no lines to show
+        if diff.is_empty() {
+            continue;
+        }
         // a fence longer than any run of backticks inside, so the diff can't close it early
         let longest = diff.split(|c| c != '`').map(str::len).max().unwrap_or(0);
         let fence = "`".repeat(longest.max(2) + 1);
@@ -199,6 +203,8 @@ mod tests {
         assert!(out.starts_with("Review comments on the diff:\n\nfile: src/auth.rs"));
         assert!(out.ends_with("````diff\n@@ -1,1 +1,1 @@\n+let s = \"```\";\n````"));
         assert_eq!(with_comments("hi", &[]), "hi");
+        let general = with_comments("", &[comment("Add a test", "")]);
+        assert!(general.ends_with("comment:\n  Add a test\n"));
     }
 
     #[test]

@@ -254,6 +254,7 @@ impl Store {
             worktree: None,
             branch: None,
             summary: None,
+            pr: None,
         });
         id
     }

@@ -270,6 +270,47 @@ impl Server {
                     });
                 }
             }
+            ClientMsg::SetPr { id, pr } => {
+                if let Some(info) = self.store.session_mut(id) {
+                    info.pr = pr;
+                    self.changed();
+                }
+            }
+            ClientMsg::CheckoutPr { group, pr, title } => {
+                let id =
+                    self.store
+                        .create_session(Some(group), &title, mux_core::SessionKind::Agent);
+                self.send(client, ServerMsg::Created { id });
+                let name = format!("pr {}", pr.number);
+                match self
+                    .store
+                    .project_path(id)
+                    .map(|repo| worktree::add_detached(repo, &name, id))
+                {
+                    Some(Ok(path)) => {
+                        if let Some(info) = self.store.session_mut(id) {
+                            info.worktree = Some(path.clone());
+                        }
+                        let events = self.events.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = worktree::checkout_pr(&path, pr.number);
+                            let _ = events.send(Event::PrCheckedOut(id, pr, result));
+                        });
+                    }
+                    Some(Err(reason)) => {
+                        self.agent(id).error(reason);
+                        self.agent_changed(id);
+                    }
+                    None => {
+                        self.agent(id).error(
+                            "This project has no folder yet, so the pull request can't be checked out."
+                                .to_owned(),
+                        );
+                        self.agent_changed(id);
+                    }
+                }
+                self.changed();
+            }
             ClientMsg::RenameSession { id, title } => {
                 // a name given by hand stays, since only an agent still called "New agent" is named automatically
                 if let Some(info) = self.store.session_mut(id)

@@ -163,6 +163,7 @@ fn a_finish_is_announced_only_once_it_lasts() {
                 worktree: None,
                 branch: None,
                 summary: None,
+                pr: None,
             }],
         }],
     };
@@ -214,6 +215,7 @@ fn finished_agents_alert_once_and_stay_unread_until_looked_at() {
                 worktree: None,
                 branch: None,
                 summary: None,
+                pr: None,
             }],
         }],
     };
@@ -279,6 +281,7 @@ fn a_closed_project_shows_what_most_needs_looking_at() {
         worktree: None,
         branch: None,
         summary: None,
+        pr: None,
     };
     let shell = session(1, SessionKind::Shell, SessionStatus::Running);
     let done = session(2, SessionKind::Agent, SessionStatus::Done);

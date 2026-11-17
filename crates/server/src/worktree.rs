@@ -7,22 +7,35 @@ pub fn add(repo: &str, title: &str, id: u64) -> Result<String, String> {
     add_under(&protocol::data_dir().join("worktrees"), repo, title, id)
 }
 
+// a checkout left on no branch, for `gh pr checkout` to put the pull request's branch in
+pub fn add_detached(repo: &str, title: &str, id: u64) -> Result<String, String> {
+    add_at(
+        &protocol::data_dir().join("worktrees"),
+        repo,
+        title,
+        id,
+        false,
+    )
+}
+
 fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, String> {
+    add_at(root, repo, title, id, true)
+}
+
+fn add_at(root: &Path, repo: &str, title: &str, id: u64, branch: bool) -> Result<String, String> {
     let slug = slug(title);
     let name = Path::new(repo).file_name().map_or_else(
         || "project".to_owned(),
         |n| n.to_string_lossy().into_owned(),
     );
     let dir = root.join(name).join(format!("{slug}-{id}"));
-    let branch = format!("mux/{slug}-{id}");
-    let args: [&std::ffi::OsStr; 6] = [
-        "worktree".as_ref(),
-        "add".as_ref(),
-        "-b".as_ref(),
-        branch.as_ref(),
-        dir.as_os_str(),
-        "HEAD".as_ref(),
-    ];
+    let branch = branch.then(|| format!("mux/{slug}-{id}"));
+    let mut args: Vec<&std::ffi::OsStr> = vec!["worktree".as_ref(), "add".as_ref()];
+    match &branch {
+        Some(branch) => args.extend::<[&std::ffi::OsStr; 2]>(["-b".as_ref(), branch.as_ref()]),
+        None => args.push("--detach".as_ref()),
+    }
+    args.extend([dir.as_os_str(), "HEAD".as_ref()]);
     if let Err(reason) = mux_core::git(mux_core::command("git"), repo, args) {
         return Err(if reason.contains("not a git repository") {
             "This project isn't a git repository, so the agent can't get its own worktree. Switch it to Local to work in the folder itself.".to_owned()
@@ -38,6 +51,26 @@ fn add_under(root: &Path, repo: &str, title: &str, id: u64) -> Result<String, St
         });
     }
     Ok(dir.to_string_lossy().into_owned())
+}
+
+// fetches the pull request and switches the checkout to its branch, the way gh sets it up to push back
+pub fn checkout_pr(dir: &str, number: u64) -> Result<(), String> {
+    let output = mux_core::command("gh")
+        .args(["pr", "checkout", &number.to_string()])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("couldn't run gh: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("gh failed without saying why")
+        .to_owned())
 }
 
 // git refuses to remove a checkout with uncommitted work, which is the point, and the branch always stays
@@ -158,6 +191,22 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let refused = add_under(&trees, &outside.to_string_lossy(), "x", 1).unwrap_err();
         assert!(refused.contains("isn't a git repository"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn makes_a_detached_worktree_for_a_pull_request() {
+        let (root, repo) = repository();
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let trees = root.join("worktrees");
+        let path = add_at(&trees, &repo.to_string_lossy(), "pr 12", 3, false).unwrap();
+        assert!(path.ends_with("pr-12-3"));
+        assert!(Path::new(&path).join("a.txt").is_file());
+        let branches = String::from_utf8_lossy(&git(&repo, &["branch"]).stdout).into_owned();
+        assert!(!branches.contains("mux/"), "{branches}");
+        git(&repo, &["worktree", "remove", &path]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

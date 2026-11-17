@@ -313,7 +313,7 @@ impl App {
         Rect::from_min_max(main.min, pos2(edge, main.bottom()))
     }
 
-    // a finished push opens github's pull request page, or says why it didn't go
+    // a finished push shows its pull request, or opens github's page for one, or says why it didn't go
     fn poll_push(&mut self, ctx: &egui::Context) {
         let Some(ship) = &mut self.ship else {
             return;
@@ -323,8 +323,17 @@ impl App {
         };
         ship.pushing = None;
         match result {
-            Ok(Some(url)) => ctx.open_url(egui::OpenUrl::new_tab(url)),
-            Ok(None) => log::info!("pushed {}, whose remote isn't on github", ship.worktree),
+            Ok(ship::Pushed::Pr(link)) => {
+                let (id, number) = (ship.id, link.number);
+                self.sessions
+                    .outbox
+                    .push(ClientMsg::SetPr { id, pr: Some(link) });
+                self.show_pr(ctx, id, number);
+            }
+            Ok(ship::Pushed::Compare(url)) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+            Ok(ship::Pushed::Nothing) => {
+                log::info!("pushed {}, whose remote isn't on github", ship.worktree)
+            }
             Err(reason) => {
                 log::warn!("could not push {}: {reason}", ship.worktree);
                 ship.error = Some(reason);

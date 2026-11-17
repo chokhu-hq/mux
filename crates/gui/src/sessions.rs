@@ -18,7 +18,7 @@ use mux_ui::{GroupHeader, MenuItem, SessionRow, TooltipExt, icons};
 
 use crate::terminal::Terminal;
 
-mod sidebar;
+pub(crate) mod sidebar;
 mod transcript;
 
 use transcript::chat_items_from;
@@ -747,6 +747,29 @@ impl Sessions {
             title: title.to_owned(),
             kind,
         });
+    }
+
+    // a new agent in its own worktree of the pull request's branch, linked to it by the server
+    pub fn checkout_pr(&mut self, group: u64, pr: wire::PrLink, title: String) {
+        let mut settings = self.agent_defaults.clone();
+        settings.worktree = true;
+        self.creating.push_back(Creating {
+            settings: Some(settings),
+            split: false,
+        });
+        self.outbox.push(ClientMsg::CheckoutPr { group, pr, title });
+    }
+
+    pub fn info(&self, id: u64) -> Option<&SessionInfo> {
+        self.infos().find(|s| s.id == id)
+    }
+
+    // where a session's git and gh commands run, its worktree or else its project's folder, with the project
+    pub fn checkout(&self, id: u64) -> Option<(u64, Option<String>)> {
+        let (g, i) = self.locate(id)?;
+        let group = &self.groups[g];
+        let dir = group.sessions[i].worktree.clone().or(group.path.clone());
+        Some((group.id, dir))
     }
 
     // a group is a project folder, named after the folder unless renamed later

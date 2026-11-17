@@ -78,6 +78,18 @@ impl App {
         {
             *run = Some("toggle-terminal");
         }
+        if info.git
+            && IconButton::new(icons::GIT_PULL_REQUEST, "Pull requests")
+                .selected(self.pr_open)
+                .show(&mut actions)
+                .tip(match info.pr {
+                    Some(number) => format!("Pull request #{number}"),
+                    None => "Pull requests".to_owned(),
+                })
+                .clicked()
+        {
+            *run = Some("pull-requests");
+        }
         if info.restartable
             && IconButton::new(icons::ARROW_CLOCKWISE, "Restart")
                 .show(&mut actions)

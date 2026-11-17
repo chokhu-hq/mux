@@ -44,6 +44,22 @@ pub fn command(program: &str) -> std::process::Command {
     }
 }
 
+// a program run in a folder where the server runs, for tools like gh that have no -C of their own
+pub fn command_in(program: &str, dir: &str) -> std::process::Command {
+    match wsl() {
+        Some(distro) => {
+            let mut command = crate::command("wsl.exe");
+            command.args(["-d", &distro, "--cd", dir, "--exec", program]);
+            command
+        }
+        None => {
+            let mut command = crate::command(program);
+            command.current_dir(dir);
+            command
+        }
+    }
+}
+
 // a path made absolute against a folder, where a linux path counts as absolute even when windows doesn't think so
 pub fn join(folder: &str, path: &str) -> String {
     if path.starts_with('/') || std::path::Path::new(path).is_absolute() {

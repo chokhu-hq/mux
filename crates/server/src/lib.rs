@@ -69,6 +69,8 @@ pub enum Event {
     Wake(u64, u64),
     // how spending one of an account's limit resets went
     ResetUsed(Provider, ResetResult),
+    // a pull request's branch was checked out in a session's new worktree, or why it couldn't be
+    PrCheckedOut(u64, mux_core::protocol::PrLink, Result<(), String>),
     // more output from a command an agent left running in the background
     BackgroundOutput {
         session: u64,
@@ -500,6 +502,21 @@ impl Server {
                     self.agent_changed(id);
                 }
             }
+            Event::PrCheckedOut(id, pr, result) => match result {
+                Ok(()) => {
+                    if let Some(info) = self.store.session_mut(id) {
+                        info.pr = Some(pr);
+                        self.changed();
+                    }
+                }
+                Err(reason) => {
+                    self.agent(id).error(format!(
+                        "Couldn't check out pull request #{}: {reason}",
+                        pr.number
+                    ));
+                    self.agent_changed(id);
+                }
+            },
             Event::Files(id, files, refresh) => {
                 let hash = {
                     use std::hash::{Hash, Hasher};

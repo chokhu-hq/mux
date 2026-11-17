@@ -7,7 +7,7 @@ pub(crate) const COMMIT: &str = "Commit the changes you made in this worktree. S
 pub(crate) struct Ship {
     pub id: u64,
     pub worktree: String,
-    pub pushing: Option<mpsc::Receiver<Result<Option<String>, String>>>,
+    pub pushing: Option<mpsc::Receiver<Result<Pushed, String>>>,
     pub error: Option<String>,
 }
 
@@ -22,15 +22,24 @@ impl Ship {
     }
 }
 
-// pushes the worktree's branch, then answers with github's page for opening a pull request, if the remote is on github
+// what a push led to on github
+pub(crate) enum Pushed {
+    Pr(mux_core::protocol::PrLink),
+    // the page for opening one by hand, when gh couldn't
+    Compare(String),
+    // the remote isn't on github
+    Nothing,
+}
+
+// pushes the worktree's branch, then opens a pull request for it with gh or falls back to github's page for one
 pub(crate) fn push(
     worktree: String,
     ctx: eframe::egui::Context,
-) -> mpsc::Receiver<Result<Option<String>, String>> {
+) -> mpsc::Receiver<Result<Pushed, String>> {
     crate::in_background(&ctx, move || push_now(&worktree))
 }
 
-fn push_now(worktree: &str) -> Result<Option<String>, String> {
+fn push_now(worktree: &str) -> Result<Pushed, String> {
     if !git(worktree, &["status", "--porcelain"])?.trim().is_empty() {
         return Err("There are changes that aren't committed yet. Commit them first.".to_owned());
     }
@@ -38,7 +47,13 @@ fn push_now(worktree: &str) -> Result<Option<String>, String> {
     let branch = branch.trim();
     git(worktree, &["push", "--set-upstream", "origin", branch])?;
     let remote = git(worktree, &["remote", "get-url", "origin"])?;
-    Ok(compare_url(remote.trim(), branch))
+    let Some(compare) = compare_url(remote.trim(), branch) else {
+        return Ok(Pushed::Nothing);
+    };
+    Ok(match crate::pr::open_for(worktree, branch) {
+        Some(link) => Pushed::Pr(link),
+        None => Pushed::Compare(compare),
+    })
 }
 
 // git runs where the server does, so it reads the same checkout the agent changed

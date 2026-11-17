@@ -496,7 +496,7 @@ pub(super) fn model_name(models: &Models, session: &SessionInfo) -> String {
     .map_or_else(|| id.to_owned(), |m| m.name.clone())
 }
 
-pub(super) fn ago(updated: u64) -> String {
+pub(crate) fn ago(updated: u64) -> String {
     if updated == 0 {
         return String::new();
     }

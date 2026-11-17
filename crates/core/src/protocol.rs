@@ -8,7 +8,7 @@ use crate::{Access, Provider, SessionKind, SessionStatus};
 
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 // bump on any message change, so a newer app can tell it is talking to an older server
-pub const PROTOCOL: u32 = 38;
+pub const PROTOCOL: u32 = 39;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -31,6 +31,15 @@ pub struct SessionInfo {
     // what an agent has been up to, for the sidebar and its hover card
     #[serde(default)]
     pub summary: Option<AgentSummary>,
+    // the pull request opened for the session's branch, or picked for it
+    #[serde(default)]
+    pub pr: Option<PrLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrLink {
+    pub number: u64,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -595,6 +604,17 @@ pub enum ClientMsg {
     // replaces the mcp servers mux gives its agents
     SetMcpServers {
         servers: Vec<McpServer>,
+    },
+    // links a session to a pull request, or unlinks it with none
+    SetPr {
+        id: u64,
+        pr: Option<PrLink>,
+    },
+    // a new agent in a worktree checked out on the pull request's branch, linked to it
+    CheckoutPr {
+        group: u64,
+        pr: PrLink,
+        title: String,
     },
 }
 

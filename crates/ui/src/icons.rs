@@ -32,6 +32,7 @@ pub const FOLDER_OPEN: char = '\u{e256}';
 pub const GEAR: char = '\u{e270}';
 pub const GIT_BRANCH: char = '\u{e278}';
 pub const GIT_DIFF: char = '\u{e27c}';
+pub const GIT_PULL_REQUEST: char = '\u{e282}';
 pub const GLOBE: char = '\u{e288}';
 pub const IMAGE: char = '\u{e2ca}';
 pub const INFO: char = '\u{e2ce}';
@@ -71,7 +72,7 @@ pub const WARNING_CIRCLE: char = '\u{e4e2}';
 pub const X: char = '\u{e4f6}';
 pub const X_CIRCLE: char = '\u{e4f8}';
 
-pub const ALL: [(&str, char); 70] = [
+pub const ALL: [(&str, char); 71] = [
     ("arrows-in-line-vertical", ARROWS_IN_LINE_VERTICAL),
     ("arrows-left-right", ARROWS_LEFT_RIGHT),
     ("arrow-clockwise", ARROW_CLOCKWISE),
@@ -105,6 +106,7 @@ pub const ALL: [(&str, char); 70] = [
     ("gear", GEAR),
     ("git-branch", GIT_BRANCH),
     ("git-diff", GIT_DIFF),
+    ("git-pull-request", GIT_PULL_REQUEST),
     ("globe", GLOBE),
     ("image", IMAGE),
     ("info", INFO),

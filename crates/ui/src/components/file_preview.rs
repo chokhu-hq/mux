@@ -23,6 +23,7 @@ const WHOLE: u64 = 32 * 1024 * 1024;
 const HEX: usize = 64 * 1024;
 const MAX_TABLE_ROWS: usize = 200_000;
 const MAX_COLUMNS: usize = 200;
+const HEAD_ROW: f32 = 28.0;
 const CRUMBS: f32 = 40.0;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -479,12 +480,13 @@ impl FilePreview {
         let digits = rows.len().to_string().len() as f32;
         let cell = |ui: &mut Ui, value: &str, strong: bool| {
             let rich = RichText::new(value.replace('\n', " ")).font(if strong {
-                font::medium(text::MD)
+                font::semibold(text::SM + 1.0)
             } else {
                 font::regular(text::MD)
             });
             ui.add(
-                egui::Label::new(rich.color(if strong { p.text } else { p.text_muted })).truncate(),
+                egui::Label::new(rich.color(if strong { p.text_faint } else { p.text_muted }))
+                    .truncate(),
             );
         };
         let rect = ui.max_rect().shrink2(vec2(space::SM, space::XS));
@@ -493,6 +495,18 @@ impl FilePreview {
             .id_salt(("table", self.id))
             .auto_shrink(false)
             .show(&mut inner, |ui| {
+                // the header stays put above the scrolling rows, on its own band with a rule under it
+                let band = Rect::from_x_y_ranges(
+                    ui.clip_rect().x_range(),
+                    ui.cursor().top()..=ui.cursor().top() + HEAD_ROW,
+                );
+                ui.painter()
+                    .rect_filled(band, 0.0, theme::tint(p, theme::fill::QUIET));
+                ui.painter().hline(
+                    band.x_range(),
+                    band.bottom() - 0.5,
+                    egui::Stroke::new(1.0, p.border),
+                );
                 let mut table = TableBuilder::new(ui)
                     .id_salt(("table-body", self.id))
                     .striped(true)
@@ -504,7 +518,7 @@ impl FilePreview {
                     table = table.column(Column::initial(140.0).at_least(40.0).clip(true));
                 }
                 table
-                    .header(26.0, |mut header| {
+                    .header(HEAD_ROW, |mut header| {
                         header.col(|_| {});
                         for i in 0..columns {
                             header.col(|ui| cell(ui, head.get(i).map_or("", String::as_str), true));

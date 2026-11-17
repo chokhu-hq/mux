@@ -10,6 +10,7 @@ use super::*;
 pub(crate) const CHUNK: u64 = 1024 * 1024;
 const TREE: f32 = 280.0;
 const SEARCH_LIMIT: u32 = 200;
+const CHAT_ROOM: f32 = 420.0;
 
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
@@ -243,7 +244,8 @@ impl App {
         let full = self
             .files_width
             .clamp(420.0, (main.width() * 0.75).max(420.0))
-            .min((main.width() - 320.0).max(0.0));
+            // the chat keeps room for its messages where the window has it
+            .min((main.width() - CHAT_ROOM).max(360.0));
         let left = main.right() - full * t;
         let edge = if open { main.right() - full } else { left };
         let handle = Rect::from_min_max(
@@ -277,40 +279,21 @@ impl App {
             panel.y_range(),
             egui::Stroke::new(1.0, p.border),
         );
-        let header = Rect::from_min_size(panel.min, vec2(full, FOOTER_ROW + space::SM));
-        let mut head = pane.new_child(
-            UiBuilder::new()
-                .id_salt("files-header")
-                .max_rect(header.shrink2(vec2(space::MD, 0.0)))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        head.label(
-            egui::RichText::new(icons::FOLDER_OPEN.to_string())
-                .font(font::icon(icon::MD))
-                .color(p.text_muted),
-        );
-        head.label(
-            egui::RichText::new("Files")
-                .font(font::medium(text::MD))
-                .color(p.text),
-        );
-        head.label(
-            egui::RichText::new(mux_core::display_path(&files.root))
-                .font(font::regular(text::SM + 1.0))
-                .color(p.text_faint),
-        );
+        let header = Rect::from_min_size(panel.min, vec2(full, theme::control::HEADER));
         let mut close = false;
-        head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut head = panel_header(&mut pane, header, "files-header", |ui| {
             close = IconButton::new(icons::X, "Close")
                 .show(ui)
                 .tip("Close")
                 .clicked();
         });
-        pane.painter().hline(
-            header.x_range(),
-            header.bottom() - 0.5,
-            egui::Stroke::new(1.0, p.border),
-        );
+        panel_title(&mut head, icons::FOLDER_OPEN, "Files");
+        head.label(
+            egui::RichText::new(mux_core::paths::file_name(&files.root))
+                .font(font::regular(text::SM + 1.0))
+                .color(p.text_faint),
+        )
+        .tip(mux_core::display_path(&files.root));
 
         let body = Rect::from_min_max(pos2(panel.left() + 1.0, header.bottom()), panel.max);
         let tree_width = TREE.min(body.width() * 0.45);

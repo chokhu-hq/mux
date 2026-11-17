@@ -1267,6 +1267,58 @@ pub fn sign_in_command(provider: Provider) -> &'static str {
 
 const FOOTER_ROW: f32 = 32.0;
 
+// the strip along the top of a side panel, with `buttons` laid out from its right edge and the
+// returned row from its left for the title, so every panel's header lines up the same way
+fn panel_header(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    salt: &str,
+    buttons: impl FnOnce(&mut egui::Ui),
+) -> egui::Ui {
+    let p = theme::palette(ui);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        egui::Stroke::new(1.0, p.border),
+    );
+    let inner = rect.shrink2(vec2(space::MD, 0.0));
+    let mut right = ui.new_child(
+        UiBuilder::new()
+            .id_salt((salt, "buttons"))
+            .max_rect(inner)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    right.spacing_mut().item_spacing.x = space::XS;
+    buttons(&mut right);
+    let end = right.min_rect().left() - space::SM;
+    let title = Rect::from_min_max(inner.min, pos2(end.max(inner.left()), inner.bottom()));
+    let mut left = ui.new_child(
+        UiBuilder::new()
+            .id_salt(salt)
+            .max_rect(title)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    left.spacing_mut().item_spacing.x = space::SM;
+    left.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+    left.set_clip_rect(title.intersect(ui.clip_rect()));
+    left
+}
+
+// a side panel's icon and name, the way every panel header starts
+fn panel_title(ui: &mut egui::Ui, glyph: char, title: &str) {
+    let p = theme::palette(ui);
+    ui.label(
+        egui::RichText::new(glyph.to_string())
+            .font(font::icon(icon::MD))
+            .color(p.text_muted),
+    );
+    ui.label(
+        egui::RichText::new(title)
+            .font(font::medium(text::MD))
+            .color(p.text),
+    );
+}
+
 // a quiet row above settings, there only while a newer release is out
 impl App {
     // puts the frosted background in or takes it out as transparency is turned on and off, returning whether it's on

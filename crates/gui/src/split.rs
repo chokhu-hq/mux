@@ -52,54 +52,22 @@ impl App {
             egui::Stroke::new(1.0, p.border),
         );
 
-        let header = Rect::from_min_size(panel.min, vec2(full, FOOTER_ROW + space::SM));
+        let header = Rect::from_min_size(panel.min, vec2(full, theme::control::HEADER));
         let mut close = false;
         let codex_reset = self.sessions.reset_offer(Provider::Codex);
         let Some((info, local, outbox, models, folder)) = self.sessions.split_session(id) else {
             self.split_shown = None;
             return main;
         };
-        let mut head = pane.new_child(
-            UiBuilder::new()
-                .id_salt("split-header")
-                .max_rect(header.shrink2(vec2(space::MD, 0.0)))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
         let agent = info.kind == SessionKind::Agent;
         let worktree = info.worktree.clone();
-        if agent {
-            let (mark, _) =
-                head.allocate_exact_size(vec2(icon::MD, icon::MD), egui::Sense::hover());
-            provider_mark(
-                head.painter(),
-                mark.center(),
-                icon::MD,
-                info.provider,
-                provider_color(info.provider, p.text_muted),
-            );
-        } else {
-            let glyph = match info.kind {
-                SessionKind::Task => icons::PLAY,
-                _ => icons::TERMINAL,
-            };
-            head.label(
-                egui::RichText::new(glyph.to_string())
-                    .font(font::icon(icon::MD))
-                    .color(p.text_faint),
-            );
-        }
-        head.label(
-            egui::RichText::new(&info.title)
-                .font(font::medium(text::MD))
-                .color(p.text_muted),
-        );
         let ended = sessions::ended(info.status);
         // a shell that exits takes its pane with it, the way it closes a terminal tab
         if ended && info.kind == SessionKind::Shell {
             close = true;
         }
         let mut restart = false;
-        head.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut head = panel_header(&mut pane, header, "split-header", |ui| {
             close |= IconButton::new(icons::X, "Close")
                 .show(ui)
                 .tip_with_shortcut("Close the pane", TERMINAL)
@@ -111,11 +79,28 @@ impl App {
                     .tip("Run it again")
                     .clicked();
         });
-        pane.painter().hline(
-            header.x_range(),
-            header.bottom(),
-            egui::Stroke::new(1.0, p.border),
-        );
+        if agent {
+            let (mark, _) =
+                head.allocate_exact_size(vec2(icon::MD, icon::MD), egui::Sense::hover());
+            provider_mark(
+                head.painter(),
+                mark.center(),
+                icon::MD,
+                info.provider,
+                provider_color(info.provider, p.text_muted),
+            );
+            head.label(
+                egui::RichText::new(&info.title)
+                    .font(font::medium(text::MD))
+                    .color(p.text),
+            );
+        } else {
+            let glyph = match info.kind {
+                SessionKind::Task => icons::PLAY,
+                _ => icons::TERMINAL,
+            };
+            panel_title(&mut head, glyph, &info.title);
+        }
 
         if agent {
             let body = Rect::from_min_max(pos2(panel.left(), header.bottom()), panel.max);

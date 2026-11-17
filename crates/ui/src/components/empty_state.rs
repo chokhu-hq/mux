@@ -52,9 +52,14 @@ impl<'a> EmptyState<'a> {
             );
             if let Some(detail) = self.detail {
                 ui.add_space(space::XS);
-                // laid out up front at a readable width, then centred as one block
-                let mut job =
-                    LayoutJob::simple(detail, font::regular(text::MD), p.text_muted, DETAIL_WIDTH);
+                // laid out up front at a readable width that still fits a narrow pane, then centred as one block
+                let width = DETAIL_WIDTH.min(ui.available_width() - space::XL * 2.0);
+                let mut job = LayoutJob::simple(
+                    detail,
+                    font::regular(text::MD),
+                    p.text_muted,
+                    width.max(space::XL),
+                );
                 job.halign = Align::Center;
                 let galley = ui.painter().layout_job(job);
                 ui.add(Label::new(galley));
